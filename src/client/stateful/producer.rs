@@ -323,6 +323,23 @@ impl Producer {
                 ),
             );
         }
+        if let Some(cache) = &snapshot.flags.cache {
+            let mut active_flags = Vec::new();
+            for (key, flag) in &cache.flags {
+                let value = match crate::feature_flag_evaluations::flag_value_for(&flag.record) {
+                    crate::FlagValue::Boolean(value) => Value::Bool(value),
+                    crate::FlagValue::String(value) => Value::String(value),
+                };
+                event.insert_prop_default(format!("$feature/{key}"), value);
+                if flag.served() {
+                    active_flags.push(Value::String(key.clone()));
+                }
+            }
+            if !active_flags.is_empty() {
+                active_flags.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                event.insert_prop_default("$active_feature_flags", Value::Array(active_flags));
+            }
+        }
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
         }
