@@ -509,6 +509,50 @@ fn an_acceptance_that_doesnt_confirm_the_schedule_fails_with_the_message_id() {
     assert_eq!(server.requests().len(), 1);
 }
 
+#[cfg(feature = "tls")]
+#[test]
+fn a_refused_scheduled_at_is_reported_and_never_sent_now() {
+    for (code, detail) in [
+        ("scheduled_too_far", "scheduled_at is more than 7 days ahead."),
+        // What PostHog answers while scheduled sends are off for the project.
+        ("invalid", "Scheduled sends are off for this project, so PostHog didn't send this request's email."),
+    ] {
+        let server = ScriptedServer::start(vec![
+            Answer::json(
+                400,
+                json!({
+                    "type": "validation_error",
+                    "code": code,
+                    "detail": detail,
+                    "attr": "scheduled_at",
+                }),
+            ),
+            accepted(),
+        ]);
+        let cloud = email_support::CloudFront::start_blocking(&server.url);
+        let client = cloud_client(&cloud);
+
+        let error = client
+            .emails()
+            .send(
+                TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                    .scheduled_at(utc("2027-12-01T09:00:00Z")),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), code);
+        assert_eq!(error.status(), Some(400));
+        assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+        assert_eq!(error.field(), Some("scheduled_at"));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "{}", code);
+        assert_eq!(
+            requests[0].json()["scheduled_at"],
+            "2027-12-01T09:00:00.000Z"
+        );
+    }
+}
+
 #[test]
 fn scheduling_off_posthog_cloud_makes_no_request() {
     let server = ScriptedServer::start(vec![accepted()]);

@@ -574,13 +574,16 @@ impl SendEmailResult {
     }
 }
 
-/// Whether an accepted email goes out now or later.
+/// Whether PostHog took the email to go out now or later, as of the first
+/// send with its idempotency key. A replay with that key returns the same
+/// status, also after the email went out: read
+/// [`Emails::get`](crate::Emails::get) for where the email is now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SendEmailStatus {
     /// The email goes out now.
     Queued,
-    /// The email waits for its [`scheduled_at`](SendEmailResult::scheduled_at).
+    /// The email goes out at its [`scheduled_at`](SendEmailResult::scheduled_at).
     Scheduled,
 }
 

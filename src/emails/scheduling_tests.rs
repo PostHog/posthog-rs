@@ -7,7 +7,7 @@ mod email_support;
 
 use chrono::{DateTime, Duration, Utc};
 use email_support::{
-    accepted, unavailable, Answer, CloudFront, FakePostHog, ScriptedServer, MESSAGE_ID, TEMPLATE_ID,
+    unavailable, Answer, CloudFront, FakePostHog, ScriptedServer, MESSAGE_ID, TEMPLATE_ID,
 };
 use serde_json::json;
 
@@ -125,14 +125,17 @@ mod async_client {
     }
 
     #[tokio::test]
-    async fn a_send_works_with_a_clock_before_1970() {
-        let server = ScriptedServer::start_async(vec![accepted()]).await;
+    async fn a_scheduled_send_works_with_a_clock_before_1970() {
+        let server = ScriptedServer::start_async(vec![sent_now()]).await;
         let (_cloud, client) = cloud_client(&server, "https://us.posthog.com").await;
         let _time = virtual_time::start_at(before_1970());
 
         let sent = client
             .emails()
-            .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
+            .send(
+                TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                    .scheduled_at(before_1970() + Duration::seconds(30)),
+            )
             .await
             .unwrap();
 
@@ -255,14 +258,17 @@ mod blocking_client {
     }
 
     #[test]
-    fn a_send_works_with_a_clock_before_1970() {
-        let server = ScriptedServer::start(vec![accepted()]);
+    fn a_scheduled_send_works_with_a_clock_before_1970() {
+        let server = ScriptedServer::start(vec![sent_now()]);
         let (_cloud, client) = cloud_client(&server);
         let _time = virtual_time::start_at(before_1970());
 
         let sent = client
             .emails()
-            .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
+            .send(
+                TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                    .scheduled_at(before_1970() + Duration::seconds(30)),
+            )
             .unwrap();
 
         assert_eq!(sent.status(), SendEmailStatus::Queued);

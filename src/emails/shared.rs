@@ -886,10 +886,25 @@ const CLOCK_SKEW_SECONDS: i64 = 60;
 /// The send's result. For a send with `scheduled_at`, PostHog must confirm
 /// the time it waits for, or answer `queued` with `null` when the time had
 /// passed: any other acceptance may send the email at another time.
+/// A scheduled send's time, and when the client first sent it.
+pub(crate) struct Schedule {
+    pub(crate) at: DateTime<Utc>,
+    pub(crate) first_attempt_at: DateTime<Utc>,
+}
+
+impl Schedule {
+    /// Reads the clock only for a send that has a time.
+    pub(crate) fn of(scheduled_at: Option<DateTime<Utc>>) -> Option<Self> {
+        scheduled_at.map(|at| Self {
+            at,
+            first_attempt_at: clock::now(),
+        })
+    }
+}
+
 pub(crate) fn parse_send_reply(
     reply: Accepted,
-    scheduled_at: Option<DateTime<Utc>>,
-    first_attempt_at: DateTime<Utc>,
+    schedule: Option<Schedule>,
 ) -> Result<SendEmailResult, EmailError> {
     let Accepted { status, fields } = reply;
     let id = text(&fields, "message_id").ok_or_else(|| {
@@ -914,9 +929,12 @@ pub(crate) fn parse_send_reply(
             .collect(),
         _ => Vec::new(),
     };
-    let confirmed = match scheduled_at {
+    let confirmed = match schedule {
         None => None,
-        Some(requested) => match (fields.get("status"), fields.get("scheduled_at")) {
+        Some(Schedule {
+            at: requested,
+            first_attempt_at,
+        }) => match (fields.get("status"), fields.get("scheduled_at")) {
             (Some(Value::String(answered)), Some(Value::Null))
                 if answered == "queued"
                     && requested <= first_attempt_at + TimeDelta::seconds(CLOCK_SKEW_SECONDS) =>
@@ -1163,7 +1181,7 @@ mod tests {
     }
 
     fn send_reply(reply: Reply) -> Result<SendEmailResult, EmailError> {
-        accept(reply).and_then(|reply| parse_send_reply(reply, None, Utc::now()))
+        accept(reply).and_then(|reply| parse_send_reply(reply, None))
     }
 
     fn status_reply(reply: Reply) -> Result<EmailStatus, EmailError> {

@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -805,22 +805,33 @@ impl CloudFront {
 /// test can tell that a client reached no host at all.
 pub struct ConnectionCounter {
     url: String,
+    address: std::net::SocketAddr,
     connections: Arc<AtomicUsize>,
+    stopped: Arc<AtomicBool>,
 }
 
 impl ConnectionCounter {
     pub fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let address = listener.local_addr().unwrap();
         let connections = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&connections);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (counted, stopping) = (Arc::clone(&connections), Arc::clone(&stopped));
         std::thread::spawn(move || {
             for stream in listener.incoming() {
+                if stopping.load(Ordering::SeqCst) {
+                    break;
+                }
                 counted.fetch_add(1, Ordering::SeqCst);
                 drop(stream);
             }
         });
-        Self { url, connections }
+        Self {
+            url: format!("http://{address}"),
+            address,
+            connections,
+            stopped,
+        }
     }
 
     /// A client whose every request, to any host, goes through this proxy.
@@ -834,6 +845,15 @@ impl ConnectionCounter {
 
     pub fn connections(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ConnectionCounter {
+    /// Wakes the listener's thread with one last connection, so the thread
+    /// ends and closes the socket.
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(self.address);
     }
 }
 

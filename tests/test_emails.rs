@@ -1405,6 +1405,7 @@ async fn cloud_with(answers: Vec<Answer>, app_host: &str) -> (ScriptedServer, po
     (server, client)
 }
 
+#[cfg(feature = "tls")]
 fn sent_now() -> Answer {
     Answer::json(
         202,
@@ -1412,6 +1413,7 @@ fn sent_now() -> Answer {
     )
 }
 
+#[cfg(feature = "tls")]
 fn scheduled_for(time: &str) -> Answer {
     Answer::json(
         202,
