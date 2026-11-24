@@ -164,6 +164,8 @@ async fn refuses_what_a_batch_does_not_take_before_any_request() {
     let client = client_for(&server).await;
     let mut repeated = recipients(3);
     repeated[2] = BatchRecipient::new("again@example.com").idempotency_key("key-0");
+    let mut too_many_with_bad_data = recipients(101);
+    too_many_with_bad_data[0] = BatchRecipient::new("a@example.com").template_data(json!([1]));
     let cases: Vec<(posthog::SendBatch, &str, &str, &str)> = vec![
         (
             TemplateBatch::new(TEMPLATE_ID, Vec::new()).into(),
@@ -173,6 +175,12 @@ async fn refuses_what_a_batch_does_not_take_before_any_request() {
         ),
         (
             TemplateBatch::new(TEMPLATE_ID, recipients(101)).into(),
+            "invalid_recipients",
+            "recipients",
+            "recipients holds 101 recipients, and a batch takes at most 100.",
+        ),
+        (
+            TemplateBatch::new(TEMPLATE_ID, too_many_with_bad_data).into(),
             "invalid_recipients",
             "recipients",
             "recipients holds 101 recipients, and a batch takes at most 100.",
@@ -330,16 +338,22 @@ async fn a_batch_posthog_finds_too_large_returns_its_413() {
 #[tokio::test]
 async fn shared_data_posthog_finds_too_large_returns_its_400_and_own_fix() {
     let detail = "The content or `message_data` that a batch sends to every recipient can be at most 256 KiB. Send larger emails one at a time.";
-    let server = ScriptedServer::start_async(vec![Answer::json(
-        400,
-        json!({"type": "invalid_request", "code": "content_too_large", "detail": detail}),
-    )])
+    let server = ScriptedServer::start_async(vec![Answer::of_request(move |request| {
+        if request.json()["message_data"].to_string().len() > 256 * 1024 {
+            Answer::json(
+                400,
+                json!({"type": "invalid_request", "code": "content_too_large", "detail": detail}),
+            )
+        } else {
+            all_queued()
+        }
+    })])
     .await;
     let client = client_for(&server).await;
 
     let error = client
         .emails()
-        .batch(template(recipients(1)))
+        .batch(template(recipients(1)).template_data(json!({"note": "x".repeat(257 * 1024)})))
         .await
         .unwrap_err();
 

@@ -261,7 +261,8 @@ mod async_client {
     }
 
     /// Sends `batch` while the client shuts down once its first request
-    /// arrived, then lets the held answer go.
+    /// arrived, then lets the held answer go. A batch that returns before its
+    /// request arrives fails the test.
     async fn batch_racing_shutdown(
         answer: Answer,
         then: Vec<Answer>,
@@ -276,12 +277,15 @@ mod async_client {
         let _time = virtual_time::start_at(start());
 
         let emails = client.emails();
-        let (sent, ()) = tokio::join!(emails.batch(batch), async {
-            arrival.recv().await;
-            client.shutdown().await;
-            release.send(()).unwrap();
-        });
-        (sent, server)
+        let sending = emails.batch(batch);
+        tokio::pin!(sending);
+        tokio::select! {
+            sent = &mut sending => panic!("the batch returned before its request arrived: {:?}", sent.map(|_| ())),
+            _ = arrival.recv() => {}
+        }
+        client.shutdown().await;
+        release.send(()).unwrap();
+        (sending.await, server)
     }
 
     #[tokio::test]

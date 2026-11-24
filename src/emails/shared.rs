@@ -1131,6 +1131,10 @@ pub(crate) struct PreparedBatch {
 }
 
 pub(crate) fn prepare_batch(batch: SendBatch) -> Result<PreparedBatch, EmailError> {
+    check_recipient_count(match &batch {
+        SendBatch::Template(batch) => batch.recipients.len(),
+        SendBatch::Code(batch) => batch.recipients.len(),
+    })?;
     let (mut body, recipients, max_retries) = match batch {
         SendBatch::Template(batch) => {
             let body = template_body(&batch.template_id, batch.template_data.as_ref())?;
@@ -1177,23 +1181,20 @@ pub(crate) fn prepare_batch(batch: SendBatch) -> Result<PreparedBatch, EmailErro
     })
 }
 
-/// Checks every recipient and gives each a key, before the request.
-fn batch_recipients(
-    recipients: Vec<BatchRecipient>,
-) -> Result<(Vec<Value>, Vec<BatchEmailResult>), EmailError> {
-    if recipients.is_empty() {
+/// Checks the recipient count before anything else about the batch.
+fn check_recipient_count(count: usize) -> Result<(), EmailError> {
+    if count == 0 {
         return Err(EmailError::invalid(
             "invalid_recipients",
             "recipients must hold at least one recipient.",
             "recipients",
         ));
     }
-    if recipients.len() > BATCH_MAX_RECIPIENTS {
+    if count > BATCH_MAX_RECIPIENTS {
         return Err(EmailError::invalid(
             "invalid_recipients",
             format!(
-                "recipients holds {} recipients, and a batch takes at most {BATCH_MAX_RECIPIENTS}.",
-                recipients.len()
+                "recipients holds {count} recipients, and a batch takes at most {BATCH_MAX_RECIPIENTS}."
             ),
             "recipients",
         )
@@ -1205,6 +1206,13 @@ fn batch_recipients(
             None,
         ));
     }
+    Ok(())
+}
+
+/// Checks every recipient and gives each a key, before the request.
+fn batch_recipients(
+    recipients: Vec<BatchRecipient>,
+) -> Result<(Vec<Value>, Vec<BatchEmailResult>), EmailError> {
     let mut first_with_key = HashMap::new();
     let mut wire = Vec::with_capacity(recipients.len());
     let mut results = Vec::with_capacity(recipients.len());
