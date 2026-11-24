@@ -590,10 +590,10 @@ impl SendEmailResult {
     }
 }
 
-/// Whether PostHog took the email to go out now or later, as of the first
-/// send with its idempotency key. A replay with that key returns the same
-/// status, also after the email went out: read
-/// [`Emails::get`](crate::Emails::get) for where the email is now.
+/// Whether PostHog took the email to go out now or later. A replay with the
+/// same idempotency key returns the same message ID, but its status can
+/// differ from the first send's, such as `Queued` for a replay around the due
+/// time: read [`Emails::get`](crate::Emails::get) for where the email is now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SendEmailStatus {
