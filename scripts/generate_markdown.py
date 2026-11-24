@@ -62,6 +62,18 @@ class Docs:
             k = re.escape(key)
             text = re.sub(rf"\[([^\]]*)\](?:\({k}\)|\[{k}\])", lambda m: f"[{m[1]}]{dest}" if dest else m[1], text)
             text = re.sub(rf"\[{k}\](?![(\[])", lambda _: f"[{key}]{dest}" if dest else key, text)
+        # Macros like derive_builder emit raw rustdoc HTML links (e.g. `struct.ClientOptions.html`)
+        # outside `item["links"]`; rewrite them to the same on-page headings or plain text.
+        heading_dests = {label: f"(#{anchor(f'`{label}`')})" for label in HEADINGS.values()}
+        text = re.sub(
+            r"\[([^\]]+)\]\((?:struct|enum|trait|type|fn|constant|macro|primitive|derive)\.([A-Za-z0-9_]+)\.html(?:#(?:method|tymethod|structfield|variant)\.([A-Za-z0-9_]+)|#[^)]*)?\)",
+            lambda m: (
+                f"[{m[1]}]{dest}"
+                if (dest := (heading_dests.get(f"{m[2]}::{m[3]}") if m[3] else None) or heading_dests.get(m[2]))
+                else m[1]
+            ),
+            text,
+        )
         return text.strip().replace("<br>", "<br />")
 
 
