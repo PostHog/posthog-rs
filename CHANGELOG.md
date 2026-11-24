@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 1.4.0 — 2026-11-24
+
+### Minor changes
+
+- [5f0633b](https://github.com/posthog/posthog-rs/commit/5f0633b6536df22cf92df0c687c90d0eebbfcae1) Add persistent event delivery for stateful clients and report storage failures through `on_error`. — Thanks @dustinbyrne!
+
 ## 1.3.0 — 2026-11-20
 
 ### Minor changes
