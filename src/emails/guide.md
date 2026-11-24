@@ -89,8 +89,9 @@ first attempt.
 
 Work out the time once and reuse it on your own retries: the idempotency key
 covers the time in UTC to the millisecond, so the same key with a time in
-another millisecond fails with `idempotency_key_reused`, and two times that
-round to the same millisecond replay the same send. To stop scheduled
+another millisecond fails with `idempotency_key_reused`. Two times that
+round to the same millisecond replay the same send, as long as the rest of
+the email is the same and PostHog still holds the key. To stop scheduled
 emails before they go out, disable the email's workflow in PostHog until
 they have reached a final status. That refuses every new send of it meanwhile.
 
