@@ -124,7 +124,7 @@ Construct an async PostHog client from an API key or [`ClientOptions`].
 
 #### Returns
 
-A [`Client`] that performs capture and feature flag requests asynchronously.
+A `Client` that performs capture and feature flag requests asynchronously.
 
 #### Remarks
 
@@ -134,7 +134,6 @@ If the HTTP client cannot be built, logs a warning and creates a disabled
 client instead.
 
 [`ClientOptions`]: #clientoptions
-[`Client`]: #client
 
 ### `posthog_rs::init_global`
 
@@ -159,10 +158,9 @@ this also installs a process-wide panic hook that captures panics as
 
 #### Errors
 
-Returns [`Error::AlreadyInitialized`] if called more than once.
+Returns `Error::AlreadyInitialized` if called more than once.
 
 [`ClientOptions`]: #clientoptions
-[`Error::AlreadyInitialized`]: #erroralreadyinitialized
 
 ## Capture
 
@@ -369,7 +367,7 @@ The error's type, message, and full `source()` chain are sent as
 `$exception_list`, with a stacktrace of the capture site attached to
 the first entry (see `ErrorTrackingOptions::capture_stacktrace`).
 
-Accepts any [`std::error::Error`], including `&dyn Error`. A
+Accepts any `std::error::Error`, including `&dyn Error`. A
 `Box<dyn Error>` does not implement `Error` itself, so pass the
 dereferenced trait object: `capture_exception(&*boxed)`.
 
@@ -386,7 +384,6 @@ let error = std::io::Error::other("checkout failed");
 client.capture_exception(&error).await?;
 ```
 
-[`std::error::Error`]: #stderrorerror
 [`Client::capture_exception_with`]: #clientcapture_exception_with
 
 ### `Client::capture_exception_with`
@@ -521,11 +518,9 @@ emit `$feature_flag_called` events.
 
 #### Errors
 
-Returns [`Error::Connection`] for request failures and
-[`Error::Serialization`] when the response cannot be parsed.
+Returns `Error::Connection` for request failures and
+`Error::Serialization` when the response cannot be parsed.
 
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
 
 ### `FeatureFlagEvaluations::get_flag_payload`
 
@@ -571,7 +566,7 @@ Get all remote feature flags and payloads for a user.
 
 For new code, prefer [`Client::evaluate_flags`] so flag reads are
 deduplicated and can be attached to captured events with
-[`Event::with_flags`](crate::Event::with_flags).
+[`Event::with_flags`](#eventwith_flags).
 
 #### Parameters
 
@@ -589,13 +584,11 @@ key. Disabled clients return two empty maps.
 
 #### Errors
 
-Returns [`Error::Connection`] for request failures or non-success HTTP
-statuses, and [`Error::Serialization`] when the response cannot be
+Returns `Error::Connection` for request failures or non-success HTTP
+statuses, and `Error::Serialization` when the response cannot be
 parsed.
 
-[crate::Event::with_flags]: #crateeventwith_flags
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
+[crate::Event::with_flags]: #eventwith_flags
 [`Client::evaluate_flags`]: #clientevaluate_flags
 
 ## Evaluate flags
@@ -631,16 +624,14 @@ without an extra `/flags` request.
 
 #### Errors
 
-Returns [`Error::Connection`] or [`Error::Serialization`] when remote
+Returns `Error::Connection` or `Error::Serialization` when remote
 evaluation is required and the `/flags` request fails before any local
 results are available.
 
 
-[crate::Event::with_flags]: #crateeventwith_flags
+[crate::Event::with_flags]: #eventwith_flags
 [`Client::capture`]: #clientcapture
-[`Error::Connection`]: #errorconnection
 [`FeatureFlagEvaluations`]: #featureflagevaluations
-[`Error::Serialization`]: #errorserialization
 
 ## Group identify
 
@@ -668,7 +659,7 @@ Fire-and-forget, like [`Client::capture`], for a blank `group_type` or
 
 #### Errors
 
-Returns [`Error::Serialization`] if `properties` fails to serialize to
+Returns `Error::Serialization` if `properties` fails to serialize to
 JSON, or if it does not serialize to a JSON object (PostHog requires
 `$group_set` to be an object).
 
@@ -690,7 +681,6 @@ client.group_identify(
 ```
 
 [`Client::capture`]: #clientcapture
-[`Error::Serialization`]: #errorserialization
 
 ## Is feature enabled
 
@@ -774,10 +764,9 @@ of its conditions) targets a group; pass empty maps for person flags.
 
 #### Errors
 
-Returns [`Error::InconclusiveMatch`] when the flag cannot be evaluated
+Returns `Error::InconclusiveMatch` when the flag cannot be evaluated
 locally with the supplied context.
 
-[`Error::InconclusiveMatch`]: #errorinconclusivematch
 
 ## SDK utils
 
@@ -913,9 +902,8 @@ Manages PostHog API endpoints and host configuration.
 
 This low-level helper normalizes app hosts such as
 `https://us.posthog.com` to ingestion hosts such as
-[`US_INGESTION_ENDPOINT`].
+`US_INGESTION_ENDPOINT`.
 
-[`US_INGESTION_ENDPOINT`]: #us_ingestion_endpoint
 
 ### `EndpointManager::new`
 
@@ -1003,7 +991,7 @@ pub struct FeatureFlagEvaluations
 
 A snapshot of evaluated feature flags for one `distinct_id`.
 
-Returned by [`Client::evaluate_flags`](crate::Client::evaluate_flags). Reading
+Returned by [`Client::evaluate_flags`](#clientevaluate_flags). Reading
 flags via [`is_enabled`] or [`get_flag`] both records the access (so it can be
 later attached to a capture event) and emits a deduplicated
 `$feature_flag_called` event. [`get_flag_payload`] is intentionally event-free.
@@ -1011,7 +999,7 @@ later attached to a capture event) and emits a deduplicated
 
 [FeatureFlagEvaluations::get_flag_payload]: #featureflagevaluationsget_flag_payload
 [FeatureFlagEvaluations::get_flag]: #featureflagevaluationsget_flag
-[crate::Client::evaluate_flags]: #crateclientevaluate_flags
+[crate::Client::evaluate_flags]: #clientevaluate_flags
 [FeatureFlagEvaluations::is_enabled]: #featureflagevaluationsis_enabled
 
 ### `FeatureFlagEvaluations::keys`
@@ -1029,14 +1017,12 @@ pub fn only_accessed(&self) -> Self
 ```
 
 A clone of the snapshot containing only flags whose values were read via
-[`is_enabled`](Self::is_enabled) or [`get_flag`](Self::get_flag) before
+[`is_enabled`](#featureflagevaluationsis_enabled) or [`get_flag`](#featureflagevaluationsget_flag) before
 this call.
 
 Order-dependent: if nothing has been accessed yet, the returned snapshot
 is empty. Pre-access the flags you want to attach before calling this.
 
-[Self::get_flag]: #selfget_flag
-[Self::is_enabled]: #selfis_enabled
 
 ### `FeatureFlagEvaluations::only`
 
@@ -1047,10 +1033,10 @@ pub fn only(&self, keys: &[&str]) -> Self
 A clone of the snapshot containing only the listed `keys` (preserving
 records). Unknown keys are dropped and surfaced via a single warning.
 
-Use this before [`Event::with_flags`](crate::Event::with_flags) to limit
+Use this before [`Event::with_flags`](#eventwith_flags) to limit
 the `$feature/<key>` properties attached to a captured event.
 
-[crate::Event::with_flags]: #crateeventwith_flags
+[crate::Event::with_flags]: #eventwith_flags
 
 ## FlagPoller
 
@@ -1078,15 +1064,13 @@ pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self
 Create a synchronous flag definition poller.
 
 If the HTTP client cannot be built, logs a warning and leaves polling
-disabled. [`Self::load_flags`] then returns [`Error::Connection`].
+disabled. `Self::load_flags` then returns `Error::Connection`.
 
 #### Parameters
 
 - `config`: Credentials, host, polling interval, and request timeout.
 - `cache`: Shared cache updated by the poller.
 
-[`Self::load_flags`]: #selfload_flags
-[`Error::Connection`]: #errorconnection
 
 ### `FlagPoller::start`
 
@@ -1111,12 +1095,10 @@ Load flags synchronously and update the cache once.
 
 #### Errors
 
-Returns [`Error::Connection`] for request failures or non-success HTTP
-statuses, and [`Error::Serialization`] when the response cannot be
+Returns `Error::Connection` for request failures or non-success HTTP
+statuses, and `Error::Serialization` when the response cannot be
 parsed.
 
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
 
 ### `FlagPoller::stop`
 
@@ -1362,12 +1344,12 @@ pub struct CaptureSummary
 The outcome of an immediate capture ([`Client::capture_immediate`] /
 [`Client::capture_batch_immediate`]), returned once the SDK has a terminal
 result for the batch — the request succeeded, or the retry budget was spent
-(which is an [`Err`] instead).
+(which is an `Err` instead).
 
 A returned `CaptureSummary` means the capture request itself succeeded (HTTP
 `2xx`). On the `capture-v1` pipeline the backend reports a per-event verdict,
 so a `2xx` can still leave some events unpersisted (`drop`/`retry`) — check
-[`all_persisted`](Self::all_persisted) / [`not_persisted`](Self::not_persisted)
+[`all_persisted`](#capturesummaryall_persisted) / [`not_persisted`](#capturesummarynot_persisted)
 before treating the batch as fully durable. On the v0 pipeline a `2xx`
 persists the whole batch, so `all_persisted()` is always `true`.
 
@@ -1375,11 +1357,8 @@ persists the whole batch, so `all_persisted()` is always `true`.
 without breaking callers.
 
 
-[crate::Client::capture_batch_immediate]: #crateclientcapture_batch_immediate
-[Self::not_persisted]: #selfnot_persisted
-[crate::Client::capture_immediate]: #crateclientcapture_immediate
-[`Err`]: #err
-[Self::all_persisted]: #selfall_persisted
+[crate::Client::capture_batch_immediate]: #clientcapture_batch_immediate
+[crate::Client::capture_immediate]: #clientcapture_immediate
 
 #### `CaptureSummary::submitted`
 
@@ -1425,11 +1404,10 @@ pub fn event_results(&self) -> &HashMap<Uuid, EventResult>
 
 Per-event server verdicts (`capture-v1` only). Includes persisted
 (`ok`/`warning`) and unpersisted (`drop`/`retry`) verdicts; filter by
-[`EventStatus`](crate::EventStatus) to isolate failures. May omit events
-the backend did not report on — see [`not_persisted`](Self::not_persisted).
+[`EventStatus`](#eventstatus) to isolate failures. May omit events
+the backend did not report on — see [`not_persisted`](#capturesummarynot_persisted).
 
-[crate::EventStatus]: #crateeventstatus
-[Self::not_persisted]: #selfnot_persisted
+[crate::EventStatus]: #eventstatus
 
 ### `ClientOptions`
 
@@ -1474,7 +1452,7 @@ project API key is missing or blank after trimming.
 pub struct ClientOptionsBuilder
 ```
 
-Builder for [`ClientOptions`](struct.ClientOptions.html).
+Builder for [`ClientOptions`](#clientoptions).
 
 #### `ClientOptionsBuilder::host`
 
@@ -1807,12 +1785,11 @@ invalid according to the generated builder.
 pub fn personal_api_key<VALUE: Into<String>>(&mut self, value: VALUE) -> &mut Self
 ```
 
-Deprecated alias for [`secret_key`](Self::secret_key).
+Deprecated alias for [`secret_key`](#clientoptionsbuildersecret_key).
 
 Kept for backwards compatibility; forwards to `secret_key`. The last
 builder call wins if both are set.
 
-[Self::secret_key]: #selfsecret_key
 
 ### `ClientOptionsBuilderError`
 
@@ -1849,9 +1826,8 @@ pub fn error(&self) -> Option<&Error>
 The batch-level cause: a permanent reject, exhausted transport/HTTP
 retries, or a serialization failure.
 `None` only when the request itself succeeded (`2xx`) but some events were not
-persisted after the retry budget — inspect [`event_results`](Self::event_results).
+persisted after the retry budget — inspect [`event_results`](#capturefailureevent_results).
 
-[Self::event_results]: #selfevent_results
 
 #### `CaptureFailure::status`
 
@@ -1878,11 +1854,10 @@ pub fn event_count(&self) -> usize
 
 Number of events this failure dropped (lost).
 Counts only undelivered events (`retry`/`drop`), including any finalized on
-earlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,
+earlier attempts. This can be smaller than [`event_results`](#capturefailureevent_results)`.len()`,
 which also reports persisted `ok`/`warning` verdicts — filter by status before
 treating an entry as lost.
 
-[Self::event_results]: #selfevent_results
 
 #### `CaptureFailure::historical_migration`
 
@@ -1913,15 +1888,13 @@ Per-event server verdicts for the batch (V1 capture pipeline only).
 Maps event UUID to its [`EventResult`]. Includes **all** verdicts the
 batch collected — persisted (`ok`/`warning`) as well as lost
 (`retry`/`drop`) — so this map can be larger than
-[`event_count`](Self::event_count); filter by
-[`EventStatus`](crate::EventStatus) to isolate the failures. Complete
-when [`error`](Self::error) is `None` (a `2xx` where events weren't
+[`event_count`](#capturefailureevent_count); filter by
+[`EventStatus`](#eventstatus) to isolate the failures. Complete
+when [`error`](#capturefailureerror) is `None` (a `2xx` where events weren't
 persisted after retries); possibly partial on a batch-level failure
 (only verdicts collected from earlier attempts).
 
-[Self::event_count]: #selfevent_count
-[crate::EventStatus]: #crateeventstatus
-[Self::error]: #selferror
+[crate::EventStatus]: #eventstatus
 [`EventResult`]: #eventresult
 
 #### `CaptureFailure::error_response`
@@ -1934,9 +1907,8 @@ The structured error body returned by the V1 capture backend on a
 non-`2xx` response (`error`, `error_description`, `error_uri`), when the
 body parsed as one. `None` for a transport error, a `2xx`, or an
 unrecognizable body — the raw body remains available via
-[`error`](Self::error).
+[`error`](#capturefailureerror).
 
-[Self::error]: #selferror
 
 ### `FlagsFailure`
 
@@ -1954,11 +1926,9 @@ Fields are read through accessors; the struct is `#[non_exhaustive]`.
 pub fn error(&self) -> &Error
 ```
 
-The cause of the failure ([`Error::Connection`] for transport or
-non-success status, [`Error::Serialization`] for an unparseable body).
+The cause of the failure (`Error::Connection` for transport or
+non-success status, `Error::Serialization` for an unparseable body).
 
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
 
 #### `FlagsFailure::endpoint`
 
@@ -2010,11 +1980,9 @@ Credentials (the personal API key) are never surfaced here.
 pub fn error(&self) -> &Error
 ```
 
-The cause of the failure ([`Error::Connection`] for transport or
-non-success status, [`Error::Serialization`] for an unparseable body).
+The cause of the failure (`Error::Connection` for transport or
+non-success status, `Error::Serialization` for an unparseable body).
 
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
 
 #### `LocalEvaluationFailure::status`
 
@@ -2218,7 +2186,7 @@ let options = ErrorTrackingOptionsBuilder::default()
 pub struct ErrorTrackingOptionsBuilder
 ```
 
-Builder for [`ErrorTrackingOptions`](struct.ErrorTrackingOptions.html).
+Builder for [`ErrorTrackingOptions`](#errortrackingoptions).
 
 #### `ErrorTrackingOptionsBuilder::capture_stacktrace`
 
@@ -2265,7 +2233,7 @@ includes and defaults. Same matching rules as `in_app_include_paths`
 pub fn capture_panics(&mut self, value: bool) -> &mut Self
 ```
 
-When `true`, [`crate::init_global`] installs a process-wide panic hook
+When `true`, `crate::init_global` installs a process-wide panic hook
 that captures panics as `$exception` events through the global client.
 Defaults to `false` — panic autocapture is opt-in.
 
@@ -2273,7 +2241,6 @@ Only the global client installs a hook: a panic hook is process-global
 (`std::panic::set_hook`), so it pairs with the process-global client, and
 there is intentionally no per-`Client` panic API for now.
 
-[`crate::init_global`]: #crateinit_global
 
 #### `ErrorTrackingOptionsBuilder::build`
 
@@ -2360,9 +2327,8 @@ Add a property to the event.
 
 ##### Errors
 
-Returns [`Error::Serialization`] if `prop` cannot be serialized.
+Returns `Error::Serialization` if `prop` cannot be serialized.
 
-[`Error::Serialization`]: #errorserialization
 
 #### `Event::remove_prop`
 
@@ -2410,9 +2376,8 @@ Set the event timestamp, for events that happened in the past.
 
 ##### Errors
 
-Returns [`Error::InvalidTimestamp`] if the timestamp is in the future.
+Returns `Error::InvalidTimestamp` if the timestamp is in the future.
 
-[`Error::InvalidTimestamp`]: #errorinvalidtimestamp
 
 #### `Event::set_uuid`
 
@@ -2534,9 +2499,9 @@ pub struct EvaluateFlagsOptions
 - `disable_geoip: Option<bool>` - Per-call override for GeoIP behavior on `/flags` and `$feature_flag_called` requests. `None` uses the client-level setting.
 - `flag_keys: Option<Vec<String>>` - Optional list of flag keys. When provided, only these flags are evaluated — the underlying `/flags` request asks the server for just this subset, which makes the response smaller and the request cheaper. An explicitly empty list returns an empty snapshot without local or remote evaluation; `None` evaluates all flags.
 
-Optional inputs for [`Client::evaluate_flags`](crate::Client::evaluate_flags).
+Optional inputs for [`Client::evaluate_flags`](#clientevaluate_flags).
 
-[crate::Client::evaluate_flags]: #crateclientevaluate_flags
+[crate::Client::evaluate_flags]: #clientevaluate_flags
 
 ### `CohortDefinition`
 
@@ -2832,14 +2797,13 @@ The `/flags/definitions/?send_cohorts` endpoint maps each cohort ID
 straight to its property group, `{"type": "AND"|"OR", "values": [...]}`,
 with no wrapping `id`/`name` fields — so this type is transparent over the
 raw property group and the owning ID is the map key in
-[`LocalEvaluationResponse::cohorts`].
+`LocalEvaluationResponse::cohorts`.
 
 The backend dependency loader can serialize cohort references that form a
 cycle across map entries. Serde preserves those references as-is; cohort
 evaluation must track active IDs before following them recursively to avoid
 a stack overflow.
 
-[`LocalEvaluationResponse::cohorts`]: #localevaluationresponsecohorts
 
 ### `FlagCache`
 
@@ -3005,15 +2969,13 @@ pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self
 Create an asynchronous flag definition poller.
 
 If the HTTP client cannot be built, logs a warning and leaves polling
-disabled. [`Self::load_flags`] then returns [`Error::Connection`].
+disabled. `Self::load_flags` then returns `Error::Connection`.
 
 ##### Parameters
 
 - `config`: Credentials, host, polling interval, and request timeout.
 - `cache`: Shared cache updated by the poller.
 
-[`Self::load_flags`]: #selfload_flags
-[`Error::Connection`]: #errorconnection
 
 #### `AsyncFlagPoller::start`
 
@@ -3039,12 +3001,10 @@ Load flags asynchronously and update the cache once.
 
 ##### Errors
 
-Returns [`Error::Connection`] for request failures or non-success HTTP
-statuses, and [`Error::Serialization`] when the response cannot be
+Returns `Error::Connection` for request failures or non-success HTTP
+statuses, and `Error::Serialization` when the response cannot be
 parsed.
 
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
 
 #### `AsyncFlagPoller::stop`
 
@@ -3098,10 +3058,9 @@ without a scheme, port, path, or wildcard. An empty list disables header injecti
 pub fn client(&self) -> &Client
 ```
 
-Use this client to build requests, then pass them to [`Self::execute`].
+Use this client to build requests, then pass them to `Self::execute`.
 Calling reqwest's `send` or `execute` directly does not inject context.
 
-[`Self::execute`]: #selfexecute
 
 #### `PostHogReqwestClient::execute`
 
@@ -3111,10 +3070,9 @@ pub async fn execute(&self, request: Request) -> Result<Response, reqwest::Error
 
 Sends a request with the context active when this future is first polled.
 
-Build the request with [`Self::client`] to retain its client configuration.
+Build the request with `Self::client` to retain its client configuration.
 On allowed hosts, current values replace stale tracing headers. Missing values and
 values that cannot form valid HTTP headers are omitted. Other hosts are unchanged.
 Spawned tasks can use an explicit [`RequestContext::scope`] to carry context.
 
-[`Self::client`]: #selfclient
 [`RequestContext::scope`]: #requestcontextscope
