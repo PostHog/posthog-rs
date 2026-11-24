@@ -850,11 +850,13 @@ pub(crate) mod clock {
 
         /// Puts this thread's email clients on virtual time from `start`
         /// until the guard drops.
+        #[cfg_attr(not(feature = "tls"), allow(dead_code))]
         pub(crate) fn start_at(start: DateTime<Utc>) -> Guard {
             NOW.with(|now| now.set(Some(start.into())));
             Guard
         }
 
+        #[cfg_attr(not(feature = "tls"), allow(dead_code))]
         pub(crate) struct Guard;
 
         impl Drop for Guard {

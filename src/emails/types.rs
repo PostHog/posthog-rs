@@ -583,7 +583,8 @@ impl SendEmailResult {
 pub enum SendEmailStatus {
     /// The email goes out now.
     Queued,
-    /// The email goes out at its [`scheduled_at`](SendEmailResult::scheduled_at).
+    /// The email is due at its [`scheduled_at`](SendEmailResult::scheduled_at),
+    /// and PostHog sends it once that time has come.
     Scheduled,
 }
 
