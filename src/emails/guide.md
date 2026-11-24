@@ -78,8 +78,8 @@ now, and the result's status is `Queued`. When PostHog accepts the email
 without confirming its time, the send fails with `schedule_not_confirmed`
 and the error's [`message_id`](crate::EmailError::message_id): read the
 email's status before you send it again. That includes PostHog sending the
-email now while its time is more than a minute ahead of this machine's
-clock. A clock that runs over a minute slow can raise this error for an
+email now while its time is more than a minute after the send's first
+attempt, by this machine's clock. A clock that runs over a minute slow can raise this error for an
 email that went out on time.
 
 Work out the time once and reuse it on your own retries: the idempotency key

@@ -187,13 +187,15 @@ pub(crate) fn check_schedulable(
     if prepared.scheduled_at.is_none() {
         return Ok(());
     }
-    let url = reqwest::Url::parse(&connection.app_host).ok();
+    // Check the URL the send goes to: the app host alone can parse to the root
+    // and still put a path in front of the endpoint.
+    let url = reqwest::Url::parse(&format!("{}{SEND_PATH}", connection.app_host)).ok();
     let is_cloud = url.as_ref().is_some_and(|url| {
         url.scheme() == "https"
             && url.username().is_empty()
             && url.password().is_none()
             && url.port().is_none()
-            && matches!(url.path(), "" | "/")
+            && url.path() == SEND_PATH
             && url.query().is_none()
             && url.fragment().is_none()
             && matches!(url.host_str(), Some("us.posthog.com" | "eu.posthog.com"))
@@ -816,6 +818,7 @@ const CLOCK_SKEW_SECONDS: i64 = 60;
 pub(crate) fn parse_send_reply(
     reply: Accepted,
     scheduled_at: Option<DateTime<Utc>>,
+    first_attempt_at: DateTime<Utc>,
 ) -> Result<SendEmailResult, EmailError> {
     let Accepted { status, fields } = reply;
     let id = text(&fields, "message_id").ok_or_else(|| {
@@ -845,7 +848,7 @@ pub(crate) fn parse_send_reply(
         Some(requested) => match (fields.get("status"), fields.get("scheduled_at")) {
             (Some(Value::String(answered)), Some(Value::Null))
                 if answered == "queued"
-                    && requested <= Utc::now() + TimeDelta::seconds(CLOCK_SKEW_SECONDS) =>
+                    && requested <= first_attempt_at + TimeDelta::seconds(CLOCK_SKEW_SECONDS) =>
             {
                 None
             }
@@ -1089,7 +1092,7 @@ mod tests {
     }
 
     fn send_reply(reply: Reply) -> Result<SendEmailResult, EmailError> {
-        accept(reply).and_then(|reply| parse_send_reply(reply, None))
+        accept(reply).and_then(|reply| parse_send_reply(reply, None, Utc::now()))
     }
 
     fn status_reply(reply: Reply) -> Result<EmailStatus, EmailError> {

@@ -779,6 +779,42 @@ impl CloudFront {
     }
 }
 
+/// A proxy that counts the connections it is offered and answers none, so a
+/// test can tell that a client reached no host at all.
+pub struct ConnectionCounter {
+    url: String,
+    connections: Arc<AtomicUsize>,
+}
+
+impl ConnectionCounter {
+    pub fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&connections);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        Self { url, connections }
+    }
+
+    /// A client whose every request, to any host, goes through this proxy.
+    #[cfg(feature = "async-client")]
+    pub fn http(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(&self.url).unwrap())
+            .build()
+            .unwrap()
+    }
+
+    pub fn connections(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
+    }
+}
+
 /// A URL where nothing listens. A port freed by another test could be taken by
 /// a server a parallel test starts; port 1 is reserved, so nothing does.
 pub fn closed_url() -> String {

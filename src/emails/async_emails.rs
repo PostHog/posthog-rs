@@ -110,6 +110,7 @@ impl<'a> Emails<'a> {
         }
         let headers = connection.headers(Some(&prepared.idempotency_key))?;
         let url = format!("{}{}", connection.app_host, shared::SEND_PATH);
+        let first_attempt_at = chrono::Utc::now();
         let reply = self
             .request(
                 Method::POST,
@@ -120,7 +121,7 @@ impl<'a> Emails<'a> {
                 max_retries,
             )
             .await?;
-        let result = shared::parse_send_reply(reply, prepared.scheduled_at)?;
+        let result = shared::parse_send_reply(reply, prepared.scheduled_at, first_attempt_at)?;
         shared::log_warnings(&result);
         Ok(result)
     }

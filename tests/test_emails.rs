@@ -1588,6 +1588,28 @@ async fn a_future_time_that_posthog_sends_now_fails_with_the_message_id() {
 
 #[cfg(feature = "tls")]
 #[tokio::test]
+async fn the_minute_of_grace_counts_from_the_first_attempt() {
+    // The retry waits at least 0.8 seconds, so by the time PostHog answers,
+    // a time 60.4 seconds after the first attempt is within a minute.
+    let (server, client) =
+        cloud_with(vec![unavailable(), sent_now()], "https://us.posthog.com").await;
+
+    let error = client
+        .emails()
+        .send(
+            TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                .scheduled_at(chrono::Utc::now() + chrono::Duration::milliseconds(60_400))
+                .max_retries(1),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "schedule_not_confirmed");
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
 async fn an_acceptance_that_doesnt_confirm_the_schedule_fails_with_the_message_id_once() {
     for payload in [
         json!({"message_id": MESSAGE_ID}),
@@ -1705,18 +1727,20 @@ async fn every_spelling_of_a_cloud_app_host_schedules() {
 async fn scheduling_off_posthog_cloud_makes_no_request() {
     // A self-hosted PostHog from before scheduling would send the email at
     // once, so the client refuses before it uploads a file or sends.
-    let server = ScriptedServer::start_async(vec![accepted()]).await;
-    let mut app_hosts = vec![
-        server.url.clone(),
-        "http://us.posthog.com".to_string(),
-        "https://us.posthog.com:8443".to_string(),
-        "https://us.posthog.com.example.com".to_string(),
-        "https://us.posthog.com/proxy".to_string(),
-        "https://user:hunter2@posthog.example.com/token-abc".to_string(),
-    ];
-    app_hosts.push(format!("{}/?key=hunter2", server.url));
-    for app_host in app_hosts {
-        let client = posthog::client(options(&app_host).build().unwrap()).await;
+    let counter = email_support::ConnectionCounter::start();
+    for app_host in [
+        "http://127.0.0.1:8000",
+        "http://us.posthog.com",
+        "https://us.posthog.com:8443",
+        "https://us.posthog.com.example.com",
+        "https://us.posthog.com/proxy",
+        "https://us.posthog.com/. /",
+        "https://user:hunter2@posthog.example.com/token-abc",
+        "https://us.posthog.com/?key=hunter2",
+    ] {
+        let mut builder = options(app_host);
+        builder.http_client(counter.http());
+        let client = posthog::client(builder.build().unwrap()).await;
 
         let error = client
             .emails()
@@ -1724,7 +1748,7 @@ async fn scheduling_off_posthog_cloud_makes_no_request() {
             .await
             .unwrap_err();
 
-        assert_eq!(error.code(), "scheduling_requires_cloud", "{app_host}");
+        assert_eq!(error.code(), "scheduling_requires_cloud", "{}", app_host);
         assert_eq!(error.kind(), EmailErrorKind::ValidationError);
         assert_eq!(error.field(), Some("scheduled_at"));
         for secret in ["hunter2", "token-abc"] {
@@ -1732,7 +1756,7 @@ async fn scheduling_off_posthog_cloud_makes_no_request() {
             assert!(!format!("{error:?}").contains(secret), "{:?}", error);
         }
     }
-    assert!(server.requests().is_empty());
+    assert_eq!(counter.connections(), 0);
 }
 
 #[tokio::test]
