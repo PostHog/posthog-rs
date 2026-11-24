@@ -1958,6 +1958,14 @@ fn match_property_with_version(
 /// operators and condition values that are inconclusive for a present property
 /// stay inconclusive, so they still fall back to remote evaluation.
 fn match_known_absent_property(property: &Property) -> Result<bool, InconclusiveMatchError> {
+    // The flags service reads a JSON null condition value as omitted, and an
+    // omitted value leaves every operator but the presence ones inconclusive.
+    if property.value.is_null() && !matches!(property.operator.as_str(), "is_set" | "is_not_set") {
+        return Err(InconclusiveMatchError::new(&format!(
+            "Property '{}' has no condition value for operator '{}'",
+            property.key, property.operator
+        )));
+    }
     match property.operator.as_str() {
         "is_not_set" | "is_not" | "not_icontains" | "not_starts_with" | "not_ends_with" => Ok(true),
         "is_set" | "exact" | "icontains" | "starts_with" | "ends_with" | "gt" | "gte" | "lt"
@@ -5654,6 +5662,33 @@ mod known_absent_tests {
             let result = evaluate(&flag, &HashMap::new(), &person_keys(&["plan"]));
             assert_eq!(
                 result.unwrap_or_else(|err| panic!("{} was inconclusive: {}", operator, err)),
+                FlagValue::Boolean(expected),
+                "{operator}"
+            );
+        }
+    }
+
+    #[test]
+    fn null_condition_value_on_a_listed_key_stays_inconclusive() {
+        for operator in ["is_not", "exact", "gt"] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "value": null, "operator": operator, "type": "person"}]),
+            );
+            assert!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).is_err(),
+                "{} with a null value should stay inconclusive",
+                operator
+            );
+        }
+
+        for (operator, expected) in [("is_not_set", true), ("is_set", false)] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "value": null, "operator": operator, "type": "person"}]),
+            );
+            assert_eq!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).unwrap(),
                 FlagValue::Boolean(expected),
                 "{operator}"
             );

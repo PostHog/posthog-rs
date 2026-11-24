@@ -249,6 +249,45 @@ fn mock_flags_with_known_absent(
     })
 }
 
+/// `is_not` filters on the listed key `plan` whose condition value is omitted
+/// or JSON null, neither of which the known-absent table may resolve.
+fn mock_known_absent_valueless_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    let flag = |key: &str, property: Value| {
+        json!({
+            "key": key,
+            "active": true,
+            "filters": {"groups": [{"properties": [property], "rollout_percentage": 100}]}
+        })
+    };
+    let definitions = json!({
+        "flags": [
+            flag("plan-is-not-omitted", json!({"key": "plan", "operator": "is_not", "type": "person"})),
+            flag("plan-is-not-null", json!({"key": "plan", "value": null, "operator": "is_not", "type": "person"})),
+            flag("profile-incomplete", json!({"key": "plan", "value": null, "operator": "is_not_set", "type": "person"}))
+        ],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(definitions);
+    })
+}
+
+const VALUELESS_FLAG_KEYS: [&str; 2] = ["plan-is-not-omitted", "plan-is-not-null"];
+
+/// Lists `plan` as known absent; `only_evaluate_locally` also requests
+/// `profile-incomplete`, which the table still resolves.
+fn valueless_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOptions {
+    let mut keys = VALUELESS_FLAG_KEYS.to_vec();
+    if only_evaluate_locally {
+        keys.push("profile-incomplete");
+    }
+    let mut options = known_absent_options(&keys);
+    options.only_evaluate_locally = only_evaluate_locally;
+    options
+}
+
 fn over_limit_known_absent_options() -> Vec<posthog::EvaluateFlagsOptions> {
     let too_many: Vec<String> = (0..1001).map(|_| "plan".to_string()).collect();
     let mut person = posthog::EvaluateFlagsOptions::default();
@@ -1284,6 +1323,34 @@ mod blocking {
 
         flags_mock.assert_calls(1);
     }
+
+    #[test]
+    fn omitted_or_null_condition_value_on_a_listed_key_stays_inconclusive() {
+        let server = MockServer::start();
+        mock_known_absent_valueless_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        let snapshot = client
+            .evaluate_flags("user-1", valueless_options(true))
+            .unwrap();
+        for key in VALUELESS_FLAG_KEYS {
+            assert_eq!(snapshot.get_flag(key), None, "{key}");
+        }
+        assert_eq!(
+            snapshot.get_flag("profile-incomplete"),
+            Some(FlagValue::Boolean(true))
+        );
+        flags_mock.assert_calls(0);
+
+        client
+            .evaluate_flags("user-1", valueless_options(false))
+            .unwrap();
+        flags_mock.assert_calls(1);
+    }
 }
 
 #[cfg(feature = "async-client")]
@@ -1854,6 +1921,36 @@ mod async_tests {
         at_limit.person_property_keys_known_absent = Some(vec!["plan".to_string(); 1000]);
         client.evaluate_flags("user-1", at_limit).await.unwrap();
 
+        flags_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn omitted_or_null_condition_value_on_a_listed_key_stays_inconclusive() {
+        let server = MockServer::start();
+        mock_known_absent_valueless_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        let snapshot = client
+            .evaluate_flags("user-1", valueless_options(true))
+            .await
+            .unwrap();
+        for key in VALUELESS_FLAG_KEYS {
+            assert_eq!(snapshot.get_flag(key), None, "{key}");
+        }
+        assert_eq!(
+            snapshot.get_flag("profile-incomplete"),
+            Some(FlagValue::Boolean(true))
+        );
+        flags_mock.assert_calls(0);
+
+        client
+            .evaluate_flags("user-1", valueless_options(false))
+            .await
+            .unwrap();
         flags_mock.assert_calls(1);
     }
 }

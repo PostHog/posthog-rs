@@ -1035,7 +1035,9 @@ impl Client {
     ) -> (FeatureFlagEvaluations, Option<Error>) {
         let distinct_id: String = distinct_id.into();
         let host = self.flag_event_host();
-        validate_known_absent_keys(&options)?;
+        if let Err(error) = validate_known_absent_keys(&options) {
+            return (FeatureFlagEvaluations::empty(host), Some(error));
+        }
         if distinct_id.is_empty() || self.options.is_disabled() {
             return (FeatureFlagEvaluations::empty(host), None);
         }
