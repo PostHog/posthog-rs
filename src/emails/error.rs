@@ -106,7 +106,8 @@ impl fmt::Display for EmailErrorKind {
 /// never holds the secret key or the request body.
 ///
 /// A batch that stopped after it sent a request carries every recipient's
-/// result in [`batch_result`](Self::batch_result).
+/// result in [`batch_result`](Self::batch_result). The error's `Debug` output
+/// leaves those results out, so logging the error logs no address.
 #[derive(Debug, Clone)]
 pub struct EmailError(Box<Details>);
 
@@ -122,8 +123,19 @@ struct Details {
     field: Option<String>,
     retry_after: Option<Duration>,
     message_id: Option<String>,
-    batch: Option<SendBatchResult>,
+    batch: Option<Batch>,
     source: Option<Source>,
+}
+
+#[derive(Clone)]
+struct Batch(SendBatchResult);
+
+impl fmt::Debug for Batch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendBatchResult")
+            .field("recipients", &self.0.results.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The error that caused an [`EmailError`], such as a `reqwest::Error`.
@@ -185,7 +197,7 @@ impl EmailError {
     }
 
     pub(crate) fn with_batch(mut self, batch: SendBatchResult) -> Self {
-        self.0.batch = Some(batch);
+        self.0.batch = Some(Batch(batch));
         self
     }
 
@@ -306,7 +318,7 @@ impl EmailError {
     /// [`NotAttempted`](crate::BatchEmailStatus::NotAttempted). `None` when the
     /// client sent nothing, and for any other call.
     pub fn batch_result(&self) -> Option<&SendBatchResult> {
-        self.0.batch.as_ref()
+        self.0.batch.as_ref().map(|batch| &batch.0)
     }
 
     pub(crate) fn is_network_error(&self) -> bool {

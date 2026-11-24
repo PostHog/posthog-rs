@@ -101,14 +101,17 @@ a [`TemplateBatch`](crate::TemplateBatch) with `template_data` per
 recipient for a template made in PostHog, or a
 [`CodeBatch`](crate::CodeBatch) with content your code rendered. The client
 sends at most 100 recipients and 4 MiB of JSON per request, one request
-after another, and waits at least 45 seconds for each answer. Each
+after another, and waits at least 45 seconds for each answer. PostHog
+copies the shared `template_data` or content for each recipient, so a
+request with large shared data holds fewer recipients. A recipient too
+large for any request fails alone with `content_too_large`. Each
 [`BatchRecipient`](crate::BatchRecipient) has its own idempotency key,
 given or made by the client, that every retry reuses. Check each result's
 [`status`](crate::BatchEmailResult::status):
 
 - `Queued`: PostHog accepted the email.
 - `Failed`: PostHog refused it, and `error` says why, such as a suppressed
-  address.
+  address. PostHog may still name the refused email in `message_id`.
 - `Unconfirmed`: the client can't tell whether PostHog accepted it, such as
   after a lost answer. Send it again with the same key within 24 hours, so
   it goes out once. It stays `Unconfirmed` when a later answer refuses it,
@@ -118,7 +121,9 @@ given or made by the client, that every retry reuses. Check each result's
 
 At the end of a batch, the client reads by its key each `Unconfirmed` email
 that has no message ID, and adds the ID it finds. That read never changes
-the status. A request that fails as a whole, such as a rate limit past its
+the status: an earlier email with the same key reads the same way. When the
+client shuts down, the batch sends no further request or retry, and a
+shutdown during a wait before a retry returns the results at once. A request that fails as a whole, such as a rate limit past its
 retries, stops the batch with an [`EmailError`](crate::EmailError) whose
 [`batch_result`](crate::EmailError::batch_result) holds every recipient.
 The code `batch_unavailable` (`409`) means the project can't send batches

@@ -7,8 +7,13 @@ mod types;
 
 #[cfg(feature = "async-client")]
 mod async_emails;
+#[cfg(test)]
+mod batch_tests;
 #[cfg(not(feature = "async-client"))]
 mod blocking_emails;
+#[cfg(test)]
+#[path = "../../tests/email_support/mod.rs"]
+mod email_support;
 #[cfg(all(test, feature = "tls"))]
 mod scheduling_tests;
 

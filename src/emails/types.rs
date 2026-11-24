@@ -104,19 +104,40 @@ impl TemplateEmail {
 #[derive(Debug, Clone)]
 pub struct CodeEmail {
     pub(crate) to: String,
+    pub(crate) content: CodeContent,
+    pub(crate) cc: Vec<String>,
+    pub(crate) bcc: Vec<String>,
+    pub(crate) attachments: Vec<EmailAttachment>,
+    pub(crate) capture_engagement: Option<bool>,
+    pub(crate) options: SendOptions,
+}
+
+/// What a [`CodeEmail`] and a [`CodeBatch`] both send.
+#[derive(Debug, Clone)]
+pub(crate) struct CodeContent {
     pub(crate) template_key: String,
     pub(crate) subject: String,
     pub(crate) html: Option<String>,
     pub(crate) text: Option<String>,
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
-    pub(crate) cc: Vec<String>,
-    pub(crate) bcc: Vec<String>,
-    pub(crate) attachments: Vec<EmailAttachment>,
     pub(crate) sensitive: Option<bool>,
     pub(crate) tracking: Option<EmailTracking>,
-    pub(crate) capture_engagement: Option<bool>,
-    pub(crate) options: SendOptions,
+}
+
+impl CodeContent {
+    fn new(template_key: String, subject: String) -> Self {
+        Self {
+            template_key,
+            subject,
+            html: None,
+            text: None,
+            from: None,
+            reply_to: Vec::new(),
+            sensitive: None,
+            tracking: None,
+        }
+    }
 }
 
 impl CodeEmail {
@@ -132,17 +153,10 @@ impl CodeEmail {
     ) -> Self {
         Self {
             to: to.into(),
-            template_key: template_key.into(),
-            subject: subject.into(),
-            html: None,
-            text: None,
-            from: None,
-            reply_to: Vec::new(),
+            content: CodeContent::new(template_key.into(), subject.into()),
             cc: Vec::new(),
             bcc: Vec::new(),
             attachments: Vec::new(),
-            sensitive: None,
-            tracking: None,
             capture_engagement: None,
             options: SendOptions::default(),
         }
@@ -150,26 +164,26 @@ impl CodeEmail {
 
     /// The HTML body.
     pub fn html(mut self, html: impl Into<String>) -> Self {
-        self.html = Some(html.into());
+        self.content.html = Some(html.into());
         self
     }
 
     /// The plain-text body.
     pub fn text(mut self, text: impl Into<String>) -> Self {
-        self.text = Some(text.into());
+        self.content.text = Some(text.into());
         self
     }
 
     /// A verified sender, such as `"Acme <security@example.com>"`. Without
     /// it, PostHog uses the project's default sender.
     pub fn from(mut self, from: impl Into<String>) -> Self {
-        self.from = Some(from.into());
+        self.content.from = Some(from.into());
         self
     }
 
     /// Adds a reply-to address. Call it again to add more.
     pub fn reply_to(mut self, address: impl Into<String>) -> Self {
-        self.reply_to.push(address.into());
+        self.content.reply_to.push(address.into());
         self
     }
 
@@ -216,7 +230,7 @@ impl CodeEmail {
     ///     .sensitive(false);
     /// ```
     pub fn sensitive(mut self, sensitive: bool) -> Self {
-        self.sensitive = Some(sensitive);
+        self.content.sensitive = Some(sensitive);
         self
     }
 
@@ -237,7 +251,7 @@ impl CodeEmail {
     ///     .tracking(EmailTrackingOptions::new().clicks(true).engagement(false));
     /// ```
     pub fn tracking(mut self, tracking: impl Into<EmailTracking>) -> Self {
-        self.tracking = Some(tracking.into());
+        self.content.tracking = Some(tracking.into());
         self
     }
 
@@ -704,8 +718,9 @@ impl BatchRecipient {
     /// instead of sending them twice. A single send and a batch recipient with
     /// the same key and the same email replay each other. Never reuse a key
     /// for another email: after a lost answer, the client reads the email by
-    /// its key, and an earlier email with that key reads as this one,
-    /// [`Queued`](BatchEmailStatus::Queued).
+    /// its key and adds the message ID it finds to the result, which stays
+    /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed), and an earlier email
+    /// with that key reads as this one.
     pub fn idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
         self
@@ -747,7 +762,9 @@ pub struct TemplateBatch {
 
 impl TemplateBatch {
     /// The template with this UUID, sent to one or more recipients. The client
-    /// sends at most 100 recipients, and at most 4 MiB of JSON, per request.
+    /// sends at most 100 recipients, and at most 4 MiB of JSON, per request,
+    /// and fewer when PostHog would copy more shared data for them than it
+    /// takes.
     pub fn new(
         template_id: impl Into<String>,
         recipients: impl IntoIterator<Item = BatchRecipient>,
@@ -799,14 +816,16 @@ impl TemplateBatch {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CodeBatch {
-    /// The shared content, as one email without a recipient.
-    pub(crate) email: Box<CodeEmail>,
+    pub(crate) content: CodeContent,
     pub(crate) recipients: Vec<BatchRecipient>,
+    pub(crate) max_retries: Option<u32>,
 }
 
 impl CodeBatch {
     /// The same content, with a subject, for one or more recipients. The client
-    /// sends at most 100 recipients, and at most 4 MiB of JSON, per request.
+    /// sends at most 100 recipients, and at most 4 MiB of JSON, per request,
+    /// and fewer when PostHog would copy more shared data for them than it
+    /// takes.
     ///
     /// `template_key` names the email, as in [`CodeEmail::new`].
     pub fn new(
@@ -815,52 +834,53 @@ impl CodeBatch {
         recipients: impl IntoIterator<Item = BatchRecipient>,
     ) -> Self {
         Self {
-            email: Box::new(CodeEmail::new(String::new(), template_key, subject)),
+            content: CodeContent::new(template_key.into(), subject.into()),
             recipients: recipients.into_iter().collect(),
+            max_retries: None,
         }
     }
 
     /// The HTML body.
     pub fn html(mut self, html: impl Into<String>) -> Self {
-        self.email = Box::new(self.email.html(html));
+        self.content.html = Some(html.into());
         self
     }
 
     /// The plain-text body.
     pub fn text(mut self, text: impl Into<String>) -> Self {
-        self.email = Box::new(self.email.text(text));
+        self.content.text = Some(text.into());
         self
     }
 
     /// A verified sender. See [`CodeEmail::from`].
     pub fn from(mut self, from: impl Into<String>) -> Self {
-        self.email = Box::new(self.email.from(from));
+        self.content.from = Some(from.into());
         self
     }
 
     /// Adds a reply-to address. Call it again to add more.
     pub fn reply_to(mut self, address: impl Into<String>) -> Self {
-        self.email = Box::new(self.email.reply_to(address));
+        self.content.reply_to.push(address.into());
         self
     }
 
     /// Whether the email carries a login link, a reset token or a code. See
     /// [`CodeEmail::sensitive`].
     pub fn sensitive(mut self, sensitive: bool) -> Self {
-        self.email = Box::new(self.email.sensitive(sensitive));
+        self.content.sensitive = Some(sensitive);
         self
     }
 
     /// What PostHog tracks for the emails. See [`CodeEmail::tracking`].
     pub fn tracking(mut self, tracking: impl Into<EmailTracking>) -> Self {
-        self.email = Box::new(self.email.tracking(tracking));
+        self.content.tracking = Some(tracking.into());
         self
     }
 
     /// Overrides the client's `email_request_max_retries` for each request of
     /// the batch. `0` turns retries off.
     pub fn max_retries(mut self, max_retries: u32) -> Self {
-        self.email = Box::new(self.email.max_retries(max_retries));
+        self.max_retries = Some(max_retries);
         self
     }
 }

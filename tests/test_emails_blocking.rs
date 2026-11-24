@@ -638,27 +638,3 @@ fn a_lost_batch_answer_reads_each_email_by_its_key() {
         (BatchEmailStatus::Unconfirmed, Some("m0"))
     );
 }
-
-#[test]
-fn a_shutdown_during_a_batch_retry_wait_sends_no_retry() {
-    let server = ScriptedServer::start(vec![
-        Answer::json(
-            429,
-            json!({"type": "throttled", "code": "throttled", "detail": "Slow down."}),
-        ),
-        batch_queued(),
-    ]);
-    let client = Arc::new(client_for(&server));
-    let sender = Arc::clone(&client);
-    let sent = std::thread::spawn(move || sender.emails().batch(batch_of(150)));
-    server.wait_for(1);
-
-    client.shutdown();
-
-    let error = sent.join().unwrap().unwrap_err();
-    assert_eq!(error.code(), "client_closed");
-    assert_eq!(server.requests().len(), 1);
-    let result = error.batch_result().unwrap();
-    assert_eq!(result.results[0].status, BatchEmailStatus::Failed);
-    assert_eq!(result.results[100].status, BatchEmailStatus::NotAttempted);
-}

@@ -2,11 +2,12 @@ use std::future::Future;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::{Client as HttpClient, Method};
 
 use super::error::EmailError;
-use super::shared::{self, Accepted, BatchRequest, BatchRun, EmailTracker, Reply, Upload};
+use super::shared::{self, Accepted, BatchRun, BatchStep, EmailTracker, Reply, Upload};
 use super::types::{
     EmailAttachment, EmailStatus, SendBatch, SendBatchResult, SendEmail, SendEmailResult,
 };
@@ -119,7 +120,7 @@ impl<'a> Emails<'a> {
                 Method::POST,
                 &url,
                 &headers,
-                Some(&prepared.body),
+                Some(Bytes::from(prepared.body)),
                 &connection,
                 max_retries,
             )
@@ -134,7 +135,9 @@ impl<'a> Emails<'a> {
     ///
     /// The client sends the recipients in requests of at most 100 recipients
     /// and 4 MiB of JSON, one after another, and waits at least 45 seconds for
-    /// each answer. Each recipient has an idempotency key, given or made by the
+    /// each answer. A request holds fewer recipients when PostHog would copy
+    /// more shared data for them than it takes. Each recipient has an
+    /// idempotency key, given or made by the
     /// client, that every retry reuses, so a retry never queues an email
     /// twice. A request retries what [`send`](Self::send) retries.
     ///
@@ -153,7 +156,9 @@ impl<'a> Emails<'a> {
     /// batches yet, and a `404` means the template doesn't exist or batch
     /// sends are off: send each email the batch didn't queue with
     /// [`send`](Self::send) and its recipient's idempotency key.
-    /// `client_closed` means the client shut down during the batch.
+    /// `client_closed` means the client shut down during the batch: it sends
+    /// no further request or retry, and returns at once from a wait before a
+    /// retry.
     ///
     /// Returns an [`EmailError`] without a batch result when the client sent
     /// nothing: an argument check failed, such as two recipients with the
@@ -186,99 +191,28 @@ impl<'a> Emails<'a> {
     /// # }
     /// ```
     pub async fn batch(&self, batch: impl Into<SendBatch>) -> Result<SendBatchResult, EmailError> {
-        let mut run = shared::prepare_batch(batch.into())?;
+        let prepared = shared::prepare_batch(batch.into())?;
         let _in_flight = self
             .tracker
             .admit(self.options.is_disabled(), shared::SEND_NOT_DONE)?;
         let connection = shared::connect(self.options, shared::SEND_KEY_NEEDED)?;
-        let request = shared::batch_request(&connection)?;
-        let max_retries = run.max_retries.unwrap_or(connection.max_retries);
-        let sent = self.send_chunks(&mut run, &request, max_retries).await;
-        self.read_lost(&mut run, &connection).await;
-        match sent {
-            Ok(()) => Ok(run.finish()),
-            Err(error) => Err(run.failure(error)),
-        }
-    }
-
-    /// Sends the batch's requests one after another, until one fails as a
-    /// whole or the client shuts down.
-    async fn send_chunks(
-        &self,
-        run: &mut BatchRun,
-        request: &BatchRequest,
-        max_retries: u32,
-    ) -> Result<(), EmailError> {
-        for position in 0..run.chunk_count() {
-            if position > 0 && self.tracker.is_closed() {
-                return Err(run.closed_at(position));
-            }
-            if let Err(error) = self.send_chunk(run, position, request, max_retries).await {
-                run.stop(position, &error);
-                return Err(error);
-            }
-        }
-        Ok(())
-    }
-
-    /// Sends one request of a batch until PostHog answers it, retrying what
-    /// [`shared::retry_delay`] allows while the client is open.
-    async fn send_chunk(
-        &self,
-        run: &mut BatchRun,
-        position: usize,
-        request: &BatchRequest,
-        max_retries: u32,
-    ) -> Result<(), EmailError> {
-        let body = run.chunk_body(position);
-        let mut attempts = 0;
+        let mut run = BatchRun::new(prepared, &connection, self.tracker)?;
         loop {
-            let reply = self
-                .attempt(
-                    Method::POST,
-                    &request.url,
-                    &request.headers,
-                    Some(&body),
-                    request.timeout,
-                )
-                .await;
-            let error = match run.answer(position, reply) {
-                Ok(()) => return Ok(()),
-                Err(error) => error,
-            };
-            let Some(delay) = shared::retry_delay(&error, attempts, max_retries) else {
-                return Err(error);
-            };
-            tokio::time::sleep(delay).await;
-            if self.tracker.is_closed() {
-                return Err(shared::retry_refused());
-            }
-            attempts += 1;
-        }
-    }
-
-    /// Reads the message ID of each unconfirmed recipient without one by
-    /// their idempotency key, once, until a read fails other than with `404`
-    /// or the client shuts down.
-    async fn read_lost(&self, run: &mut BatchRun, connection: &shared::Connection) {
-        let Ok(headers) = connection.headers(None) else {
-            return;
-        };
-        for (index, key) in run.lost_keys() {
-            let Some(url) = shared::status_by_key_url(&connection.app_host, &key) else {
-                return;
-            };
-            if self.tracker.is_closed() {
-                return;
-            }
-            let read = self
-                .request(Method::GET, &url, &headers, None, connection, 0)
-                .await
-                .and_then(shared::parse_status_reply);
-            match read {
-                Ok(status) => run.found(index, status),
-                Err(error) if error.status() == Some(404) => {}
-                Err(_) => return,
+            match run.next() {
+                BatchStep::Call(call) => {
+                    let reply = self
+                        .attempt(
+                            call.method,
+                            &call.url,
+                            &call.headers,
+                            call.body,
+                            call.timeout,
+                        )
+                        .await;
+                    run.answered(reply);
+                }
+                BatchStep::Wait(delay) => self.tracker.wait_to_retry(delay).await,
+                BatchStep::Done(result) => return result,
             }
         }
     }
@@ -327,7 +261,7 @@ impl<'a> Emails<'a> {
                 Method::POST,
                 &request.url,
                 &request.headers,
-                Some(&request.body),
+                Some(Bytes::from(request.body)),
                 connection,
                 max_retries,
             )
@@ -348,12 +282,12 @@ impl<'a> Emails<'a> {
         method: Method,
         url: &str,
         headers: &HeaderMap,
-        body: Option<&[u8]>,
+        body: Option<Bytes>,
         connection: &shared::Connection,
         max_retries: u32,
     ) -> Result<Accepted, EmailError> {
         retrying(max_retries, || {
-            let method = method.clone();
+            let (method, body) = (method.clone(), body.clone());
             async move {
                 self.attempt(method, url, headers, body, connection.timeout)
                     .await
@@ -368,7 +302,7 @@ impl<'a> Emails<'a> {
         method: Method,
         url: &str,
         headers: &HeaderMap,
-        body: Option<&[u8]>,
+        body: Option<Bytes>,
         timeout: Duration,
     ) -> Result<Reply, EmailError> {
         let mut request = self
@@ -377,7 +311,7 @@ impl<'a> Emails<'a> {
             .timeout(timeout)
             .headers(headers.clone());
         if let Some(body) = body {
-            request = request.body(body.to_vec());
+            request = request.body(body);
         }
         let response = request.send().await.map_err(shared::request_error)?;
         let status = response.status().as_u16();

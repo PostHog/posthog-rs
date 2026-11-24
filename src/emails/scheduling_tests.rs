@@ -2,8 +2,7 @@
 //! scripted PostHog Cloud: retries take no real time, and the clock moves
 //! only by the waits the client makes.
 
-#[path = "../../tests/email_support/mod.rs"]
-mod email_support;
+use super::email_support;
 
 use chrono::{DateTime, Duration, Utc};
 use email_support::{unavailable, Answer, CloudFront, ScriptedServer, MESSAGE_ID, TEMPLATE_ID};
