@@ -117,7 +117,8 @@ given or made by the client, that every retry reuses. Check each result's
   after a lost answer. Send it again with the same key within 24 hours, so
   it goes out once. It stays `Unconfirmed` when a later answer refuses it,
   since that doesn't prove it wasn't sent: `later_error` holds that answer.
-- `NotAttempted`: an earlier request of the batch failed, so the client
+- `NotAttempted`: the batch stopped before it reached this recipient,
+  because an earlier request failed or the client shut down, so the client
   sent nothing for it.
 
 The client never reads an email by its key, so an `Unconfirmed` result

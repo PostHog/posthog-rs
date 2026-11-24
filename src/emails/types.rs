@@ -925,8 +925,9 @@ pub enum BatchEmailStatus {
     /// lost answer. It may still go out. Send it again with the same
     /// idempotency key within 24 hours, so it goes out once.
     Unconfirmed,
-    /// An earlier request of the batch failed, so the client sent nothing for
-    /// this recipient.
+    /// The batch stopped before it reached this recipient, because an earlier
+    /// request failed or the client shut down, so the client sent nothing for
+    /// them.
     NotAttempted,
 }
 
