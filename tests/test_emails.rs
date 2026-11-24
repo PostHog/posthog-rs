@@ -1589,42 +1589,48 @@ async fn an_acceptance_that_doesnt_confirm_the_schedule_fails_with_the_message_i
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn a_refused_scheduled_at_is_reported_and_never_sent_now() {
-    let (server, client) = cloud_with(
-        vec![
-            Answer::json(
-                400,
-                json!({
-                    "type": "validation_error",
-                    "code": "scheduled_too_far",
-                    "detail": "scheduled_at is more than 7 days ahead.",
-                    "attr": "scheduled_at",
-                }),
-            ),
-            accepted(),
-        ],
-        "https://us.posthog.com",
-    )
-    .await;
-
-    let error = client
-        .emails()
-        .send(
-            TemplateEmail::new("user@example.com", TEMPLATE_ID)
-                .scheduled_at(utc("2027-12-01T09:00:00Z")),
+    for (code, detail) in [
+        ("scheduled_too_far", "scheduled_at is more than 7 days ahead."),
+        // What PostHog answers while scheduled sends are off for the project.
+        ("invalid", "Scheduled sends are off for this project, so PostHog didn't send this request's email."),
+    ] {
+        let (server, client) = cloud_with(
+            vec![
+                Answer::json(
+                    400,
+                    json!({
+                        "type": "validation_error",
+                        "code": code,
+                        "detail": detail,
+                        "attr": "scheduled_at",
+                    }),
+                ),
+                accepted(),
+            ],
+            "https://us.posthog.com",
         )
-        .await
-        .unwrap_err();
+        .await;
 
-    assert_eq!(error.code(), "scheduled_too_far");
-    assert_eq!(error.status(), Some(400));
-    assert_eq!(error.kind(), EmailErrorKind::ValidationError);
-    assert_eq!(error.field(), Some("scheduled_at"));
-    let requests = server.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].json()["scheduled_at"],
-        "2027-12-01T09:00:00.000Z"
-    );
+        let error = client
+            .emails()
+            .send(
+                TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                    .scheduled_at(utc("2027-12-01T09:00:00Z")),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), code);
+        assert_eq!(error.status(), Some(400));
+        assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+        assert_eq!(error.field(), Some("scheduled_at"));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "{}", code);
+        assert_eq!(
+            requests[0].json()["scheduled_at"],
+            "2027-12-01T09:00:00.000Z"
+        );
+    }
 }
 
 #[cfg(feature = "tls")]

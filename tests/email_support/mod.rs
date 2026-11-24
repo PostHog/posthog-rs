@@ -189,6 +189,8 @@ struct FakeState {
     store_faults: VecDeque<Answer>,
     redirect_next_to: Option<String>,
     sent: Vec<serde_json::Value>,
+    send_answer: Option<Answer>,
+    upload_route_faults: VecDeque<Answer>,
 }
 
 /// What the upload route signs into each grant.
@@ -297,6 +299,23 @@ impl FakePostHog {
         self
     }
 
+    /// The send route answers every send it takes with `answer`, such as a
+    /// confirmation of a scheduled time.
+    pub fn answering_sends_with(self, answer: Answer) -> Self {
+        self.state.lock().unwrap().send_answer = Some(answer);
+        self
+    }
+
+    /// The upload route answers its next request with `answer`, such as a
+    /// `503` the SDK retries.
+    pub fn upload_route_answers_next(&self, answer: Answer) {
+        self.state
+            .lock()
+            .unwrap()
+            .upload_route_faults
+            .push_back(answer);
+    }
+
     /// Grants whose URL points at `store_url` instead of the store.
     pub fn with_store_at(self, store_url: &str) -> Self {
         self.state.lock().unwrap().store_url = store_url.to_string();
@@ -394,6 +413,9 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
         );
     };
     if path == UPLOADS_PATH {
+        if let Some(fault) = state.upload_route_faults.pop_front() {
+            return fault;
+        }
         if state.files_off {
             return django_error(
                 400,
@@ -447,7 +469,7 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
         }
     }
     state.sent.push(body);
-    accepted()
+    state.send_answer.clone().unwrap_or_else(accepted)
 }
 
 fn django_error(status: u16, kind: &str, code: &str, detail: &str, attr: Option<&str>) -> Answer {
