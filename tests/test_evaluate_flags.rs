@@ -1857,3 +1857,40 @@ mod async_tests {
         flags_mock.assert_calls(1);
     }
 }
+
+#[cfg(not(feature = "async-client"))]
+#[test]
+fn evaluate_flags_with_request_error_returns_a_snapshot_and_the_error() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(503).body("unavailable");
+    });
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host(server.base_url())
+            .feature_flags_request_max_retries(0u32)
+            .build()
+            .unwrap(),
+    );
+
+    let (flags, error) = client
+        .evaluate_flags_with_request_error("user-1", posthog::EvaluateFlagsOptions::default());
+    assert!(
+        matches!(
+            error,
+            Some(posthog::Error::ServerError { status: 503, .. })
+                | Some(posthog::Error::Connection(_))
+        ),
+        "{:?}",
+        error
+    );
+    assert!(flags.keys().is_empty());
+    assert!(!flags.is_enabled("beta"));
+
+    // The public method keeps returning the error when nothing resolved.
+    assert!(client
+        .evaluate_flags("user-1", posthog::EvaluateFlagsOptions::default())
+        .is_err());
+}

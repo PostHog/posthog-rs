@@ -1,4 +1,4 @@
-use crate::client::{apply_on_error_hooks, get_default_user_agent, OnErrorHook};
+use crate::client::{apply_on_error_hooks, OnErrorHook, SdkIdentity};
 use crate::feature_flags::{
     match_feature_flag_with_context, match_feature_flag_with_known_absent,
     match_feature_flag_with_version, CohortDefinition, EvaluationContext, FeatureFlag, FlagValue,
@@ -404,6 +404,9 @@ pub struct FlagPoller {
     /// Kept here rather than on `LocalEvaluationConfig` so the public config
     /// struct stays unchanged.
     on_error: Vec<OnErrorHook>,
+    /// The `User-Agent` value. The client builder replaces it for SDKs built
+    /// on this one.
+    user_agent: String,
 }
 
 impl FlagPoller {
@@ -440,6 +443,7 @@ impl FlagPoller {
             stop_signal: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
             on_error: Vec::new(),
+            user_agent: SdkIdentity::DEFAULT.user_agent(),
         }
     }
 
@@ -456,6 +460,11 @@ impl FlagPoller {
     #[cfg_attr(feature = "async-client", allow(dead_code))]
     pub(crate) fn set_on_error(&mut self, hooks: Vec<OnErrorHook>) {
         self.on_error = hooks;
+    }
+
+    #[cfg_attr(feature = "async-client", allow(dead_code))]
+    pub(crate) fn set_user_agent(&mut self, user_agent: String) {
+        self.user_agent = user_agent;
     }
 
     /// Start the polling thread.
@@ -485,6 +494,7 @@ impl FlagPoller {
         let cache = self.cache.clone();
         let stop_signal = self.stop_signal.clone();
         let on_error = self.on_error.clone();
+        let user_agent = self.user_agent.clone();
 
         let handle = std::thread::spawn(move || {
             let mut last_etag: Option<String> = None;
@@ -505,7 +515,7 @@ impl FlagPoller {
                     .timeout(config.request_timeout)
                     .header("Authorization", format!("Bearer {}", config.secret_key))
                     .header("X-PostHog-Project-Api-Key", &config.project_api_key)
-                    .header(USER_AGENT, get_default_user_agent());
+                    .header(USER_AGENT, user_agent.as_str());
 
                 if let Some(ref etag) = last_etag {
                     request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -572,7 +582,7 @@ impl FlagPoller {
                 format!("Bearer {}", self.config.secret_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
-            .header(USER_AGENT, get_default_user_agent())
+            .header(USER_AGENT, self.user_agent.as_str())
             .timeout(self.config.request_timeout)
             .send()
         {
@@ -606,6 +616,14 @@ impl FlagPoller {
 
         self.cache.update(data);
         Ok(())
+    }
+
+    /// Tell the polling thread to exit without waiting for it. It stops before
+    /// its next fetch. The client's `shutdown` calls this, since it can't take
+    /// the poller mutably.
+    #[cfg_attr(feature = "async-client", allow(dead_code))]
+    pub(crate) fn signal_stop(&self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
     }
 
     /// Stop the polling thread and wait for it to exit.
@@ -643,6 +661,9 @@ pub struct AsyncFlagPoller {
     /// Kept here rather than on `LocalEvaluationConfig` so the public config
     /// struct stays unchanged.
     on_error: Vec<OnErrorHook>,
+    /// The `User-Agent` value. The client builder replaces it for SDKs built
+    /// on this one.
+    user_agent: String,
 }
 
 #[cfg(feature = "async-client")]
@@ -681,6 +702,7 @@ impl AsyncFlagPoller {
             task_handle: None,
             is_running: Arc::new(tokio::sync::RwLock::new(false)),
             on_error: Vec::new(),
+            user_agent: SdkIdentity::DEFAULT.user_agent(),
         }
     }
 
@@ -695,6 +717,10 @@ impl AsyncFlagPoller {
     /// [`AsyncFlagPoller::start`]; not part of the public flag-poller API.
     pub(crate) fn set_on_error(&mut self, hooks: Vec<OnErrorHook>) {
         self.on_error = hooks;
+    }
+
+    pub(crate) fn set_user_agent(&mut self, user_agent: String) {
+        self.user_agent = user_agent;
     }
 
     /// Start the polling task.
@@ -736,6 +762,7 @@ impl AsyncFlagPoller {
         let stop_signal = self.stop_signal.clone();
         let is_running = self.is_running.clone();
         let on_error = self.on_error.clone();
+        let user_agent = self.user_agent.clone();
 
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(config.poll_interval);
@@ -761,7 +788,7 @@ impl AsyncFlagPoller {
                             .timeout(config.request_timeout)
                             .header("Authorization", format!("Bearer {}", config.secret_key))
                             .header("X-PostHog-Project-Api-Key", &config.project_api_key)
-                            .header(USER_AGENT, get_default_user_agent());
+                            .header(USER_AGENT, user_agent.as_str());
 
                         if let Some(ref etag) = last_etag {
                             request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -833,7 +860,7 @@ impl AsyncFlagPoller {
                 format!("Bearer {}", self.config.secret_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
-            .header(USER_AGENT, get_default_user_agent())
+            .header(USER_AGENT, self.user_agent.as_str())
             .timeout(self.config.request_timeout)
             .send()
             .await
@@ -871,6 +898,13 @@ impl AsyncFlagPoller {
     }
 
     /// Stop the polling task.
+    /// Tell the polling task to exit without waiting for it. It stops at its
+    /// next tick. The client's `shutdown` calls this, since it can't take the
+    /// poller mutably.
+    pub(crate) fn signal_stop(&self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
+    }
+
     pub async fn stop(&mut self) {
         debug!("Stopping async flag poller");
         self.stop_signal.store(true, Ordering::Relaxed);

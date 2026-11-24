@@ -17,7 +17,6 @@ use crate::capture_event::{
     wire_timestamp, BatchRequestRef, CaptureErrorResponse, CaptureEvent, CaptureResponse,
     EventResult, EventStatus,
 };
-use crate::client::get_default_user_agent;
 use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::event::Event;
@@ -131,7 +130,7 @@ pub(crate) fn build_headers_at(
     attempt: u32,
     now: DateTime<Utc>,
 ) -> HeaderMap {
-    let sdk_info = get_default_user_agent();
+    let sdk_info = opts.sdk_identity.user_agent();
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -592,6 +591,7 @@ mod tests {
         let defaults = CaptureDefaults {
             disable_geoip: true,
             is_server: true,
+            identity: crate::client::SdkIdentity::DEFAULT,
         };
         let built = [build_preprocessed(event, &defaults)];
         assert_eq!(
@@ -818,6 +818,7 @@ mod tests {
         let defaults = CaptureDefaults {
             disable_geoip: false,
             is_server: false,
+            identity: crate::client::SdkIdentity::DEFAULT,
         };
 
         let wire = build_preprocessed(event, &defaults);
@@ -893,6 +894,7 @@ mod tests {
         let defaults = CaptureDefaults {
             disable_geoip: false,
             is_server: false,
+            identity: crate::client::SdkIdentity::DEFAULT,
         };
         let built = [build_preprocessed(event, &defaults)];
         let map = built[0].properties.as_object().unwrap();
@@ -1474,6 +1476,43 @@ mod tests {
         // user-agent mirrors the same identity string.
         let ua = headers.get("user-agent").unwrap().to_str().unwrap();
         assert_eq!(ua, expected);
+    }
+
+    /// An SDK built on this one reports its own identity in the headers and as
+    /// the default `$lib`, `$lib_version` and version parts. An event that
+    /// names its own library keeps it.
+    #[test]
+    fn sdk_identity_replaces_the_header_and_default_lib() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .sdk_identity("posthog-wrapper", "2.3.4")
+            .build()
+            .unwrap();
+
+        let headers = build_headers(&opts, &Uuid::now_v7(), 1);
+        assert_eq!(
+            headers.get("posthog-sdk-info").unwrap(),
+            "posthog-wrapper/2.3.4"
+        );
+        assert_eq!(headers.get("user-agent").unwrap(), "posthog-wrapper/2.3.4");
+
+        let defaults = opts.capture_defaults();
+        let event = preprocess_capture_event(Event::new("test", "user-1"), &defaults, &[]).unwrap();
+        let props = event.properties();
+        assert_eq!(props["$lib"], serde_json::json!("posthog-wrapper"));
+        assert_eq!(props["$lib_version"], serde_json::json!("2.3.4"));
+        assert_eq!(props["$lib_version__major"], serde_json::json!(2));
+        assert_eq!(props["$lib_version__minor"], serde_json::json!(3));
+        assert_eq!(props["$lib_version__patch"], serde_json::json!(4));
+
+        let mut own = Event::new("test", "user-1");
+        own.insert_prop("$lib", "posthog-integration").unwrap();
+        let own = preprocess_capture_event(own, &defaults, &[]).unwrap();
+        assert_eq!(
+            own.properties()["$lib"],
+            serde_json::json!("posthog-integration")
+        );
+        assert!(!own.properties().contains_key("$lib_version"));
     }
 
     // -- wire timestamps -------------------------------------------------------
