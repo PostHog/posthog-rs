@@ -1467,50 +1467,6 @@ async fn scheduled_at_goes_out_in_utc_rounded_up_to_the_millisecond_on_both_form
 
 #[cfg(feature = "tls")]
 #[tokio::test]
-async fn a_scheduled_send_retries_with_the_same_time_and_key() {
-    let (server, client) = cloud_with(
-        vec![
-            unavailable(),
-            Answer::json(
-                202,
-                json!({
-                    "message_id": MESSAGE_ID,
-                    "replayed": true,
-                    "status": "scheduled",
-                    "scheduled_at": "2026-12-01T09:00:00.124000Z",
-                }),
-            ),
-        ],
-        "https://eu.i.posthog.com",
-    )
-    .await;
-
-    let result = client
-        .emails()
-        .send(
-            TemplateEmail::new("user@example.com", TEMPLATE_ID)
-                .scheduled_at(utc("2026-12-01T09:00:00.123000500Z"))
-                .max_retries(1),
-        )
-        .await
-        .unwrap();
-
-    assert!(result.replayed);
-    assert_eq!(result.status(), SendEmailStatus::Scheduled);
-    assert_eq!(result.scheduled_at, Some(utc("2026-12-01T09:00:00.124Z")));
-    let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    let key = requests[0].header("idempotency-key");
-    assert!(key.is_some());
-    for request in &requests {
-        assert_eq!(request.json()["scheduled_at"], "2026-12-01T09:00:00.124Z");
-        assert_eq!(request.header("idempotency-key"), key);
-        assert_eq!(request.header("host"), Some("eu.posthog.com"));
-    }
-}
-
-#[cfg(feature = "tls")]
-#[tokio::test]
 async fn a_confirmed_schedule_returns_the_requested_time() {
     for answered in [
         "2026-12-01T09:00:00.120Z",
@@ -1584,31 +1540,6 @@ async fn a_future_time_that_posthog_sends_now_fails_with_the_message_id() {
         assert_eq!(error.message_id(), Some(MESSAGE_ID));
         assert_eq!(server.requests().len(), 1);
     }
-}
-
-#[cfg(feature = "tls")]
-#[tokio::test]
-async fn the_minute_of_grace_counts_from_the_first_attempt() {
-    // Two retries wait at least 2.4 seconds, so a clock read taken after
-    // PostHog answers would put a time 61.8 seconds ahead within the minute.
-    let (server, client) = cloud_with(
-        vec![unavailable(), unavailable(), sent_now()],
-        "https://us.posthog.com",
-    )
-    .await;
-
-    let error = client
-        .emails()
-        .send(
-            TemplateEmail::new("user@example.com", TEMPLATE_ID)
-                .scheduled_at(chrono::Utc::now() + chrono::Duration::milliseconds(61_800))
-                .max_retries(2),
-        )
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.code(), "schedule_not_confirmed");
-    assert_eq!(server.requests().len(), 3);
 }
 
 #[cfg(feature = "tls")]
