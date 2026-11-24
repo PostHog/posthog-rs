@@ -367,6 +367,36 @@ fn definitions_keep_the_marker_through_serialization() {
 }
 
 #[test]
+fn definitions_keep_every_other_field_through_serialization() {
+    let mut full = beta_feature(
+        json!({
+            "groups": [{
+                "properties": [],
+                "rollout_percentage": 50.0,
+                "variant": "test",
+                "aggregation_group_type_index": 1
+            }],
+            "multivariate": {"variants": [{"key": "test", "rollout_percentage": 100.0}]},
+            "payloads": {"test": {"color": "blue"}},
+            "aggregation_group_type_index": 2,
+            "early_exit": true
+        }),
+        json!({"has_experiment": true}),
+    );
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(definitions(vec![full.clone()], json!({}))).unwrap();
+
+    let sent = serde_json::to_value(&response).unwrap();
+    assert_eq!(sent["flags"][0], full);
+
+    full["filters"]
+        .as_object_mut()
+        .unwrap()
+        .remove("feature_enrollment");
+    assert_eq!(serde_json::to_value(&response.flags[0]).unwrap(), full);
+}
+
+#[test]
 fn a_cleared_cache_forgets_the_marker() {
     let evaluator = evaluator(definitions(
         vec![beta_feature(json!({}), json!({}))],
@@ -473,6 +503,26 @@ mod client {
         );
         assert_eq!(opted_out.get_flag_payload("beta-feature"), None);
         remote.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_marker_skips_only_its_flag() {
+        let server = MockServer::start_async().await;
+        let malformed = json!({
+            "key": "malformed",
+            "active": true,
+            "filters": {"feature_enrollment": "yes", "groups": everyone(100.0)}
+        });
+        let client = client(&server, vec![malformed, beta_feature(json!({}), json!({}))]).await;
+
+        let flags = client
+            .evaluate_flags("user-123", options(enrollment(json!(true)), true))
+            .await
+            .unwrap();
+        assert_eq!(
+            flags.get_flag("beta-feature"),
+            Some(FlagValue::Boolean(true))
+        );
     }
 
     #[tokio::test]
