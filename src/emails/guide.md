@@ -88,6 +88,39 @@ another millisecond fails with `idempotency_key_reused`. To stop scheduled
 emails before they go out, disable the email's workflow in PostHog until
 they have reached a final status. That refuses every new send of it meanwhile.
 
+# Batches
+
+[`Emails::batch`] sends the same email to many recipients, one email each:
+a [`TemplateBatch`](crate::TemplateBatch) with `template_data` per
+recipient for a template made in PostHog, or a
+[`CodeBatch`](crate::CodeBatch) with content your code rendered. The client
+sends at most 100 recipients and 4 MiB of JSON per request, one request
+after another, and waits at least 45 seconds for each answer. Each
+[`BatchRecipient`](crate::BatchRecipient) has its own idempotency key,
+given or made by the client, that every retry reuses. Check each result's
+[`status`](crate::BatchEmailResult::status):
+
+- `Queued`: PostHog accepted the email.
+- `Failed`: PostHog refused it, and `error` says why, such as a suppressed
+  address.
+- `Unconfirmed`: the client can't tell whether PostHog accepted it, such as
+  after a lost answer. Send it again with the same key within 24 hours, so
+  it goes out once. It stays `Unconfirmed` when a later answer refuses it,
+  since that doesn't prove it wasn't sent: `later_error` holds that answer.
+- `NotAttempted`: an earlier request of the batch failed, so the client
+  sent nothing for it.
+
+At the end of a batch, the client reads by its key each `Unconfirmed` email
+that has no message ID, and adds the ID it finds. That read never changes
+the status. A request that fails as a whole, such as a rate limit past its
+retries, stops the batch with an [`EmailError`](crate::EmailError) whose
+[`batch_result`](crate::EmailError::batch_result) holds every recipient.
+The code `batch_unavailable` (`409`) means the project can't send batches
+yet, and a `404` that the template doesn't exist or batch sends are off for
+the project: send each email the batch didn't queue with [`Emails::send`]
+and its recipient's idempotency key. A batch takes no `cc`, `bcc`,
+attachments or `scheduled_at`.
+
 # Timeouts and retries
 
 Each request times out after `email_request_timeout_seconds`, 15 by

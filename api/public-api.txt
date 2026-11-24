@@ -168,6 +168,15 @@ pub type posthog::tower::PostHogService<S>::Future = core::pin::Pin<alloc::boxed
 pub type posthog::tower::PostHogService<S>::Response = <S as tower_service::Service<http::request::Request<B>>>::Response
 pub fn posthog::tower::PostHogService<S>::call(&mut self, http::request::Request<B>) -> Self::Future
 pub fn posthog::tower::PostHogService<S>::poll_ready(&mut self, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), Self::Error>>
+#[non_exhaustive] pub enum posthog::BatchEmailStatus
+pub posthog::BatchEmailStatus::Failed
+pub posthog::BatchEmailStatus::NotAttempted
+pub posthog::BatchEmailStatus::Queued
+pub posthog::BatchEmailStatus::Unconfirmed
+impl posthog::BatchEmailStatus
+pub fn posthog::BatchEmailStatus::as_str(self) -> &'static str
+impl core::fmt::Display for posthog::BatchEmailStatus
+pub fn posthog::BatchEmailStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum posthog::CaptureCompression
 pub posthog::CaptureCompression::Br
 pub posthog::CaptureCompression::Deflate
@@ -287,6 +296,13 @@ pub fn posthog::FlagValue::default() -> Self
 pub posthog::PostHogError::Capture(posthog::CaptureFailure<'a>)
 pub posthog::PostHogError::FeatureFlags(posthog::FlagsFailure<'a>)
 pub posthog::PostHogError::LocalEvaluation(posthog::LocalEvaluationFailure<'a>)
+#[non_exhaustive] pub enum posthog::SendBatch
+pub posthog::SendBatch::Code(posthog::CodeBatch)
+pub posthog::SendBatch::Template(posthog::TemplateBatch)
+impl core::convert::From<posthog::CodeBatch> for posthog::SendBatch
+pub fn posthog::SendBatch::from(posthog::CodeBatch) -> Self
+impl core::convert::From<posthog::TemplateBatch> for posthog::SendBatch
+pub fn posthog::SendBatch::from(posthog::TemplateBatch) -> Self
 #[non_exhaustive] pub enum posthog::SendEmail
 pub posthog::SendEmail::Code(posthog::CodeEmail)
 pub posthog::SendEmail::Template(posthog::TemplateEmail)
@@ -306,6 +322,21 @@ pub async fn posthog::AsyncFlagPoller::start(&mut self)
 pub async fn posthog::AsyncFlagPoller::stop(&mut self)
 impl core::ops::drop::Drop for posthog::AsyncFlagPoller
 pub fn posthog::AsyncFlagPoller::drop(&mut self)
+#[non_exhaustive] pub struct posthog::BatchEmailResult
+pub posthog::BatchEmailResult::error: core::option::Option<posthog::EmailError>
+pub posthog::BatchEmailResult::idempotency_key: alloc::string::String
+pub posthog::BatchEmailResult::index: usize
+pub posthog::BatchEmailResult::later_error: core::option::Option<posthog::EmailError>
+pub posthog::BatchEmailResult::message_id: core::option::Option<alloc::string::String>
+pub posthog::BatchEmailResult::replayed: bool
+pub posthog::BatchEmailResult::status: posthog::BatchEmailStatus
+pub posthog::BatchEmailResult::to: alloc::string::String
+pub struct posthog::BatchRecipient
+impl posthog::BatchRecipient
+pub fn posthog::BatchRecipient::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::BatchRecipient::idempotency_key(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::BatchRecipient::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::BatchRecipient::template_data(self, serde_json::value::Value) -> Self
 pub struct posthog::BeforeSendHook(_)
 impl posthog::BeforeSendHook
 pub fn posthog::BeforeSendHook::new<F>(F) -> Self where F: core::ops::function::FnMut(posthog::Event) -> core::option::Option<posthog::Event> + core::marker::Send + 'static
@@ -412,6 +443,18 @@ pub fn posthog::ClientOptionsBuilder::build(&self) -> core::result::Result<posth
 pub fn posthog::ClientOptionsBuilder::on_error<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::PostHogError<'_>) + core::marker::Send + core::marker::Sync + 'static
 impl core::default::Default for posthog::ClientOptionsBuilder
 pub fn posthog::ClientOptionsBuilder::default() -> Self
+pub struct posthog::CodeBatch
+impl posthog::CodeBatch
+pub fn posthog::CodeBatch::from(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::CodeBatch::html(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::CodeBatch::max_retries(self, u32) -> Self
+pub fn posthog::CodeBatch::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::iter::traits::collect::IntoIterator<Item = posthog::BatchRecipient>) -> Self
+pub fn posthog::CodeBatch::reply_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::CodeBatch::sensitive(self, bool) -> Self
+pub fn posthog::CodeBatch::text(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::CodeBatch::tracking(self, impl core::convert::Into<posthog::EmailTracking>) -> Self
+impl core::convert::From<posthog::CodeBatch> for posthog::SendBatch
+pub fn posthog::SendBatch::from(posthog::CodeBatch) -> Self
 pub struct posthog::CodeEmail
 impl posthog::CodeEmail
 pub fn posthog::CodeEmail::attachment(self, posthog::EmailAttachment) -> Self
@@ -448,6 +491,7 @@ impl core::fmt::Debug for posthog::EmailAttachment
 pub fn posthog::EmailAttachment::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct posthog::EmailError(_)
 impl posthog::EmailError
+pub fn posthog::EmailError::batch_result(&self) -> core::option::Option<&posthog::SendBatchResult>
 pub fn posthog::EmailError::code(&self) -> &str
 pub fn posthog::EmailError::docs_url(&self) -> core::option::Option<&str>
 pub fn posthog::EmailError::field(&self) -> core::option::Option<&str>
@@ -484,6 +528,7 @@ pub posthog::EmailWarning::fix: core::option::Option<alloc::string::String>
 pub posthog::EmailWarning::message: alloc::string::String
 pub struct posthog::Emails<'a>
 impl<'a> posthog::Emails<'a>
+pub async fn posthog::Emails<'a>::batch(&self, impl core::convert::Into<posthog::SendBatch>) -> core::result::Result<posthog::SendBatchResult, posthog::EmailError>
 pub async fn posthog::Emails<'a>::get(&self, &str) -> core::result::Result<posthog::EmailStatus, posthog::EmailError>
 pub async fn posthog::Emails<'a>::send(&self, impl core::convert::Into<posthog::SendEmail>) -> core::result::Result<posthog::SendEmailResult, posthog::EmailError>
 pub struct posthog::EndpointManager
@@ -680,6 +725,9 @@ pub fn posthog::RequestContext::option(self, impl core::convert::Into<alloc::str
 pub fn posthog::RequestContext::property(self, impl core::convert::Into<alloc::string::String>, impl serde_core::ser::Serialize) -> core::result::Result<Self, posthog::Error>
 pub async fn posthog::RequestContext::scope<F: core::future::future::Future>(self, F) -> <F as core::future::future::Future>::Output
 pub fn posthog::RequestContext::session_id(self, impl core::convert::Into<alloc::string::String>) -> Self
+#[non_exhaustive] pub struct posthog::SendBatchResult
+pub posthog::SendBatchResult::results: alloc::vec::Vec<posthog::BatchEmailResult>
+pub posthog::SendBatchResult::warnings: alloc::vec::Vec<posthog::EmailWarning>
 #[non_exhaustive] pub struct posthog::SendEmailResult
 pub posthog::SendEmailResult::id: alloc::string::String
 pub posthog::SendEmailResult::replayed: bool
@@ -687,6 +735,13 @@ pub posthog::SendEmailResult::scheduled_at: core::option::Option<chrono::datetim
 pub posthog::SendEmailResult::warnings: alloc::vec::Vec<posthog::EmailWarning>
 impl posthog::SendEmailResult
 pub fn posthog::SendEmailResult::status(&self) -> posthog::SendEmailStatus
+pub struct posthog::TemplateBatch
+impl posthog::TemplateBatch
+pub fn posthog::TemplateBatch::max_retries(self, u32) -> Self
+pub fn posthog::TemplateBatch::new(impl core::convert::Into<alloc::string::String>, impl core::iter::traits::collect::IntoIterator<Item = posthog::BatchRecipient>) -> Self
+pub fn posthog::TemplateBatch::template_data(self, serde_json::value::Value) -> Self
+impl core::convert::From<posthog::TemplateBatch> for posthog::SendBatch
+pub fn posthog::SendBatch::from(posthog::TemplateBatch) -> Self
 pub struct posthog::TemplateEmail
 impl posthog::TemplateEmail
 pub fn posthog::TemplateEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self

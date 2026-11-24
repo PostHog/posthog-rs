@@ -20,13 +20,19 @@ pub const TEMPLATE_ID: &str = "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b";
 pub const MESSAGE_ID: &str = "01a18356-c56c-0001-e494-7666bc915188";
 pub const SEND_PATH: &str = "/api/messaging/send/email/";
 pub const UPLOADS_PATH: &str = "/api/messaging/attachments/uploads/";
+pub const BATCH_PATH: &str = "/api/messaging/send/email_batch/";
+pub const STATUS_BY_KEY_PATH: &str = "/api/messaging/emails/status/";
 
-#[derive(Debug, Clone)]
+type AnswerOf = Arc<dyn Fn(&Recorded) -> Answer + Send + Sync>;
+
+#[derive(Clone)]
 pub struct Answer {
     status: u16,
     content_type: &'static str,
     body: String,
     headers: Vec<(String, String)>,
+    delay: Duration,
+    of_request: Option<AnswerOf>,
 }
 
 impl Answer {
@@ -36,6 +42,8 @@ impl Answer {
             content_type: "application/json",
             body: body.to_string(),
             headers: Vec::new(),
+            delay: Duration::ZERO,
+            of_request: None,
         }
     }
 
@@ -46,11 +54,36 @@ impl Answer {
             content_type: "application/xml",
             body: body.to_string(),
             headers: Vec::new(),
+            delay: Duration::ZERO,
+            of_request: None,
         }
+    }
+
+    /// The answer `answer` makes of the request it answers.
+    pub fn of_request(answer: impl Fn(&Recorded) -> Answer + Send + Sync + 'static) -> Self {
+        Self {
+            of_request: Some(Arc::new(answer)),
+            ..Self::json(500, serde_json::Value::Null)
+        }
+    }
+
+    /// A `2xx` whose body is over the 1 MiB the client reads, so the client
+    /// can't tell what PostHog answered, as when the connection drops.
+    pub fn lost() -> Self {
+        Self::json(
+            200,
+            serde_json::json!({"padding": "x".repeat((1 << 20) + 1)}),
+        )
     }
 
     pub fn header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    /// Answers only after `delay`.
+    pub fn after(mut self, delay: Duration) -> Self {
+        self.delay = delay;
         self
     }
 }
@@ -59,6 +92,8 @@ impl Answer {
 pub struct Recorded {
     pub method: String,
     pub path: String,
+    /// The query string, without `?`, or empty.
+    pub query: String,
     /// Header names in lowercase.
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
@@ -135,18 +170,26 @@ fn script(answers: Vec<Answer>) -> (Arc<Mutex<Vec<Recorded>>>, Responder) {
     let recorded = Arc::clone(&requests);
     let next = AtomicUsize::new(0);
     let respond = move |request: &HttpMockRequest| {
-        recorded.lock().unwrap().push(Recorded {
+        let request = Recorded {
             method: request.method_str().to_string(),
             path: request.uri().path().to_string(),
+            query: request.uri().query().unwrap_or_default().to_string(),
             headers: request
                 .headers_vec()
                 .iter()
                 .map(|(name, value)| (name.to_lowercase(), value.clone()))
                 .collect(),
             body: request.body_vec(),
-        });
+        };
+        recorded.lock().unwrap().push(request.clone());
         let index = next.fetch_add(1, Ordering::SeqCst);
-        response(&answers[index.min(answers.len() - 1)])
+        let mut answer = answers[index.min(answers.len() - 1)].clone();
+        let delay = answer.delay;
+        if let Some(of_request) = answer.of_request.take() {
+            answer = of_request(&request);
+        }
+        std::thread::sleep(delay.max(answer.delay));
+        response(&answer)
     };
     (requests, Box::new(respond))
 }

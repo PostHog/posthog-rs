@@ -1,12 +1,15 @@
 use std::future::Future;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use reqwest::header::HeaderMap;
 use reqwest::{Client as HttpClient, Method};
 
 use super::error::EmailError;
-use super::shared::{self, Accepted, EmailTracker, Reply, Upload};
-use super::types::{EmailAttachment, EmailStatus, SendEmail, SendEmailResult};
+use super::shared::{self, Accepted, BatchRequest, BatchRun, EmailTracker, Reply, Upload};
+use super::types::{
+    EmailAttachment, EmailStatus, SendBatch, SendBatchResult, SendEmail, SendEmailResult,
+};
 use crate::client::{parse_retry_after, ClientOptions};
 
 #[doc = include_str!("guide.md")]
@@ -122,8 +125,162 @@ impl<'a> Emails<'a> {
             )
             .await?;
         let result = shared::parse_send_reply(reply, prepared.scheduled_at, first_attempt_at)?;
-        shared::log_warnings(&result);
+        shared::log_warnings(&result.warnings);
         Ok(result)
+    }
+
+    /// Queues the same email for many recipients, one email each, from a
+    /// template made in PostHog or from content your code rendered.
+    ///
+    /// The client sends the recipients in requests of at most 100 recipients
+    /// and 4 MiB of JSON, one after another, and waits at least 45 seconds for
+    /// each answer. Each recipient has an idempotency key, given or made by the
+    /// client, that every retry reuses, so a retry never queues an email
+    /// twice. A request retries what [`send`](Self::send) retries.
+    ///
+    /// `Ok` holds a result per recipient, in the order of the recipients.
+    /// Check each [`status`](crate::BatchEmailResult::status), and send an
+    /// [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed) email again with
+    /// the same key within 24 hours, so it goes out once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`EmailError`] whose
+    /// [`batch_result`](EmailError::batch_result) holds every recipient when a
+    /// request failed as a whole, so the batch stopped. When that answer was
+    /// lost, the client first reads each email the request may have queued by
+    /// its key. The code is `batch_unavailable` when the project can't send
+    /// batches yet, and a `404` means the template doesn't exist or batch
+    /// sends are off: send each email the batch didn't queue with
+    /// [`send`](Self::send) and its recipient's idempotency key.
+    /// `client_closed` means the client shut down during the batch.
+    ///
+    /// Returns an [`EmailError`] without a batch result when the client sent
+    /// nothing: an argument check failed, such as two recipients with the
+    /// same idempotency key, or the client is disabled, shut down or has no
+    /// `secret_key`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use posthog::{BatchEmailStatus, BatchRecipient, TemplateBatch};
+    /// use serde_json::json;
+    ///
+    /// # async fn example(posthog: posthog::Client) -> Result<(), posthog::EmailError> {
+    /// let sent = posthog
+    ///     .emails()
+    ///     .batch(TemplateBatch::new(
+    ///         "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b",
+    ///         vec![
+    ///             BatchRecipient::new("ada@example.com").template_data(json!({ "name": "Ada" })),
+    ///             BatchRecipient::new("alan@example.com").template_data(json!({ "name": "Alan" })),
+    ///         ],
+    ///     ))
+    ///     .await?;
+    /// for email in &sent.results {
+    ///     if email.status != BatchEmailStatus::Queued {
+    ///         println!("{} {} {:?}", email.to, email.status, email.error);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn batch(&self, batch: impl Into<SendBatch>) -> Result<SendBatchResult, EmailError> {
+        let mut run = shared::prepare_batch(batch.into())?;
+        let _in_flight = self
+            .tracker
+            .admit(self.options.is_disabled(), shared::SEND_NOT_DONE)?;
+        let connection = shared::connect(self.options, shared::SEND_KEY_NEEDED)?;
+        let request = shared::batch_request(&connection)?;
+        let max_retries = run.max_retries.unwrap_or(connection.max_retries);
+        let sent = self.send_chunks(&mut run, &request, max_retries).await;
+        self.read_lost(&mut run, &connection).await;
+        match sent {
+            Ok(()) => Ok(run.finish()),
+            Err(error) => Err(run.failure(error)),
+        }
+    }
+
+    /// Sends the batch's requests one after another, until one fails as a
+    /// whole or the client shuts down.
+    async fn send_chunks(
+        &self,
+        run: &mut BatchRun,
+        request: &BatchRequest,
+        max_retries: u32,
+    ) -> Result<(), EmailError> {
+        for position in 0..run.chunk_count() {
+            if position > 0 && self.tracker.is_closed() {
+                return Err(run.closed_at(position));
+            }
+            if let Err(error) = self.send_chunk(run, position, request, max_retries).await {
+                run.stop(position, &error);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Sends one request of a batch until PostHog answers it, retrying what
+    /// [`shared::retry_delay`] allows while the client is open.
+    async fn send_chunk(
+        &self,
+        run: &mut BatchRun,
+        position: usize,
+        request: &BatchRequest,
+        max_retries: u32,
+    ) -> Result<(), EmailError> {
+        let body = run.chunk_body(position);
+        let mut attempts = 0;
+        loop {
+            let reply = self
+                .attempt(
+                    Method::POST,
+                    &request.url,
+                    &request.headers,
+                    Some(&body),
+                    request.timeout,
+                )
+                .await;
+            let error = match run.answer(position, reply) {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            let Some(delay) = shared::retry_delay(&error, attempts, max_retries) else {
+                return Err(error);
+            };
+            tokio::time::sleep(delay).await;
+            if self.tracker.is_closed() {
+                return Err(shared::retry_refused());
+            }
+            attempts += 1;
+        }
+    }
+
+    /// Reads the message ID of each unconfirmed recipient without one by
+    /// their idempotency key, once, until a read fails other than with `404`
+    /// or the client shuts down.
+    async fn read_lost(&self, run: &mut BatchRun, connection: &shared::Connection) {
+        let Ok(headers) = connection.headers(None) else {
+            return;
+        };
+        for (index, key) in run.lost_keys() {
+            let Some(url) = shared::status_by_key_url(&connection.app_host, &key) else {
+                return;
+            };
+            if self.tracker.is_closed() {
+                return;
+            }
+            let read = self
+                .request(Method::GET, &url, &headers, None, connection, 0)
+                .await
+                .and_then(shared::parse_status_reply);
+            match read {
+                Ok(status) => run.found(index, status),
+                Err(error) if error.status() == Some(404) => {}
+                Err(_) => return,
+            }
+        }
     }
 
     /// Reads the status of an email that [`send`](Self::send) queued or
@@ -198,7 +355,7 @@ impl<'a> Emails<'a> {
         retrying(max_retries, || {
             let method = method.clone();
             async move {
-                self.attempt(method, url, headers, body, connection)
+                self.attempt(method, url, headers, body, connection.timeout)
                     .await
                     .and_then(shared::accept)
             }
@@ -212,12 +369,12 @@ impl<'a> Emails<'a> {
         url: &str,
         headers: &HeaderMap,
         body: Option<&[u8]>,
-        connection: &shared::Connection,
+        timeout: Duration,
     ) -> Result<Reply, EmailError> {
         let mut request = self
             .http()?
             .request(method, url)
-            .timeout(connection.timeout)
+            .timeout(timeout)
             .headers(headers.clone());
         if let Some(body) = body {
             request = request.body(body.to_vec());

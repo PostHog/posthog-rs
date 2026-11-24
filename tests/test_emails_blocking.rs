@@ -9,11 +9,12 @@ use std::time::Duration;
 
 use common::default_user_agent;
 use email_support::{
-    accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, ScriptedServer,
-    MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, Recorded,
+    ScriptedServer, BATCH_PATH, MESSAGE_ID, SEND_PATH, STATUS_BY_KEY_PATH, TEMPLATE_ID,
 };
 use posthog::{
-    CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, SendEmailStatus, TemplateEmail,
+    BatchEmailStatus, BatchRecipient, CodeEmail, EmailAttachment, EmailDeliveryStatus,
+    EmailErrorKind, SendEmailStatus, TemplateBatch, TemplateEmail,
 };
 use serde_json::json;
 
@@ -545,4 +546,119 @@ fn get_reads_a_scheduled_email() {
         client.emails().get(MESSAGE_ID).unwrap().status,
         EmailDeliveryStatus::Scheduled
     );
+}
+
+fn batch_keys(request: &Recorded) -> Vec<String> {
+    request.json()["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|recipient| recipient["idempotency_key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn batch_queued() -> Answer {
+    Answer::of_request(|request| {
+        let slots: Vec<_> = batch_keys(request)
+            .iter()
+            .map(|key| json!({"message_id": format!("msg_{key}"), "status": "queued"}))
+            .collect();
+        Answer::json(200, json!({ "results": slots }))
+    })
+}
+
+fn batch_of(count: usize) -> TemplateBatch {
+    TemplateBatch::new(
+        TEMPLATE_ID,
+        (0..count).map(|index| {
+            BatchRecipient::new(format!("user{index}@example.com"))
+                .idempotency_key(format!("key-{index}"))
+        }),
+    )
+}
+
+#[test]
+fn a_batch_sends_requests_of_100_in_order() {
+    let server = ScriptedServer::start(vec![batch_queued()]);
+    let client = client_for(&server);
+
+    let result = client.emails().batch(batch_of(150)).unwrap();
+
+    let requests = server.requests();
+    assert!(requests.iter().all(|request| request.path == BATCH_PATH));
+    assert_eq!(
+        requests
+            .iter()
+            .map(batch_keys)
+            .map(|keys| keys.len())
+            .collect::<Vec<_>>(),
+        vec![100, 50]
+    );
+    assert_eq!(batch_keys(&requests[1])[0], "key-100");
+    assert!(result
+        .results
+        .iter()
+        .all(|result| result.status == BatchEmailStatus::Queued));
+    assert_eq!(
+        result.results[149].message_id.as_deref(),
+        Some("msg_key-149")
+    );
+}
+
+#[test]
+fn a_lost_batch_answer_reads_each_email_by_its_key() {
+    let server = ScriptedServer::start(vec![
+        Answer::lost(),
+        Answer::json(
+            200,
+            json!({
+                "id": "m0",
+                "status": "sent",
+                "created_at": "2026-11-22T10:00:00Z",
+                "status_at": "2026-11-22T10:00:01Z",
+            }),
+        ),
+    ]);
+    let client = client_for(&server);
+
+    let error = client
+        .emails()
+        .batch(batch_of(1).max_retries(0))
+        .unwrap_err();
+
+    assert_eq!(error.code(), "network_error");
+    let read = &server.requests()[1];
+    assert_eq!(
+        (read.path.as_str(), read.query.as_str()),
+        (STATUS_BY_KEY_PATH, "idempotency_key=key-0")
+    );
+    let only = &error.batch_result().unwrap().results[0];
+    assert_eq!(
+        (only.status, only.message_id.as_deref()),
+        (BatchEmailStatus::Unconfirmed, Some("m0"))
+    );
+}
+
+#[test]
+fn a_shutdown_during_a_batch_retry_wait_sends_no_retry() {
+    let server = ScriptedServer::start(vec![
+        Answer::json(
+            429,
+            json!({"type": "throttled", "code": "throttled", "detail": "Slow down."}),
+        ),
+        batch_queued(),
+    ]);
+    let client = Arc::new(client_for(&server));
+    let sender = Arc::clone(&client);
+    let sent = std::thread::spawn(move || sender.emails().batch(batch_of(150)));
+    server.wait_for(1);
+
+    client.shutdown();
+
+    let error = sent.join().unwrap().unwrap_err();
+    assert_eq!(error.code(), "client_closed");
+    assert_eq!(server.requests().len(), 1);
+    let result = error.batch_result().unwrap();
+    assert_eq!(result.results[0].status, BatchEmailStatus::Failed);
+    assert_eq!(result.results[100].status, BatchEmailStatus::NotAttempted);
 }

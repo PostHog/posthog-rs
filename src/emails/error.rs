@@ -1,7 +1,10 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::panic::{RefUnwindSafe, UnwindSafe};
+use std::sync::Arc;
 use std::time::Duration;
+
+use super::types::SendBatchResult;
 
 /// A coarse category of an [`EmailError`], for code that branches on the kind
 /// of failure rather than on the exact [`code`](EmailError::code).
@@ -21,7 +24,8 @@ pub enum EmailErrorKind {
     /// for a send with files, no upload route.
     NotFound,
     /// PostHog answered `409`: a send with the same idempotency key is still
-    /// in flight.
+    /// in flight. A `409` with `batch_unavailable` is an
+    /// [`ApplicationError`](Self::ApplicationError).
     ConcurrentIdempotentRequests,
     /// PostHog answered `422` with `idempotency_key_reused`: the key was
     /// already used for a different email.
@@ -73,6 +77,7 @@ impl EmailErrorKind {
             Some(403) => EmailErrorKind::InvalidPermission,
             Some(404) => EmailErrorKind::NotFound,
             Some(409) if code == "template_outdated" => EmailErrorKind::ValidationError,
+            Some(409) if code == "batch_unavailable" => EmailErrorKind::ApplicationError,
             Some(409) => EmailErrorKind::ConcurrentIdempotentRequests,
             Some(422) if code == "idempotency_key_reused" => {
                 EmailErrorKind::InvalidIdempotentRequest
@@ -99,10 +104,13 @@ impl fmt::Display for EmailErrorKind {
 /// Branch on [`code`](Self::code), PostHog's stable error code such as
 /// `quota_limited`, or on [`kind`](Self::kind), a coarse category. The message
 /// never holds the secret key or the request body.
-#[derive(Debug)]
+///
+/// A batch that stopped after it sent a request carries every recipient's
+/// result in [`batch_result`](Self::batch_result).
+#[derive(Debug, Clone)]
 pub struct EmailError(Box<Details>);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Details {
     kind: EmailErrorKind,
     code: String,
@@ -114,6 +122,7 @@ struct Details {
     field: Option<String>,
     retry_after: Option<Duration>,
     message_id: Option<String>,
+    batch: Option<SendBatchResult>,
     source: Option<Source>,
 }
 
@@ -121,8 +130,10 @@ struct Details {
 ///
 /// Nothing changes it after the error is built, so it keeps `EmailError`, and
 /// the crate's `Error` that wraps it, unwind safe, as that `Error` was before
-/// it had an email variant.
-struct Source(Box<dyn StdError + Send + Sync>);
+/// it had an email variant. An error copied into each recipient's result of a
+/// batch shares it.
+#[derive(Clone)]
+struct Source(Arc<dyn StdError + Send + Sync>);
 
 impl UnwindSafe for Source {}
 impl RefUnwindSafe for Source {}
@@ -147,6 +158,7 @@ impl EmailError {
             field: None,
             retry_after: None,
             message_id: None,
+            batch: None,
             source: None,
         }))
     }
@@ -156,6 +168,25 @@ impl EmailError {
         let mut error = Self::new(code, message).with_field(Some(field.to_string()));
         error.0.kind = EmailErrorKind::ValidationError;
         error
+    }
+
+    /// An error PostHog answered about one recipient of a batch, which may
+    /// carry no status.
+    pub(crate) fn answered(status: Option<u16>, code: String, message: String) -> Self {
+        let mut error = Self::new(code, message);
+        error.0.kind = EmailErrorKind::of(status, &error.0.code);
+        error.0.status = status;
+        error
+    }
+
+    pub(crate) fn with_kind(mut self, kind: EmailErrorKind) -> Self {
+        self.0.kind = kind;
+        self
+    }
+
+    pub(crate) fn with_batch(mut self, batch: SendBatchResult) -> Self {
+        self.0.batch = Some(batch);
+        self
     }
 
     pub(crate) fn from_response(
@@ -176,6 +207,7 @@ impl EmailError {
             field: None,
             retry_after,
             message_id: None,
+            batch: None,
             source: None,
         }))
     }
@@ -203,7 +235,7 @@ impl EmailError {
     }
 
     pub(crate) fn with_source(mut self, source: impl StdError + Send + Sync + 'static) -> Self {
-        self.0.source = Some(Source(Box::new(source)));
+        self.0.source = Some(Source(Arc::new(source)));
         self
     }
 
@@ -262,6 +294,19 @@ impl EmailError {
     /// [`Emails::get`](crate::Emails::get).
     pub fn message_id(&self) -> Option<&str> {
         self.0.message_id.as_deref()
+    }
+
+    /// For a batch that stopped after it sent a request: every recipient's
+    /// result, in the order of the batch's recipients, and the warnings of the
+    /// requests that went out. Recipients of earlier requests are as PostHog
+    /// answered them, those of the failed request
+    /// [`Failed`](crate::BatchEmailStatus::Failed), or
+    /// [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed) where an earlier
+    /// attempt may have queued them, and the rest
+    /// [`NotAttempted`](crate::BatchEmailStatus::NotAttempted). `None` when the
+    /// client sent nothing, and for any other call.
+    pub fn batch_result(&self) -> Option<&SendBatchResult> {
+        self.0.batch.as_ref()
     }
 
     pub(crate) fn is_network_error(&self) -> bool {

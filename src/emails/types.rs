@@ -5,6 +5,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
+use super::error::EmailError;
+
 /// What every send takes, whatever its form.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SendOptions {
@@ -651,4 +653,312 @@ pub struct EmailStatus {
     /// `recipient_suppressed`, or the bounce type of a bounced email: `hard`,
     /// `soft` or `unknown`. `None` otherwise.
     pub reason: Option<String>,
+}
+
+/// One recipient of [`Emails::batch`](crate::Emails::batch). Each gets their
+/// own email.
+///
+/// ```
+/// use posthog::BatchRecipient;
+/// use serde_json::json;
+///
+/// let recipient = BatchRecipient::new("ada@example.com")
+///     .distinct_id("user_123")
+///     .idempotency_key("launch:user_123")
+///     .template_data(json!({ "name": "Ada" }));
+/// ```
+#[derive(Debug, Clone)]
+pub struct BatchRecipient {
+    pub(crate) to: String,
+    pub(crate) distinct_id: Option<String>,
+    pub(crate) idempotency_key: Option<String>,
+    pub(crate) template_data: Option<Value>,
+}
+
+impl BatchRecipient {
+    /// A recipient by their email address.
+    pub fn new(to: impl Into<String>) -> Self {
+        Self {
+            to: to.into(),
+            distinct_id: None,
+            idempotency_key: None,
+            template_data: None,
+        }
+    }
+
+    /// The recipient's distinct ID in your product. The email's events go to
+    /// this person. Without it, they go to a person whose distinct ID is the
+    /// email address.
+    pub fn distinct_id(mut self, distinct_id: impl Into<String>) -> Self {
+        self.distinct_id = Some(distinct_id.into());
+        self
+    }
+
+    /// 1 to 255 visible ASCII characters, a different one for each recipient
+    /// of the batch.
+    ///
+    /// Without it, the client makes a UUID that covers its own retries but not
+    /// a second call, so pass keys you store when a batch may be cut off and
+    /// run again: a rerun within 24 hours replays the emails that went out
+    /// instead of sending them twice. A single send and a batch recipient with
+    /// the same key and the same email replay each other. Never reuse a key
+    /// for another email: after a lost answer, the client reads the email by
+    /// its key, and an earlier email with that key reads as this one,
+    /// [`Queued`](BatchEmailStatus::Queued).
+    pub fn idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
+    /// Only in a [`TemplateBatch`]: values for this recipient, as a JSON
+    /// object, merged over the batch's
+    /// [`template_data`](TemplateBatch::template_data). A top-level key set
+    /// here replaces the same key there.
+    pub fn template_data(mut self, data: Value) -> Self {
+        self.template_data = Some(data);
+        self
+    }
+}
+
+/// A batch of an email template made transactional in PostHog, sent by the
+/// template's ID to each recipient.
+///
+/// ```
+/// use posthog::{BatchRecipient, TemplateBatch};
+/// use serde_json::json;
+///
+/// let batch = TemplateBatch::new(
+///     "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b",
+///     vec![
+///         BatchRecipient::new("ada@example.com").template_data(json!({ "name": "Ada" })),
+///         BatchRecipient::new("alan@example.com").template_data(json!({ "name": "Alan" })),
+///     ],
+/// )
+/// .template_data(json!({ "plan": "pro" }));
+/// ```
+#[derive(Debug, Clone)]
+pub struct TemplateBatch {
+    pub(crate) template_id: String,
+    pub(crate) template_data: Option<Value>,
+    pub(crate) recipients: Vec<BatchRecipient>,
+    pub(crate) max_retries: Option<u32>,
+}
+
+impl TemplateBatch {
+    /// The template with this UUID, sent to one or more recipients. The client
+    /// sends at most 100 recipients, and at most 4 MiB of JSON, per request.
+    pub fn new(
+        template_id: impl Into<String>,
+        recipients: impl IntoIterator<Item = BatchRecipient>,
+    ) -> Self {
+        Self {
+            template_id: template_id.into(),
+            template_data: None,
+            recipients: recipients.into_iter().collect(),
+            max_retries: None,
+        }
+    }
+
+    /// Values for the template's `{{ variables.* }}` placeholders, as a JSON
+    /// object, shared by every recipient. Sent as `message_data`.
+    pub fn template_data(mut self, data: Value) -> Self {
+        self.template_data = Some(data);
+        self
+    }
+
+    /// Overrides the client's `email_request_max_retries` for each request of
+    /// the batch. `0` turns retries off.
+    pub fn max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = Some(max_retries);
+        self
+    }
+}
+
+/// A batch of email content your code rendered, the same for every
+/// recipient.
+///
+/// It takes what a [`CodeEmail`] takes but `cc`, `bcc`, attachments and
+/// `scheduled_at`. A recipient can't carry `template_data`: send personalized
+/// content with a [`TemplateBatch`], or with [`Emails::send`](crate::Emails::send).
+///
+/// ```
+/// use posthog::{BatchRecipient, CodeBatch};
+///
+/// # let rendered_html = String::new();
+/// let batch = CodeBatch::new(
+///     "launch-news",
+///     "We launched",
+///     vec![
+///         BatchRecipient::new("ada@example.com"),
+///         BatchRecipient::new("alan@example.com"),
+///     ],
+/// )
+/// .html(rendered_html)
+/// .from("Acme <news@example.com>");
+/// ```
+#[derive(Debug, Clone)]
+pub struct CodeBatch {
+    /// The shared content, as one email without a recipient.
+    pub(crate) email: Box<CodeEmail>,
+    pub(crate) recipients: Vec<BatchRecipient>,
+}
+
+impl CodeBatch {
+    /// The same content, with a subject, for one or more recipients. The client
+    /// sends at most 100 recipients, and at most 4 MiB of JSON, per request.
+    ///
+    /// `template_key` names the email, as in [`CodeEmail::new`].
+    pub fn new(
+        template_key: impl Into<String>,
+        subject: impl Into<String>,
+        recipients: impl IntoIterator<Item = BatchRecipient>,
+    ) -> Self {
+        Self {
+            email: Box::new(CodeEmail::new(String::new(), template_key, subject)),
+            recipients: recipients.into_iter().collect(),
+        }
+    }
+
+    /// The HTML body.
+    pub fn html(mut self, html: impl Into<String>) -> Self {
+        self.email = Box::new(self.email.html(html));
+        self
+    }
+
+    /// The plain-text body.
+    pub fn text(mut self, text: impl Into<String>) -> Self {
+        self.email = Box::new(self.email.text(text));
+        self
+    }
+
+    /// A verified sender. See [`CodeEmail::from`].
+    pub fn from(mut self, from: impl Into<String>) -> Self {
+        self.email = Box::new(self.email.from(from));
+        self
+    }
+
+    /// Adds a reply-to address. Call it again to add more.
+    pub fn reply_to(mut self, address: impl Into<String>) -> Self {
+        self.email = Box::new(self.email.reply_to(address));
+        self
+    }
+
+    /// Whether the email carries a login link, a reset token or a code. See
+    /// [`CodeEmail::sensitive`].
+    pub fn sensitive(mut self, sensitive: bool) -> Self {
+        self.email = Box::new(self.email.sensitive(sensitive));
+        self
+    }
+
+    /// What PostHog tracks for the emails. See [`CodeEmail::tracking`].
+    pub fn tracking(mut self, tracking: impl Into<EmailTracking>) -> Self {
+        self.email = Box::new(self.email.tracking(tracking));
+        self
+    }
+
+    /// Overrides the client's `email_request_max_retries` for each request of
+    /// the batch. `0` turns retries off.
+    pub fn max_retries(mut self, max_retries: u32) -> Self {
+        self.email = Box::new(self.email.max_retries(max_retries));
+        self
+    }
+}
+
+/// A batch for [`Emails::batch`](crate::Emails::batch): a template made in
+/// PostHog, or content your code rendered.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum SendBatch {
+    /// A template made transactional in PostHog.
+    Template(TemplateBatch),
+    /// Content your code rendered.
+    Code(CodeBatch),
+}
+
+impl From<TemplateBatch> for SendBatch {
+    fn from(batch: TemplateBatch) -> Self {
+        SendBatch::Template(batch)
+    }
+}
+
+impl From<CodeBatch> for SendBatch {
+    fn from(batch: CodeBatch) -> Self {
+        SendBatch::Code(batch)
+    }
+}
+
+/// What happened to one recipient of a batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BatchEmailStatus {
+    /// PostHog accepted the email. Read whether it went out with
+    /// [`Emails::get`](crate::Emails::get).
+    Queued,
+    /// PostHog didn't queue the email, and the result's `error` says why, such
+    /// as a suppressed address.
+    Failed,
+    /// The client can't tell whether PostHog queued the email, such as after a
+    /// lost answer. It may still go out. Send it again with the same
+    /// idempotency key within 24 hours, so it goes out once.
+    Unconfirmed,
+    /// An earlier request of the batch failed, so the client sent nothing for
+    /// this recipient.
+    NotAttempted,
+}
+
+impl BatchEmailStatus {
+    /// The status as every PostHog SDK spells it, such as `"not_attempted"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BatchEmailStatus::Queued => "queued",
+            BatchEmailStatus::Failed => "failed",
+            BatchEmailStatus::Unconfirmed => "unconfirmed",
+            BatchEmailStatus::NotAttempted => "not_attempted",
+        }
+    }
+}
+
+impl fmt::Display for BatchEmailStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What happened to one recipient of [`Emails::batch`](crate::Emails::batch).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct BatchEmailResult {
+    /// The recipient's position in the batch's recipients.
+    pub index: usize,
+    /// The recipient's email address.
+    pub to: String,
+    /// The recipient's idempotency key, given or made by the client. Send an
+    /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed) email again with it.
+    pub idempotency_key: String,
+    /// What happened to the email.
+    pub status: BatchEmailStatus,
+    /// The email's message ID, when PostHog named it. Read its status with
+    /// [`Emails::get`](crate::Emails::get).
+    pub message_id: Option<String>,
+    /// True when an earlier send with the same key had already queued the
+    /// email, so no new email was sent.
+    pub replayed: bool,
+    /// Why the email is not [`Queued`](BatchEmailStatus::Queued). For an
+    /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed) email, the code is
+    /// `delivery_unavailable`, `idempotency_key_in_flight` or `api_error`.
+    pub error: Option<EmailError>,
+    /// For an [`Unconfirmed`](BatchEmailStatus::Unconfirmed) email, what a
+    /// later retry in the same call answered, which describes only that retry.
+    pub later_error: Option<EmailError>,
+}
+
+/// The answer to [`Emails::batch`](crate::Emails::batch).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SendBatchResult {
+    /// One result per recipient, in the order of the batch's recipients.
+    pub results: Vec<BatchEmailResult>,
+    /// Warnings PostHog returned about the batch, each once. The client also
+    /// logs each one.
+    pub warnings: Vec<EmailWarning>,
 }
