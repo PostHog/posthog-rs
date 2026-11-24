@@ -343,6 +343,50 @@ fn unread_value_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOp
     options
 }
 
+/// A flag-level `person_metadata` filter and one in a cohort leaf, both on
+/// `created_at`, which a person listing never resolves.
+fn mock_person_metadata_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    let created_at = json!({"key": "created_at", "value": "2025-01-01", "operator": "is_date_after", "type": "person_metadata"});
+    let definitions = json!({
+        "flags": [
+            {
+                "key": "new-signups",
+                "active": true,
+                "filters": {"groups": [{"properties": [created_at], "rollout_percentage": 100}]}
+            },
+            {
+                "key": "new-signups-cohort",
+                "active": true,
+                "filters": {"groups": [{
+                    "properties": [{"key": "id", "value": 1, "operator": "in", "type": "cohort"}],
+                    "rollout_percentage": 100
+                }]}
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {"1": {"type": "AND", "values": [created_at]}}
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(definitions);
+    })
+}
+
+const PERSON_METADATA_FLAG_KEYS: [&str; 2] = ["new-signups", "new-signups-cohort"];
+
+fn person_metadata_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOptions {
+    let mut options = posthog::EvaluateFlagsOptions::default();
+    options.flag_keys = Some(
+        PERSON_METADATA_FLAG_KEYS
+            .iter()
+            .map(|key| key.to_string())
+            .collect(),
+    );
+    options.person_property_keys_known_absent = Some(vec!["created_at".to_string()]);
+    options.only_evaluate_locally = only_evaluate_locally;
+    options
+}
+
 fn over_limit_known_absent_options() -> Vec<posthog::EvaluateFlagsOptions> {
     let too_many: Vec<String> = (0..1001).map(|_| "plan".to_string()).collect();
     let mut person = posthog::EvaluateFlagsOptions::default();
@@ -1441,6 +1485,29 @@ mod blocking {
         client.evaluate_flags("user-1", options).unwrap();
         flags_mock.assert_calls(1);
     }
+    #[test]
+    fn listed_key_does_not_resolve_a_person_metadata_filter() {
+        let server = MockServer::start();
+        mock_person_metadata_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(json!({"flags": {}}));
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        let snapshot = client
+            .evaluate_flags("user-1", person_metadata_options(true))
+            .unwrap();
+        for key in PERSON_METADATA_FLAG_KEYS {
+            assert_eq!(snapshot.get_flag(key), None, "{key}");
+        }
+        flags_mock.assert_calls(0);
+
+        client
+            .evaluate_flags("user-1", person_metadata_options(false))
+            .unwrap();
+        flags_mock.assert_calls(1);
+    }
 }
 
 #[cfg(feature = "async-client")]
@@ -2077,6 +2144,31 @@ mod async_tests {
         let mut options = known_absent_options(&UNSUPPORTED_OPERATOR_FLAG_KEYS);
         options.only_evaluate_locally = false;
         client.evaluate_flags("user-1", options).await.unwrap();
+        flags_mock.assert_calls(1);
+    }
+    #[tokio::test]
+    async fn listed_key_does_not_resolve_a_person_metadata_filter() {
+        let server = MockServer::start();
+        mock_person_metadata_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(json!({"flags": {}}));
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        let snapshot = client
+            .evaluate_flags("user-1", person_metadata_options(true))
+            .await
+            .unwrap();
+        for key in PERSON_METADATA_FLAG_KEYS {
+            assert_eq!(snapshot.get_flag(key), None, "{key}");
+        }
+        flags_mock.assert_calls(0);
+
+        client
+            .evaluate_flags("user-1", person_metadata_options(false))
+            .await
+            .unwrap();
         flags_mock.assert_calls(1);
     }
 }

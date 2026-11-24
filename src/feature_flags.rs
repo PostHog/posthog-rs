@@ -543,6 +543,27 @@ impl KnownAbsentProperties {
     }
 }
 
+/// The known-absent keys that apply to one condition, with the filter type
+/// they resolve. Person keys resolve only `type: "person"` filters, and a
+/// group type's keys resolve only `type: "group"` filters in conditions
+/// aggregated on that group type. Any other filter type, such as
+/// `person_metadata`, never resolves from a listing.
+#[derive(Clone, Copy)]
+struct KnownAbsentKeys<'a> {
+    filter_type: &'static str,
+    keys: &'a HashSet<String>,
+}
+
+impl KnownAbsentKeys<'_> {
+    fn contains(&self, property: &Property) -> bool {
+        // Flag dependency filters are resolved by evaluating the flag, never
+        // by property absence.
+        property.property_type.as_deref() == Some(self.filter_type)
+            && !property.key.starts_with("$feature/")
+            && self.keys.contains(&property.key)
+    }
+}
+
 /// [`EvaluationContext`] plus the caller's known-absent keys, kept separate so
 /// `EvaluationContext` stays constructible with a struct literal.
 struct PropertyMatchContext<'a> {
@@ -550,7 +571,7 @@ struct PropertyMatchContext<'a> {
     known_absent: &'a KnownAbsentProperties,
     /// Known-absent keys for the properties being matched: the person list, or
     /// the list for the condition's group type.
-    known_absent_keys: Option<&'a HashSet<String>>,
+    known_absent_keys: Option<KnownAbsentKeys<'a>>,
 }
 
 /// Configuration for multivariate (A/B/n) feature flags.
@@ -791,7 +812,7 @@ enum ConditionTarget<'a> {
     Use {
         bucketing: String,
         properties: &'a HashMap<String, serde_json::Value>,
-        known_absent_keys: Option<&'a HashSet<String>>,
+        known_absent_keys: Option<KnownAbsentKeys<'a>>,
     },
     /// Skip this condition (group type unknown or required group not passed in).
     Skip,
@@ -826,7 +847,10 @@ fn resolve_condition_target<'a>(
         None => ConditionTarget::Use {
             bucketing: distinct_id.to_string(),
             properties: person_properties,
-            known_absent_keys: Some(&known_absent.person),
+            known_absent_keys: Some(KnownAbsentKeys {
+                filter_type: "person",
+                keys: &known_absent.person,
+            }),
         },
         Some(idx) => {
             let key = idx.to_string();
@@ -836,7 +860,14 @@ fn resolve_condition_target<'a>(
             let Some(group_key) = groups.get(group_type) else {
                 return ConditionTarget::Skip;
             };
-            let known_absent_keys = known_absent.groups.get(group_type);
+            let known_absent_keys =
+                known_absent
+                    .groups
+                    .get(group_type)
+                    .map(|keys| KnownAbsentKeys {
+                        filter_type: "group",
+                        keys,
+                    });
             let props = match group_properties.get(group_type) {
                 Some(props) => props,
                 None if known_absent_keys.is_some() => NO_PROPERTIES.get_or_init(HashMap::new),
@@ -949,7 +980,7 @@ fn is_condition_match<F>(
     bucketing_id: &str,
     condition: &FeatureFlagCondition,
     properties: &HashMap<String, serde_json::Value>,
-    known_absent_keys: Option<&HashSet<String>>,
+    known_absent_keys: Option<KnownAbsentKeys>,
     property_matcher: &F,
 ) -> Result<ConditionMatch, InconclusiveMatchError>
 where
@@ -1043,7 +1074,7 @@ trait PropertyMatcher:
     Fn(
     &Property,
     &HashMap<String, serde_json::Value>,
-    Option<&HashSet<String>>,
+    Option<KnownAbsentKeys>,
 ) -> Result<bool, InconclusiveMatchError>
 {
 }
@@ -1052,7 +1083,7 @@ impl<F> PropertyMatcher for F where
     F: Fn(
         &Property,
         &HashMap<String, serde_json::Value>,
-        Option<&HashSet<String>>,
+        Option<KnownAbsentKeys>,
     ) -> Result<bool, InconclusiveMatchError>
 {
 }
@@ -1215,9 +1246,19 @@ fn match_cohort_property(
     let cohort_id = cohort_id_to_string(&property.value)
         .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string or number"))?;
 
+    // Cohorts hold person filters, so a cohort in a group condition gets no
+    // known-absent keys.
+    let cohort_ctx = PropertyMatchContext {
+        evaluation: ctx.evaluation,
+        known_absent: ctx.known_absent,
+        known_absent_keys: ctx
+            .known_absent_keys
+            .filter(|keys| keys.filter_type == "person"),
+    };
     let mut active_cohorts = HashSet::new();
-    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx, &mut active_cohorts, 0)
-        .map_err(CohortMatchError::into_inconclusive)?;
+    let is_in_cohort =
+        match_cohort_by_id(&cohort_id, properties, &cohort_ctx, &mut active_cohorts, 0)
+            .map_err(CohortMatchError::into_inconclusive)?;
 
     // Cohort references omit the operator in API payloads, so "exact" means membership.
     Ok(match property.operator.as_str() {
@@ -1795,14 +1836,9 @@ fn match_property_with_version(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
     property_matching_version: i64,
-    known_absent_keys: Option<&HashSet<String>>,
+    known_absent_keys: Option<KnownAbsentKeys>,
 ) -> Result<bool, InconclusiveMatchError> {
-    // Cohort and flag dependency filters are resolved by membership or by
-    // evaluating the flag, never by property absence.
-    if property.property_type.as_deref() != Some("cohort")
-        && !property.key.starts_with("$feature/")
-        && known_absent_keys.is_some_and(|keys| keys.contains(&property.key))
-    {
+    if known_absent_keys.is_some_and(|keys| keys.contains(property)) {
         return match_known_absent_property(property);
     }
 
@@ -5948,6 +5984,188 @@ mod known_absent_tests {
                 &flag,
                 &HashMap::new(),
                 &person_keys(&["plan"]),
+                &HashMap::new(),
+                &flags
+            )
+            .unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    fn group_flag(key: &str, properties: serde_json::Value) -> FeatureFlag {
+        serde_json::from_value(json!({
+            "key": key,
+            "active": true,
+            "filters": {
+                "aggregation_group_type_index": 0,
+                "groups": [{"properties": properties, "rollout_percentage": 100}]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn cohort(values: serde_json::Value) -> HashMap<String, CohortDefinition> {
+        HashMap::from([(
+            "1".to_string(),
+            CohortDefinition {
+                id: "1".to_string(),
+                properties: json!({"type": "AND", "values": values}),
+            },
+        )])
+    }
+
+    const PERSON_METADATA_FILTERS: [(&str, &str); 2] =
+        [("is_not_set", "null"), ("is_date_after", "\"2025-01-01\"")];
+
+    #[test]
+    fn listed_key_does_not_resolve_a_person_metadata_filter() {
+        for (operator, value) in PERSON_METADATA_FILTERS {
+            let value: serde_json::Value = serde_json::from_str(value).unwrap();
+            let filter = json!({"key": "created_at", "value": value, "operator": operator, "type": "person_metadata"});
+            let flag = person_flag("new-signups", json!([filter]));
+            assert!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["created_at"])).is_err(),
+                "{} should stay inconclusive",
+                operator
+            );
+
+            let cohorts = cohort(json!([filter]));
+            let flag = person_flag(
+                "new-signups",
+                json!([{"key": "id", "value": 1, "operator": "in", "type": "cohort"}]),
+            );
+            assert!(
+                evaluate_with(
+                    &flag,
+                    &HashMap::new(),
+                    &person_keys(&["created_at"]),
+                    &cohorts,
+                    &HashMap::new()
+                )
+                .is_err(),
+                "{} in a cohort leaf should stay inconclusive",
+                operator
+            );
+        }
+    }
+
+    #[test]
+    fn listed_key_leaves_a_supplied_person_metadata_value_in_use() {
+        let flag = person_flag(
+            "new-signups",
+            json!([{"key": "created_at", "value": "2025-01-01", "operator": "is_date_after", "type": "person_metadata"}]),
+        );
+        let properties = HashMap::from([("created_at".to_string(), json!("2025-06-01"))]);
+
+        assert_eq!(
+            evaluate(&flag, &properties, &person_keys(&["created_at"])).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn listed_person_key_resolves_only_person_filters() {
+        for property_type in [None, Some("group"), Some("person_metadata"), Some("event")] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "operator": "is_not_set", "type": property_type}]),
+            );
+            assert!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).is_err(),
+                "{:?} should stay inconclusive",
+                property_type
+            );
+        }
+    }
+
+    #[test]
+    fn listed_group_key_resolves_only_group_filters() {
+        for property_type in [None, Some("person"), Some("person_metadata")] {
+            let flag = group_flag(
+                "org-flag",
+                json!([{"key": "tier", "operator": "is_not_set", "type": property_type}]),
+            );
+            assert!(
+                evaluate(
+                    &flag,
+                    &HashMap::new(),
+                    &group_keys("organization", &["tier"])
+                )
+                .is_err(),
+                "{:?} should stay inconclusive",
+                property_type
+            );
+        }
+    }
+
+    #[test]
+    fn listed_group_key_does_not_resolve_a_cohort_leaf() {
+        for leaf_type in ["person", "group"] {
+            let cohorts =
+                cohort(json!([{"key": "tier", "operator": "is_not_set", "type": leaf_type}]));
+            let flag = group_flag(
+                "org-flag",
+                json!([{"key": "id", "value": 1, "operator": "in", "type": "cohort"}]),
+            );
+            assert!(
+                evaluate_with(
+                    &flag,
+                    &HashMap::new(),
+                    &group_keys("organization", &["tier"]),
+                    &cohorts,
+                    &HashMap::new()
+                )
+                .is_err(),
+                "{} cohort leaf should stay inconclusive",
+                leaf_type
+            );
+        }
+    }
+
+    #[test]
+    fn flag_dependency_uses_only_the_keys_for_its_own_aggregation() {
+        let group_dependency = group_flag(
+            "org-incomplete",
+            json!([{"key": "tier", "operator": "is_not_set", "type": "group"}]),
+        );
+        let person_dependency = person_flag(
+            "profile-incomplete",
+            json!([{"key": "plan", "operator": "is_not_set", "type": "person"}]),
+        );
+        let flags = HashMap::from([
+            (group_dependency.key.clone(), group_dependency),
+            (person_dependency.key.clone(), person_dependency),
+        ]);
+        let person_parent = person_flag(
+            "person-parent",
+            json!([{"key": "$feature/org-incomplete", "value": true, "operator": "exact", "type": "flag"}]),
+        );
+        let group_parent = group_flag(
+            "group-parent",
+            json!([{"key": "$feature/profile-incomplete", "value": true, "operator": "exact", "type": "flag"}]),
+        );
+
+        assert!(evaluate_with(
+            &person_parent,
+            &HashMap::new(),
+            &person_keys(&["tier"]),
+            &HashMap::new(),
+            &flags
+        )
+        .is_err());
+        assert!(evaluate_with(
+            &group_parent,
+            &HashMap::new(),
+            &group_keys("organization", &["plan"]),
+            &HashMap::new(),
+            &flags
+        )
+        .is_err());
+        assert_eq!(
+            evaluate_with(
+                &person_parent,
+                &HashMap::new(),
+                &group_keys("organization", &["tier"]),
                 &HashMap::new(),
                 &flags
             )
