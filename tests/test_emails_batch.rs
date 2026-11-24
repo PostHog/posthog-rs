@@ -306,6 +306,23 @@ async fn more_than_100_recipients_say_to_split_the_batch() {
 }
 
 #[tokio::test]
+async fn a_batch_over_4_mib_goes_out_in_one_request() {
+    let server = ScriptedServer::start_async(vec![all_queued()]).await;
+    let client = client_for(&server).await;
+    let people = recipients(5)
+        .into_iter()
+        .map(|person| person.template_data(json!({"note": "x".repeat(900 * 1024)})))
+        .collect();
+
+    let result = client.emails().batch(template(people)).await.unwrap();
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.len() > 4 * 1024 * 1024);
+    assert_eq!(statuses(&result), vec![Queued; 5]);
+}
+
+#[tokio::test]
 async fn a_batch_posthog_finds_too_large_returns_its_413() {
     for answer in [
         Answer::xml(413, "<h1>Request Entity Too Large</h1>"),
@@ -353,7 +370,7 @@ async fn shared_data_posthog_finds_too_large_returns_its_400_and_own_fix() {
 
     let error = client
         .emails()
-        .batch(template(recipients(1)).template_data(json!({"note": "x".repeat(257 * 1024)})))
+        .batch(template(recipients(1)).template_data(json!({"note": "x".repeat(300 * 1024)})))
         .await
         .unwrap_err();
 
