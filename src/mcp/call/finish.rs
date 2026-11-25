@@ -58,6 +58,7 @@ pub(crate) fn complete_call(
     if !deliver_handle(&mut delivered, &call.conversation, mirror) {
         forget_undelivered_handle(&mut call);
     }
+    call.tool_scope.settle(&call.context.session);
     if names_a_tool(&call) {
         core.emit(|| match &failure {
             Some(failure) => failure_events(core, &call, duration_ms, failure, response.as_ref()),
@@ -72,6 +73,7 @@ pub(crate) fn end_call(core: &Core, mut call: PreparedCall, end: CallEnd) {
     let duration_ms = elapsed_ms(&call);
     call.transport.call_ended();
     forget_undelivered_handle(&mut call);
+    call.tool_scope.settle(&call.context.session);
     if !names_a_tool(&call) {
         return;
     }

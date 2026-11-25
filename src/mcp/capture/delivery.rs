@@ -27,7 +27,7 @@ impl Delivery {
     pub(crate) fn send(&self, events: Vec<OutgoingEvent>) {
         for (index, event) in events.into_iter().enumerate() {
             match self.apply_hook(event.into_posthog_event()) {
-                Some(event) => self.client.capture(event),
+                Some(event) => self.client.capture_finalized(event),
                 None if index == 0 => return,
                 None => {}
             }
@@ -73,5 +73,46 @@ mod tests {
             logs
         );
         assert!(!logs.contains("secret-payload"), "{}", logs);
+    }
+
+    #[tokio::test]
+    async fn mcp_events_are_never_held_by_the_scope_they_are_sent_in() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let options = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host("http://127.0.0.1:9".to_string())
+            .before_send(move |event: Event| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(event.event_name().to_string());
+                Some(event)
+            })
+            .build()
+            .unwrap();
+        let client = Arc::new(crate::client(options).await);
+        let delivery = Delivery::new(client.clone(), None);
+        let holding = crate::RequestContext {
+            held: Some(crate::request_context::HeldEvents::new()),
+            ..crate::RequestContext::new()
+        };
+
+        let context = crate::mcp::capture::EventContext {
+            timestamp: chrono::Utc::now(),
+            session: crate::mcp::session::Session::generated(),
+            conversation_id: None,
+            identity: None,
+            client: Default::default(),
+            server: Default::default(),
+            server_build: None,
+            host_properties: Default::default(),
+            options: Default::default(),
+        };
+        let event = OutgoingEvent::new("$mcp_tool_call", &context);
+        holding.scope(async { delivery.send(vec![event]) }).await;
+        client.flush().await;
+
+        assert_eq!(*seen.lock().unwrap(), vec!["$mcp_tool_call".to_string()]);
     }
 }

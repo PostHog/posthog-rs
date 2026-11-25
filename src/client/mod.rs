@@ -63,6 +63,8 @@ mod transport;
 pub use blocking::client;
 #[cfg(not(feature = "async-client"))]
 pub use blocking::Client;
+#[cfg(feature = "async-client")]
+pub(crate) use transport::TransportHandle;
 
 #[cfg(feature = "async-client")]
 mod async_client;

@@ -8,6 +8,7 @@ mod listing;
 mod model;
 mod prepare;
 mod scope;
+mod tool_scope;
 mod virtual_call;
 
 pub(crate) use finish::{complete_call, end_call, CallEnd};

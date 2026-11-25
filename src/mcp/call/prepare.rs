@@ -10,13 +10,15 @@ use serde_json::{json, Map, Value};
 use super::intent::{self, Intent, INFERRED};
 use super::model::{self, Model};
 use super::scope::RequestScope;
+use super::tool_scope::ToolScope;
 use crate::mcp::analytics::Core;
 use crate::mcp::capture::EventContext;
 use crate::mcp::contract::arguments::{CONTEXT, CONVERSATION_ID};
 use crate::mcp::request_info::RequestInfo;
-use crate::mcp::session::{Conversation, SessionClaims, TransportSession};
+use crate::mcp::session::{Conversation, SessionClaims, SessionSource, TransportSession};
 use crate::mcp::tools::catalog::ToolFacts;
 use crate::mcp::tools::ownership::{strip_owned_arguments, ArgumentFlags};
+use crate::RequestContext;
 
 const TOOLS_CALL: &str = "tools/call";
 
@@ -53,6 +55,7 @@ pub(crate) struct PreparedCall {
     /// The client names its conversation in `_meta`, so its listing showed no
     /// `conversation_id` and no `_mcp_instructions`.
     pub(crate) handle_free: bool,
+    pub(crate) tool_scope: ToolScope,
 }
 
 /// Which analytics arguments a call may strip, and which it may read.
@@ -94,6 +97,9 @@ pub(crate) fn prepare_call(
         transport: transport.session,
     };
     let context = core.event_context(scope, client, claims, &info);
+    let pending = conversation.minted && context.session.source == SessionSource::Conversation;
+    let host = RequestContext::current().or_else(|| scope.request_context());
+    let tool_scope = ToolScope::new(host, &context, pending);
     let parameters = core
         .options
         .capture_parameters
@@ -113,6 +119,7 @@ pub(crate) fn prepare_call(
         started: scope.started,
         transport: scope.transport.clone(),
         handle_free,
+        tool_scope,
     }
 }
 

@@ -1,11 +1,20 @@
 use std::collections::HashMap;
+#[cfg(feature = "async-client")]
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 use serde_json::Value;
 
+#[cfg(feature = "async-client")]
+use crate::client::TransportHandle;
 #[cfg(feature = "error-tracking")]
 use crate::event::fill_property;
 use crate::{Error, Event};
+
+/// At most this many events wait for a held scope's session; later ones are
+/// dropped, as the TypeScript SDK does.
+#[cfg(feature = "async-client")]
+const MAX_HELD_EVENTS: usize = 1_000;
 
 #[cfg(feature = "async-client")]
 tokio::task_local! {
@@ -18,6 +27,123 @@ pub struct RequestContext {
     pub(crate) distinct_id: Option<String>,
     pub(crate) properties: HashMap<String, Value>,
     pub(crate) options: HashMap<String, Value>,
+    #[cfg(feature = "async-client")]
+    pub(crate) held: Option<HeldEvents>,
+}
+
+/// Events captured in a scope whose session is known only when the scope
+/// ends, such as an MCP tool call whose new conversation handle may never
+/// reach the agent. Once released, events captured later in the scope, such as
+/// by work it spawned, take the released context at once.
+#[cfg(feature = "async-client")]
+#[derive(Clone)]
+pub(crate) struct HeldEvents(Arc<Mutex<Hold>>);
+
+#[cfg(feature = "async-client")]
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+enum Hold {
+    Waiting {
+        events: Vec<(Event, Arc<TransportHandle>)>,
+        dropped: bool,
+    },
+    /// The properties the scope deferred, which fill each later event.
+    Released(HashMap<String, Value>),
+}
+
+#[cfg(feature = "async-client")]
+impl HeldEvents {
+    #[cfg(feature = "mcp")]
+    pub(crate) fn new() -> Self {
+        let waiting = Hold::Waiting {
+            events: Vec::new(),
+            dropped: false,
+        };
+        Self(Arc::new(Mutex::new(waiting)))
+    }
+
+    /// Gives the event back, with the released context, once there is one.
+    /// A held event takes its queue slot now; the mutex is never held while
+    /// logging, since a subscriber that captures would re-enter it.
+    fn hold(&self, mut event: Event, transport: &Arc<TransportHandle>) -> Option<Event> {
+        let first_drop = match &mut *self.lock() {
+            Hold::Released(deferred) => {
+                fill_properties(&mut event, deferred);
+                return Some(event);
+            }
+            Hold::Waiting { events, dropped } if events.len() >= MAX_HELD_EVENTS => {
+                Some(!std::mem::replace(dropped, true))
+            }
+            Hold::Waiting { .. } => None,
+        };
+        if let Some(first_drop) = first_drop {
+            if first_drop {
+                tracing::warn!(
+                    "a scope held {MAX_HELD_EVENTS} events waiting for their session; dropping the rest"
+                );
+            }
+            return None;
+        }
+        if !transport.reserve_for_later() {
+            return None;
+        }
+        event.ensure_timestamp(chrono::Utc::now());
+        match &mut *self.lock() {
+            Hold::Released(deferred) => {
+                fill_properties(&mut event, deferred);
+                transport.send_later(event);
+            }
+            Hold::Waiting { events, .. } if events.len() < MAX_HELD_EVENTS => {
+                events.push((event, Arc::clone(transport)));
+            }
+            Hold::Waiting { .. } => transport.unreserve(),
+        }
+        None
+    }
+
+    /// Sends the held events with the properties the scope deferred, which
+    /// fill only what each event leaves unset. Each event already took the
+    /// rest of its context when it was held, and may have been finalized since
+    /// (a `before_send` hook may have removed a property), so nothing else is
+    /// applied again. Only the first release counts.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn release(&self, deferred: HashMap<String, Value>) {
+        let events = {
+            let mut hold = self.lock();
+            let Hold::Waiting { events, .. } = &mut *hold else {
+                return;
+            };
+            let events = std::mem::take(events);
+            *hold = Hold::Released(deferred.clone());
+            events
+        };
+        for (mut event, transport) in events {
+            fill_properties(&mut event, &deferred);
+            transport.send_later(event);
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Hold> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[cfg(feature = "async-client")]
+impl PartialEq for HeldEvents {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[cfg(feature = "async-client")]
+impl Eq for HeldEvents {}
+
+#[cfg(feature = "async-client")]
+impl std::fmt::Debug for HeldEvents {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HeldEvents")
+    }
 }
 
 impl RequestContext {
@@ -129,14 +255,7 @@ impl RequestContext {
         if !event.request_context_applied {
             event.apply_identify_style_person_default();
         }
-        let skip_session = event.event_name() == "$groupidentify";
-        for (key, value) in &self.properties {
-            // A session on `$groupidentify` would reassign the session to the group's distinct id.
-            if skip_session && key == "$session_id" {
-                continue;
-            }
-            event.insert_prop_default(key.clone(), value.clone());
-        }
+        fill_properties(event, &self.properties);
         for (key, value) in &self.options {
             event.insert_option_default(key.clone(), value.clone());
         }
@@ -191,6 +310,49 @@ pub(crate) fn current_distinct_id() -> Option<String> {
     {
         None
     }
+}
+
+/// Fills the properties `event` leaves unset.
+fn fill_properties(event: &mut Event, properties: &HashMap<String, Value>) {
+    let skip_session = event.event_name() == "$groupidentify";
+    for (key, value) in properties {
+        // A session on `$groupidentify` would reassign the session to the group's distinct id.
+        if skip_session && key == "$session_id" {
+            continue;
+        }
+        event.insert_prop_default(key.clone(), value.clone());
+    }
+}
+
+/// Holds `event` when the current context holds events, else gives it back.
+/// A held event takes the current context first, so a nested scope's values
+/// survive; the released context then fills what is still unset.
+#[cfg(feature = "async-client")]
+pub(crate) fn hold_in_current(mut event: Event, transport: &Arc<TransportHandle>) -> Option<Event> {
+    let held = CURRENT.try_with(|context| {
+        let held = context.held.clone()?;
+        if !event.request_context_applied {
+            event.apply_identify_style_person_default();
+            context.apply_to_event(&mut event);
+        }
+        Some(held)
+    });
+    match held {
+        Ok(Some(held)) => held.hold(event, transport),
+        _ => Some(event),
+    }
+}
+
+/// The events of `events` the current context does not hold.
+#[cfg(feature = "async-client")]
+pub(crate) fn hold_all_in_current(
+    events: Vec<Event>,
+    transport: &Arc<TransportHandle>,
+) -> Vec<Event> {
+    events
+        .into_iter()
+        .filter_map(|event| hold_in_current(event, transport))
+        .collect()
 }
 
 pub(crate) fn apply_current_context(event: &mut Event) {
@@ -262,5 +424,54 @@ mod test {
                 ("product_tour_id".to_string(), json!("tour")),
             ]
         );
+    }
+}
+
+#[cfg(all(test, feature = "mcp"))]
+mod held_tests {
+    use std::sync::Arc;
+
+    use serde_json::Value;
+
+    use super::HeldEvents;
+    use crate::client::TransportHandle;
+    use crate::{ClientOptionsBuilder, Event};
+
+    #[test]
+    fn held_events_count_against_the_queue_bound() {
+        let options = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host("http://127.0.0.1:9".to_string())
+            .flush_interval_ms(60_000u64)
+            .max_queue_size(2usize)
+            .build()
+            .unwrap();
+        let transport = Arc::new(TransportHandle::spawn(options));
+        let held = HeldEvents::new();
+
+        for _ in 0..3 {
+            assert!(held.hold(Event::new_anon("held"), &transport).is_none());
+        }
+
+        assert!(
+            !transport.reserve_for_later(),
+            "two held events fill the queue"
+        );
+        let deferred = std::iter::once(("$session_id".to_string(), Value::from("ses_final")));
+        held.release(deferred.collect());
+        let cases = [
+            ("late", Some(Value::from("ses_final"))),
+            ("$groupidentify", None),
+        ];
+        for (name, session) in cases.iter().cloned() {
+            let late = held.hold(Event::new_anon(name), &transport);
+            let late = late.expect("a released scope sends at once");
+            assert_eq!(
+                late.properties().get("$session_id").cloned(),
+                session,
+                "{}",
+                name
+            );
+        }
     }
 }

@@ -47,6 +47,18 @@
 //! The value of a client's conversation id is hashed into `$session_id` and
 //! never sent.
 //!
+//! Events a tool captures itself, through [`Client::capture`](crate::Client::capture),
+//! carry its call's `$session_id` and `$mcp_session_source`: the handler runs
+//! in a [`RequestContext`](crate::RequestContext) that holds them, and, when
+//! [`McpOptionsBuilder::identify`] resolves a person, their distinct ID and
+//! `$groups`; an anonymous call's context has neither, as its MCP events do. Build such an event with `RequestContext::current()` and
+//! [`RequestContext::event`](crate::RequestContext::event) to take that
+//! distinct ID. Work the handler spawns onto another task takes the context
+//! only when scoped with [`RequestContext::scope`](crate::RequestContext::scope).
+//! On a call that hands the agent a new conversation handle, these events wait
+//! until the call ends, then take the call's final session; an immediate
+//! capture, which cannot wait, carries no session.
+//!
 //! # Event options
 //!
 //! [`McpOptionsBuilder::event_options`] sets capture options on each request's

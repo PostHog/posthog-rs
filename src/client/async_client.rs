@@ -213,6 +213,17 @@ impl Client {
     #[instrument(skip(self, event), level = "debug")]
     pub fn capture(&self, event: Event) {
         if let Some(transport) = &self.transport {
+            if let Some(event) = crate::request_context::hold_in_current(event, transport) {
+                transport.enqueue(event);
+            }
+        }
+    }
+
+    /// Captures an event the SDK already finalized, such as an MCP event after
+    /// its `before_send` hook, which a scope holding events must not change.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn capture_finalized(&self, event: Event) {
+        if let Some(transport) = &self.transport {
             transport.enqueue(event);
         }
     }
@@ -245,7 +256,9 @@ impl Client {
     #[instrument(skip(self, event), level = "debug")]
     pub fn capture_ai(&self, event: Event) {
         if let Some(transport) = self.ai_transport() {
-            transport.enqueue(event);
+            if let Some(event) = crate::request_context::hold_in_current(event, transport) {
+                transport.enqueue(event);
+            }
         }
     }
 
@@ -684,6 +697,11 @@ impl Client {
     )]
     pub fn capture_batch(&self, events: Vec<Event>, historical_migration: bool) {
         if let Some(transport) = &self.transport {
+            let events = if historical_migration {
+                events
+            } else {
+                crate::request_context::hold_all_in_current(events, transport)
+            };
             transport.enqueue_batch(events, historical_migration);
         }
     }
@@ -707,6 +725,7 @@ impl Client {
     )]
     pub fn capture_ai_batch(&self, events: Vec<Event>) {
         if let Some(transport) = self.ai_transport() {
+            let events = crate::request_context::hold_all_in_current(events, transport);
             transport.enqueue_batch(events, false);
         }
     }

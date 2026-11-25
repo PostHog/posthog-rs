@@ -50,7 +50,9 @@ impl<H: ServerHandler> Instrumented<H> {
         let mut downstream = request;
         downstream.arguments = call.dispatch_arguments.clone();
 
-        let handled = AssertUnwindSafe(async { self.inner.call_tool(downstream, context).await })
+        let tool_context = call.tool_scope.context.clone();
+        let handler = async { self.inner.call_tool(downstream, context).await };
+        let handled = AssertUnwindSafe(tool_context.scope(handler))
             .catch_unwind()
             .await;
         match handled {
