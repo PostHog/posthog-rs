@@ -6,6 +6,7 @@ use serde_json::Value;
 use super::Instrumented;
 use crate::mcp::call::emit_tools_listed;
 use crate::mcp::tools::catalog::ToolFacts;
+use crate::mcp::tools::injection::ArgumentInjection;
 
 const TOOLS_LIST: &str = "tools/list";
 const NOT_ENVELOPE: [&str; 2] = ["tools", "resultType"];
@@ -17,6 +18,12 @@ impl<H: ServerHandler> Instrumented<H> {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let facts = self.request_facts(&context);
+        let scope = facts.scope(TOOLS_LIST);
+        let injection = self
+            .analytics
+            .core
+            .injection
+            .for_client(scope.handle_free_client());
         let first_page = request
             .as_ref()
             .and_then(|params| params.cursor.as_ref())
@@ -27,10 +34,10 @@ impl<H: ServerHandler> Instrumented<H> {
         let mut advertised: Vec<Tool> = page
             .tools
             .iter()
-            .map(|tool| self.injected_tool(tool))
+            .map(|tool| self.injected_tool(tool, &injection))
             .collect();
         if first_page {
-            advertised.extend(self.virtual_tools_for_listing(&page.tools));
+            advertised.extend(self.virtual_tools_for_listing(&page.tools, &injection));
         }
         page.tools = advertised;
 
@@ -39,21 +46,16 @@ impl<H: ServerHandler> Instrumented<H> {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        emit_tools_listed(
-            &self.analytics.core,
-            &facts.scope(TOOLS_LIST),
-            names,
-            envelope(&page),
-        );
+        emit_tools_listed(&self.analytics.core, &scope, names, envelope(&page));
         Ok(page)
     }
 
     /// The tool as advertised, or as registered when injection fails.
-    pub(super) fn injected_tool(&self, tool: &Tool) -> Tool {
+    pub(super) fn injected_tool(&self, tool: &Tool, injection: &ArgumentInjection) -> Tool {
         let Ok(descriptor) = serde_json::to_value(tool) else {
             return tool.clone();
         };
-        let injected = self.analytics.core.injection.inject(&descriptor);
+        let injected = injection.inject(&descriptor);
         serde_json::from_value(injected).unwrap_or_else(|error| {
             tracing::warn!("PostHog MCP analytics could not advertise its arguments: {error}");
             tool.clone()

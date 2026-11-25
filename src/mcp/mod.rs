@@ -28,6 +28,25 @@
 //! Context properties and options fill only the keys the event leaves unset,
 //! before [`McpOptionsBuilder::before_send`] runs.
 //!
+//! # Sessions
+//!
+//! Every event's `$session_id` comes from the first of these that names one,
+//! and its `$mcp_session_source` says which:
+//!
+//! 1. `"host"`: [`McpOptionsBuilder::session_resolver`].
+//! 2. `"client_metadata"`: the conversation id a recognized client sends in a
+//!    tool call's `_meta`: ChatGPT's `openai/session`, Codex's `sessionId`,
+//!    or VS Code's `vscode.conversationId`. ChatGPT sends one on every call,
+//!    so it is offered no `conversation_id` argument.
+//! 3. `"conversation"`: the conversation handle the agent echoes as
+//!    `conversation_id`.
+//! 4. `"transport"`: a replayed `Mcp-Session-Id`.
+//! 5. `"generated"`: a session the SDK made for a one-client connection, such
+//!    as stdio, or for a single stateless HTTP request.
+//!
+//! The value of a client's conversation id is hashed into `$session_id` and
+//! never sent.
+//!
 //! # Event options
 //!
 //! [`McpOptionsBuilder::event_options`] sets capture options on each request's
@@ -74,7 +93,7 @@ pub use identity::Identity;
 pub use manual::{StartedToolCall, ToolCallError, ToolCallRequest, ToolRegistration};
 pub use options::{
     EventOptionsCallback, IdentifyCallback, IntentFallback, McpOptions, McpOptionsBuilder,
-    McpOptionsBuilderError,
+    McpOptionsBuilderError, SessionResolver,
 };
 pub use request_info::RequestInfo;
 pub use server::{instrument, Instrumented};

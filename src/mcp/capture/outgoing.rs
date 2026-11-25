@@ -112,13 +112,14 @@ mod tests {
     use crate::mcp::contract::events::{TOOLS_LIST, TOOL_CALL};
     use crate::mcp::contract::limits::MAX_PAYLOAD_STRING_LENGTH;
     use crate::mcp::contract::properties::LISTED_TOOL_NAMES;
+    use crate::mcp::session::{Session, SessionSource};
     use crate::mcp::Identity;
     use crate::RequestContext;
 
     fn context(identity: Option<Identity>) -> EventContext {
         EventContext {
             timestamp: Utc::now(),
-            session_id: "ses_1".to_string(),
+            session: Session::new("ses_1".to_string(), SessionSource::Generated),
             conversation_id: None,
             identity,
             client: Default::default(),
