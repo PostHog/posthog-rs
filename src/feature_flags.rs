@@ -568,10 +568,35 @@ impl KnownAbsentKeys<'_> {
 /// `EvaluationContext` stays constructible with a struct literal.
 struct PropertyMatchContext<'a> {
     evaluation: &'a EvaluationContext<'a>,
+    /// The caller's person properties. A group condition matches group
+    /// properties, so flag dependencies read these instead.
+    person_properties: &'a HashMap<String, serde_json::Value>,
     known_absent: &'a KnownAbsentProperties,
     /// Known-absent keys for the properties being matched: the person list, or
     /// the list for the condition's group type.
     known_absent_keys: Option<KnownAbsentKeys<'a>>,
+    /// The flags being evaluated, from the innermost dependency outward.
+    dependency_path: Option<&'a DependencyPath<'a>>,
+}
+
+/// One flag on the chain of flag dependencies being evaluated, so a flag that
+/// depends on itself, directly or through others, is rejected as a cycle.
+struct DependencyPath<'a> {
+    flag_key: &'a str,
+    parent: Option<&'a DependencyPath<'a>>,
+}
+
+impl DependencyPath<'_> {
+    fn contains(&self, flag_key: &str) -> bool {
+        let mut node = Some(self);
+        while let Some(current) = node {
+            if current.flag_key == flag_key {
+                return true;
+            }
+            node = current.parent;
+        }
+        false
+    }
 }
 
 /// Configuration for multivariate (A/B/n) feature flags.
@@ -1046,6 +1071,22 @@ pub(crate) fn match_feature_flag_with_known_absent(
     ctx: &EvaluationContext,
     known_absent: &KnownAbsentProperties,
 ) -> Result<FlagValue, InconclusiveMatchError> {
+    match_feature_flag_in_context(flag, person_properties, ctx, known_absent, None)
+}
+
+/// Evaluates a top-level flag, or a flag dependency with the same top-level
+/// inputs. `dependency_path` holds the flags already being evaluated.
+fn match_feature_flag_in_context(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+    known_absent: &KnownAbsentProperties,
+    dependency_path: Option<&DependencyPath>,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    let dependency_path = DependencyPath {
+        flag_key: &flag.key,
+        parent: dependency_path,
+    };
     evaluate_feature_flag(
         flag,
         ctx.distinct_id,
@@ -1060,8 +1101,10 @@ pub(crate) fn match_feature_flag_with_known_absent(
                 properties,
                 &PropertyMatchContext {
                     evaluation: ctx,
+                    person_properties,
                     known_absent,
                     known_absent_keys,
+                    dependency_path: Some(&dependency_path),
                 },
             )
         },
@@ -1193,6 +1236,8 @@ where
 /// cohort membership (`type = "cohort"`) or another feature flag via
 /// `$feature/<flag-key>`.
 ///
+/// A referenced flag is evaluated with `properties` as the person properties.
+///
 /// # Errors
 ///
 /// Returns [`InconclusiveMatchError`] when the property, cohort, or dependent
@@ -1207,8 +1252,10 @@ pub fn match_property_with_context(
         properties,
         &PropertyMatchContext {
             evaluation: ctx,
+            person_properties: properties,
             known_absent: &KnownAbsentProperties::default(),
             known_absent_keys: None,
+            dependency_path: None,
         },
     )
 }
@@ -1250,10 +1297,12 @@ fn match_cohort_property(
     // known-absent keys.
     let cohort_ctx = PropertyMatchContext {
         evaluation: ctx.evaluation,
+        person_properties: ctx.person_properties,
         known_absent: ctx.known_absent,
         known_absent_keys: ctx
             .known_absent_keys
             .filter(|keys| keys.filter_type == "person"),
+        dependency_path: ctx.dependency_path,
     };
     let mut active_cohorts = HashSet::new();
     let is_in_cohort =
@@ -1526,36 +1575,39 @@ fn match_nested_cohort(
     Ok(is_member != negation)
 }
 
-/// Evaluate flag dependency
+/// Evaluate a flag dependency. The referenced flag is evaluated exactly as if
+/// it were evaluated directly with the same top-level inputs, so it uses its
+/// own aggregation, properties and bucketing identifier.
 fn match_flag_dependency_property(
     property: &Property,
     ctx: &PropertyMatchContext,
 ) -> Result<bool, InconclusiveMatchError> {
-    let known_absent = ctx.known_absent;
-    let ctx = ctx.evaluation;
     // Extract flag key from "$feature/flag-key"
     let flag_key = property
         .key
         .strip_prefix("$feature/")
         .ok_or_else(|| InconclusiveMatchError::new("Invalid flag dependency format"))?;
 
-    let flag = ctx.flags.get(flag_key).ok_or_else(|| {
+    let flag = ctx.evaluation.flags.get(flag_key).ok_or_else(|| {
         InconclusiveMatchError::new(&format!("Flag '{}' not found in local cache", flag_key))
     })?;
 
-    // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
-    // Group context and known-absent keys flow through from the outer ctx so
-    // dependent group/mixed flags can resolve.
-    let empty_props = HashMap::new();
-    let flag_value = match_feature_flag_with_version(
+    if ctx
+        .dependency_path
+        .is_some_and(|path| path.contains(flag_key))
+    {
+        return Err(InconclusiveMatchError::new(&format!(
+            "Flag '{}' is part of a dependency cycle",
+            flag_key
+        )));
+    }
+
+    let flag_value = match_feature_flag_in_context(
         flag,
-        ctx.distinct_id,
-        &empty_props,
-        ctx.groups,
-        ctx.group_properties,
-        ctx.group_type_mapping,
-        ctx.property_matching_version,
-        known_absent,
+        ctx.person_properties,
+        ctx.evaluation,
+        ctx.known_absent,
+        ctx.dependency_path,
     )?;
 
     // Compare the flag value with the expected value
@@ -6198,5 +6250,324 @@ mod known_absent_tests {
             &flags
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod flag_dependency_context_tests {
+    use super::*;
+    use serde_json::json;
+
+    const DISTINCT_ID: &str = "user-1";
+
+    fn flag(key: &str, aggregation: Option<i32>, condition: serde_json::Value) -> FeatureFlag {
+        serde_json::from_value(json!({
+            "key": key,
+            "active": true,
+            "filters": {"aggregation_group_type_index": aggregation, "groups": [condition]}
+        }))
+        .unwrap()
+    }
+
+    fn depends_on(key: &str, aggregation: Option<i32>, parent: &str) -> FeatureFlag {
+        flag(
+            key,
+            aggregation,
+            json!({
+                "properties": [{"key": format!("$feature/{parent}"), "value": true, "operator": "exact", "type": "flag"}],
+                "rollout_percentage": 100
+            }),
+        )
+    }
+
+    struct Inputs {
+        distinct_id: String,
+        person_properties: HashMap<String, serde_json::Value>,
+        groups: HashMap<String, String>,
+        group_properties: HashMap<String, HashMap<String, serde_json::Value>>,
+        known_absent: KnownAbsentProperties,
+        cohorts: HashMap<String, CohortDefinition>,
+    }
+
+    impl Default for Inputs {
+        fn default() -> Self {
+            Self {
+                distinct_id: DISTINCT_ID.to_string(),
+                person_properties: HashMap::new(),
+                groups: HashMap::from([("organization".to_string(), "org-1".to_string())]),
+                group_properties: HashMap::new(),
+                known_absent: KnownAbsentProperties::default(),
+                cohorts: HashMap::new(),
+            }
+        }
+    }
+
+    fn evaluate(
+        flag: &FeatureFlag,
+        flags: &[&FeatureFlag],
+        inputs: &Inputs,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        let flags: HashMap<String, FeatureFlag> = flags
+            .iter()
+            .map(|flag| (flag.key.clone(), (*flag).clone()))
+            .collect();
+        let group_type_mapping = HashMap::from([("0".to_string(), "organization".to_string())]);
+        let ctx = EvaluationContext {
+            cohorts: &inputs.cohorts,
+            flags: &flags,
+            distinct_id: &inputs.distinct_id,
+            groups: &inputs.groups,
+            group_properties: &inputs.group_properties,
+            group_type_mapping: &group_type_mapping,
+            property_matching_version: 1,
+        };
+        match_feature_flag_with_known_absent(
+            flag,
+            &inputs.person_properties,
+            &ctx,
+            &inputs.known_absent,
+        )
+    }
+
+    fn props(entries: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    fn in_rollout(flag_key: &str, bucketing_id: &str, percentage: f64) -> bool {
+        hash_key(flag_key, bucketing_id, ROLLOUT_HASH_SALT) <= percentage / 100.0
+    }
+
+    #[test]
+    fn dependency_reads_the_callers_person_properties() {
+        let parent = flag(
+            "pro-plan",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "pro-plan");
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("pro"))]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&parent, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn group_child_evaluates_a_person_parent_with_person_properties_and_distinct_id() {
+        let parent = flag(
+            "person-parent",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 50}),
+        );
+        let child = depends_on("org-child", Some(0), "person-parent");
+        let distinct_id = (0..1000)
+            .map(|i| format!("user-{i}"))
+            .find(|id| in_rollout("person-parent", id, 50.0))
+            .unwrap();
+        let group_key = (0..1000)
+            .map(|i| format!("org-{i}"))
+            .find(|key| !in_rollout("person-parent", key, 50.0))
+            .unwrap();
+        let inputs = Inputs {
+            distinct_id,
+            person_properties: props(&[("plan", json!("pro"))]),
+            groups: HashMap::from([("organization".to_string(), group_key)]),
+            group_properties: HashMap::from([(
+                "organization".to_string(),
+                props(&[("plan", json!("free"))]),
+            )]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn dependency_resolves_its_own_cohort_filter() {
+        let parent = flag(
+            "in-cohort",
+            None,
+            json!({"properties": [{"key": "id", "value": 1, "operator": "in", "type": "cohort"}], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "in-cohort");
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("pro"))]),
+            cohorts: HashMap::from([(
+                "1".to_string(),
+                CohortDefinition {
+                    id: "1".to_string(),
+                    properties: json!({"type": "AND", "values": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}]}),
+                },
+            )]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn dependency_resolves_its_own_flag_dependency() {
+        let leaf = flag(
+            "leaf",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}),
+        );
+        let middle = depends_on("middle", None, "leaf");
+        let child = depends_on("child", None, "middle");
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("pro"))]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&child, &[&leaf, &middle], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn dependency_cycle_is_inconclusive() {
+        let first = depends_on("first", None, "second");
+        let second = depends_on("second", None, "first");
+        let own = depends_on("own", None, "own");
+
+        assert!(evaluate(&first, &[&first, &second], &Inputs::default()).is_err());
+        assert!(evaluate(&own, &[&own], &Inputs::default()).is_err());
+    }
+
+    #[test]
+    fn person_child_reads_group_properties_for_an_org_parent() {
+        // D1: the parent reads the org's region, not the person's.
+        let parent = flag(
+            "org-in-us",
+            Some(0),
+            json!({"properties": [{"key": "region", "value": "us", "operator": "exact", "type": "group"}], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "org-in-us");
+        let inputs = Inputs {
+            person_properties: props(&[("region", json!("us"))]),
+            group_properties: HashMap::from([(
+                "organization".to_string(),
+                props(&[("region", json!("eu"))]),
+            )]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&parent, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn org_parent_without_its_group_is_false() {
+        // D2: no organization group, even with organization known-absent keys.
+        let parent = flag(
+            "org-incomplete",
+            Some(0),
+            json!({"properties": [{"key": "tier", "operator": "is_not_set", "type": "group"}], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "org-incomplete");
+        let groups = HashMap::from([("organization".to_string(), vec!["tier".to_string()])]);
+        let inputs = Inputs {
+            groups: HashMap::new(),
+            known_absent: KnownAbsentProperties::new(None, Some(&groups)),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&parent, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn org_parent_rollout_follows_the_group_key() {
+        let parent = flag(
+            "org-rollout",
+            Some(0),
+            json!({"properties": [], "rollout_percentage": 50}),
+        );
+        let child = depends_on("child", None, "org-rollout");
+        let in_ids = (0..1000)
+            .map(|i| format!("id-{i}"))
+            .filter(|id| in_rollout("org-rollout", id, 50.0));
+        let out_ids = (0..1000)
+            .map(|i| format!("id-{i}"))
+            .filter(|id| !in_rollout("org-rollout", id, 50.0));
+        let (included, excluded) = (
+            in_ids.take(1).next().unwrap(),
+            out_ids.take(1).next().unwrap(),
+        );
+
+        for (distinct_id, group_key, expected) in [
+            (included.clone(), excluded.clone(), false),
+            (excluded, included, true),
+        ] {
+            let inputs = Inputs {
+                distinct_id,
+                groups: HashMap::from([("organization".to_string(), group_key)]),
+                group_properties: HashMap::from([("organization".to_string(), HashMap::new())]),
+                ..Inputs::default()
+            };
+            assert_eq!(
+                evaluate(&child, &[&parent], &inputs).unwrap(),
+                FlagValue::Boolean(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn group_filter_without_an_index_reads_the_conditions_group_type() {
+        // G1: a listed key wins over the supplied value for the condition's group.
+        for (operator, value, expected) in [
+            ("exact", json!("enterprise"), false),
+            ("is_not_set", json!(null), true),
+        ] {
+            let org_flag = flag(
+                "org-flag",
+                Some(0),
+                json!({"properties": [{"key": "tier", "value": value, "operator": operator, "type": "group"}], "rollout_percentage": 100}),
+            );
+            let groups = HashMap::from([("organization".to_string(), vec!["tier".to_string()])]);
+            let inputs = Inputs {
+                group_properties: HashMap::from([(
+                    "organization".to_string(),
+                    props(&[("tier", json!("enterprise"))]),
+                )]),
+                known_absent: KnownAbsentProperties::new(None, Some(&groups)),
+                ..Inputs::default()
+            };
+            assert_eq!(
+                evaluate(&org_flag, &[], &inputs).unwrap(),
+                FlagValue::Boolean(expected),
+                "{operator}"
+            );
+        }
     }
 }
