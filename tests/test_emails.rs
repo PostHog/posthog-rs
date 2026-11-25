@@ -1496,6 +1496,25 @@ async fn a_confirmed_schedule_returns_the_requested_time() {
     }
 }
 
+#[tokio::test]
+async fn a_send_without_scheduled_at_is_queued_whatever_the_reply_says() {
+    let server = ScriptedServer::start_async(vec![Answer::json(
+        202,
+        json!({"message_id": MESSAGE_ID, "status": "scheduled", "scheduled_at": "2026-12-01T09:00:00Z"}),
+    )])
+    .await;
+    let client = client_for(&server).await;
+
+    let result = client
+        .emails()
+        .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
+        .await
+        .unwrap();
+
+    assert_eq!(result.status(), SendEmailStatus::Queued);
+    assert_eq!(result.scheduled_at, None);
+}
+
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn a_scheduled_time_that_had_passed_is_queued_now() {
