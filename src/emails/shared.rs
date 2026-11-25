@@ -977,7 +977,10 @@ pub(crate) fn parse_send_reply(
             {
                 Some(requested)
             }
-            _ => return Err(schedule_not_confirmed(id, status)),
+            _ => {
+                log_warnings(&warnings);
+                return Err(schedule_not_confirmed(id, status));
+            }
         },
     };
     Ok(SendEmailResult {

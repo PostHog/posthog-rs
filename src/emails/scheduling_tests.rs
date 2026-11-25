@@ -124,6 +124,34 @@ mod async_client {
     }
 
     #[tokio::test]
+    async fn warnings_are_logged_when_posthog_does_not_confirm_the_time() {
+        let answer = Answer::json(
+            202,
+            json!({
+                "message_id": MESSAGE_ID,
+                "status": "queued",
+                "scheduled_at": null,
+                "warnings": [{"code": "sandbox_sender", "detail": "Sent from the test sender."}],
+            }),
+        );
+        let server = ScriptedServer::start_async(vec![answer]).await;
+        let (_cloud, client) = cloud_client(&server, "https://us.posthog.com").await;
+        let _time = virtual_time::start_at(start());
+        let logs = crate::client::tests::CapturedLogs::start();
+
+        let error = client
+            .emails()
+            .send(scheduled_at(Duration::minutes(2), 0))
+            .await
+            .unwrap_err();
+
+        assert_not_confirmed(error);
+        assert!(logs
+            .read()
+            .contains("PostHog email warning sandbox_sender: Sent from the test sender."));
+    }
+
+    #[tokio::test]
     async fn a_scheduled_send_works_with_a_clock_before_1970() {
         let server = ScriptedServer::start_async(vec![sent_now()]).await;
         let (_cloud, client) = cloud_client(&server, "https://us.posthog.com").await;
