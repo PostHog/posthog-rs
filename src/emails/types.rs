@@ -261,7 +261,7 @@ impl CodeEmail {
     /// 1 to 255 visible ASCII characters.
     ///
     /// A send with a key that PostHog already accepted queues nothing and
-    /// returns the first send's result. The same key for another email returns
+    /// returns the first send's message ID. The same key for another email returns
     /// `idempotency_key_reused`. Without a key, the client makes a UUID that
     /// covers its own retries of this call. Pass a key derived from what the
     /// email is for, such as `password-reset:user_123:<request id>`, to cover
@@ -552,7 +552,8 @@ pub struct SendEmailResult {
     /// The accepted email's message ID.
     pub id: String,
     /// True when PostHog had already accepted this idempotency key and
-    /// returned the first send's result.
+    /// returned the first send's message ID. The status can differ from the
+    /// first send's: see [`SendEmailStatus`].
     pub replayed: bool,
     /// Warnings PostHog returned with the email. The client also logs each one.
     pub warnings: Vec<EmailWarning>,
