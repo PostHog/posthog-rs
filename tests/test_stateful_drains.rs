@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use httpmock::{Method::POST, MockServer};
+use httpmock::{
+    Method::{GET, POST},
+    MockServer,
+};
 
 mod stateful_support;
 use posthog::stateful::{
@@ -587,12 +590,42 @@ fn a_flags_failure_arriving_after_shutdown_is_not_reported() {
     });
     let client = Client::init_blocking(setup);
     wait_for_preload(&flags);
+    // The remote config load before the flags request may report its own
+    // failure; only reports after shutdown matter here.
+    while errors.try_recv().is_ok() {}
     client.shutdown_blocking(None);
     drop(client);
     // Well past the delayed response.
     assert!(
         errors.recv_timeout(Duration::from_secs(2)).is_err(),
         "on_error ran after shutdown returned"
+    );
+}
+
+// Shutdown discards the startup remote-config result too, so a failure that
+// arrives after it is not reported, as for flags.
+#[test]
+fn a_remote_config_failure_arriving_after_shutdown_is_not_reported() {
+    let server = MockServer::start();
+    let remote_config = server.mock(|when, then| {
+        when.method(GET).path("/array/phc_test/config");
+        then.status(503).delay(Duration::from_millis(500));
+    });
+    let mut setup = config(&server);
+    let (errors_tx, errors) = std::sync::mpsc::channel();
+    setup.on_error(move |error| {
+        let _ = errors_tx.send(format!("{:?}", error));
+    });
+    let client = Client::init_blocking(setup);
+    wait_for_preload(&remote_config);
+    client.shutdown_blocking(None);
+    drop(client);
+    // Well past the delayed response.
+    let late = errors.recv_timeout(Duration::from_secs(2));
+    assert!(
+        late.is_err(),
+        "on_error ran after shutdown returned: {:?}",
+        late
     );
 }
 

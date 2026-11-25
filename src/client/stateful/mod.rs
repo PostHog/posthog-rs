@@ -42,12 +42,13 @@ mod identity;
 mod initialization;
 mod producer;
 mod properties;
+mod remote_config;
 mod runtime;
 mod sessions;
 mod storage;
 mod writer;
 
-pub use crate::client::on_error::InitializationFailure;
+pub use crate::client::on_error::{InitializationFailure, RemoteConfigFailure};
 pub use crate::client::transport::flags::LoadError as FeatureFlagLoadError;
 pub use config::Config;
 pub use flag_listeners::{FeatureFlagsSubscription, FeatureFlagsUpdate};
@@ -60,13 +61,36 @@ pub use sessions::{SessionMode, SessionPersistence};
 pub use storage::Persistence;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::client::transport::remote_config::RemoteConfig;
+
 /// Saved JSON must stay readable by serde_json's 128-level decoder, including
 /// the few levels the state record adds around application values.
 const MAX_VALUE_DEPTH: usize = 100;
+
+/// Serde for an `Option<Arc<T>>` field, stored as the plain value: immutable
+/// data shared by otherwise independent snapshots.
+mod shared_arc {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub(super) fn serialize<T: Serialize, S: Serializer>(
+        value: &Option<Arc<T>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_deref().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<T>>, D::Error> {
+        Option::<T>::deserialize(deserializer).map(|value| value.map(Arc::new))
+    }
+}
 
 pub(super) fn within_depth<'a>(values: impl IntoIterator<Item = &'a Value>) -> bool {
     fn check(value: &Value, remaining: usize) -> bool {
@@ -107,6 +131,11 @@ struct Snapshot {
     // restore without targeting or a cache.
     #[serde(default, deserialize_with = "flag_state::lenient_flags")]
     flags: flag_state::FlagState,
+    // Records written before remote configuration restore without one.
+    #[serde(default, with = "shared_arc")]
+    remote_config: Option<Arc<RemoteConfig>>,
+    #[serde(skip)]
+    remote_config_loading: bool,
     #[serde(skip)]
     flag_load: flag_state::FlagLoadState,
     // Records written before sessions lack this field and restore without one.
@@ -181,6 +210,8 @@ impl Snapshot {
             registered: HashMap::new(),
             groups: HashMap::new(),
             flags: flag_state::FlagState::default(),
+            remote_config: None,
+            remote_config_loading: false,
             flag_load: flag_state::FlagLoadState::default(),
             session: None,
             sessions: sessions::Sessions::default(),
@@ -203,6 +234,8 @@ impl Snapshot {
             groups,
             flags,
             flag_load: _,
+            remote_config,
+            remote_config_loading: _,
             session,
             sessions: _,
             generation: _,
@@ -217,12 +250,17 @@ impl Snapshot {
             && *registered == other.registered
             && *groups == other.groups
             && *flags == other.flags
+            && *remote_config == other.remote_config
             && *session == other.session
     }
 
     fn is_valid(&self) -> bool {
         self.flags.is_valid()
             && within_depth(self.registered.values())
+            && self
+                .remote_config
+                .as_ref()
+                .map_or(true, |config| config.valid())
             && self
                 .session
                 .as_ref()

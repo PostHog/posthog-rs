@@ -289,6 +289,7 @@ impl Coordinator {
             // The stateless worker's own controls never reach a coordinator.
             Control::Capture { .. } | Control::HistoricalBatch { .. } => {}
             Control::Flags(_) => unreachable!("request-worker-only flags"),
+            Control::RemoteConfig(_) => unreachable!("request-worker-only config"),
             #[cfg(test)]
             Control::RequestBarrier(_) => unreachable!("request-worker-only barrier"),
         }

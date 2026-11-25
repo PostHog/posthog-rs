@@ -108,9 +108,9 @@ impl DrainReport {
 /// Setup always returns this type. Invalid configuration or local delivery
 /// startup failure disables the client and reports through `on_error`.
 /// Storage failures instead allow enabled memory-backed operation. No network
-/// request is required to establish readiness. Feature flag requests run
-/// independently of event delivery, on a bounded request worker that does not
-/// own event storage.
+/// request is required to establish readiness. Project configuration and feature
+/// flag requests run independently of event delivery, on a bounded request worker
+/// that does not own event storage.
 ///
 /// Persistent namespaces permit only one live owner. A second client with the
 /// same storage scope uses a generated or bootstrap identity in memory instead
@@ -129,7 +129,7 @@ pub struct Client {
     shutdown_timeout: Duration,
     shutdown: Option<shutdown::Shutdown>,
     pub(super) producer: Option<Producer>,
-    pub(super) flag_loader: Option<super::flags::FlagLoader>,
+    pub(super) flag_loader: Option<Arc<super::flags::FlagLoader>>,
     pub(super) state: Option<StateWriter>,
     pub(super) transport: Option<TransportHandle>,
     pub(super) closed: AtomicBool,
@@ -283,10 +283,10 @@ impl Client {
             shutdown: Some(shutdown),
             shutdown_timeout: config.shutdown_timeout,
             producer: Some(producer),
-            flag_loader: Some(super::flags::FlagLoader::new(
+            flag_loader: Some(Arc::new(super::flags::FlagLoader::new(
                 config.transport_options(),
                 config.on_feature_flags.clone(),
-            )),
+            ))),
             state: Some(state),
             transport: Some(transport),
             closed: AtomicBool::new(false),
@@ -303,9 +303,7 @@ impl Client {
             .unwrap()
             .listeners
             .notify_ready(&client.state.as_ref().unwrap().access());
-        if config.preload_feature_flags {
-            client.reload_feature_flags();
-        }
+        client.load_remote_config(config.preload_feature_flags);
         client
     }
 
@@ -478,8 +476,9 @@ impl Client {
     /// `None` uses Config::shutdown_timeout; `Some` overrides it (at most one day).
     /// Repeated calls share that deadline. Already-started work owns its resources
     /// through completion; return does not promise every event reached disk.
-    /// An in-flight feature flags request is not awaited or retried; its result
-    /// is discarded.
+    /// An in-flight remote configuration or feature flags request is not awaited
+    /// or retried; its result is discarded, and a failure that arrives after
+    /// shutdown starts is not reported to `on_error`.
     /// Application callback-capture destructors may run synchronously and block
     /// outside the SDK-controlled waiting bound. Worker callbacks and synchronous
     /// capture hooks request closure but return Deferred instead of waiting.

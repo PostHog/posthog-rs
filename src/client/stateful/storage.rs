@@ -159,9 +159,10 @@ fn encode_record(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Encode for the state writer. A cache that cannot be read back (for example a
-/// payload nested beyond the JSON decoder's depth limit) is left out rather
-/// than making identity and consent unwritable.
+/// Encode for the state writer. A flag cache that cannot be read back (for
+/// example a payload nested beyond the JSON decoder's depth limit) is left out
+/// rather than making identity and consent unwritable. Remote configuration
+/// that deep is rejected when it is loaded.
 fn encode_snapshot(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
     if let Ok(encoded) = encode_record(snapshot) {
         return Ok(encoded);
@@ -277,8 +278,8 @@ impl FileStateStore {
         }
         let record: StateRecord<serde_json::Value> =
             serde_json::from_value(record).map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
-        // An invalid stored session or flag cache is dropped, and the record
-        // is rewritten.
+        // An invalid stored session, flag cache or remote config is dropped,
+        // and the record is rewritten.
         let mut state = record.state;
         let mut rewrite_required = false;
         if let Some(cache) = state
@@ -286,6 +287,11 @@ impl FileStateStore {
             .and_then(|flags| flags.get_mut("cache"))
         {
             rewrite_required |= normalize_optional::<super::flag_state::FlagCache>(cache, |_| true);
+        }
+        if let Some(config) = state.get_mut("remote_config") {
+            rewrite_required |= normalize_optional::<
+                crate::client::transport::remote_config::RemoteConfig,
+            >(config, |config| config.valid());
         }
         if let Some(session) = state.get_mut("session") {
             rewrite_required |=

@@ -18,6 +18,54 @@ fn bootstrap(config: &mut Config) {
 }
 
 #[test]
+fn startup_no_flags_hint_preserves_already_accepted_bootstrap_report() {
+    let server = httpmock::MockServer::start();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    server.mock(|when, then| {
+        when.path("/array/phc_test/config");
+        then.respond_with(move |_| {
+            entered_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv_timeout(WAIT).unwrap();
+            http::Response::builder()
+                .status(200)
+                .body(r#"{"hasFeatureFlags":false}"#.to_owned())
+                .unwrap()
+                .into()
+        });
+    });
+    let flags = server.mock(|when, then| {
+        when.path("/flags/");
+        then.status(200).json_body(json!({"featureFlags":{}}));
+    });
+    server.mock(|when, then| {
+        when.path("/i/v1/analytics/events");
+        then.status(200).json_body(json!({"results":{}}));
+    });
+    let mut config = config(&server.base_url());
+    config.preload_feature_flags = true;
+    config.before_send.clear();
+    config.bootstrap_feature_flags = Some(HashMap::from([("a".into(), FlagValue::Boolean(true))]));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    config.before_send(move |event| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        Some(event)
+    });
+    let client = Client::init_blocking(config);
+    entered_rx.recv_timeout(WAIT).unwrap();
+    assert!(client.feature_flag("a").get().unwrap().enabled);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    release_tx.send(()).unwrap();
+    client.transport.as_ref().unwrap().request_barrier();
+    assert!(client.feature_flag("a").get().unwrap().enabled);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    flags.assert_calls(0);
+    client.shutdown_blocking(None);
+}
+
+#[test]
 fn bootstrap_filters_values_and_keeps_decoded_payloads_before_preload_completes() {
     for partial in [false, true] {
         let server = Server::new(vec![(

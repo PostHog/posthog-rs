@@ -14,6 +14,62 @@ SDK usage examples and code snippets live in the official documentation so they 
 - [Rust library docs](https://posthog.com/docs/libraries/rust)
 - Stateful application client (`stateful` feature): local anonymous identity, identify, alias and reset, opt-in/opt-out consent, registered properties and groups, sessions (automatic or manual, optionally persisted), feature flags (cached and persisted reads, bootstrap, preload/reload, listeners, person and group targeting), capture/screen, native hooks and persistent delivery.
 
+## Stateful remote configuration
+
+The `stateful` client loads remote configuration once, asynchronously, at
+initialization, without delaying readiness. Settings use the configured
+persistence scope and survive identity changes and reset. A failed load keeps the
+last saved settings; `Persistence::Memory` keeps them in memory only.
+
+Startup feature flags load after remote configuration. A successful
+`hasFeatureFlags: false` response skips preload and clears stale server flags while
+preserving bootstrap values. Missing or unavailable settings fall back to loading
+flags. `Config::preload_feature_flags = false` suppresses startup flag loading, not
+remote configuration. Explicit and targeting-triggered flag refreshes remain available.
+Remote configuration failures are reported through `Config::on_error` as
+`PostHogError::RemoteConfig`. A response nested too deeply to save is rejected as
+invalid, and the last saved settings stay in use.
+
+## Stateful storage, sessions and shutdown
+
+Disk storage is scoped by project token and instance name, independently of the
+ingestion host. Each namespace has one live owner; share an `Arc<Client>` or use
+different instance names for independent identities. The device ID survives
+identity reset. Malformed current-format core state falls back to configured
+identity/consent and can be replaced by a normal save; future-version and
+inaccessible state is not overwritten. Invalid optional caches are discarded
+without discarding valid identity.
+
+Event persistence continues while HTTP is blocked. Queued events, on disk or in
+memory with `Persistence::Memory`, are limited by `Config::max_queue_size` and by
+internal byte limits; when the queue is full, the oldest events are dropped to keep
+the newest. Local acceptance does not guarantee disk persistence or ingestion.
+
+Ordinary session activity commits only after local event admission. Hook drops,
+validation/size rejection and passive getters do not refresh idle time. Identity
+and session attribution is frozen before hooks; hooks can still edit wire fields.
+Session idle and maximum-age limits use wall-clock time, as the other stateful
+PostHog SDKs do, so time spent suspended counts toward them.
+
+Stateful shutdown selects one deadline for SDK-controlled waiting; concurrent or
+later calls cannot extend it. Dropping the client does not wait for delivery: it
+waits up to about 1 s for pending local state writes, then ends the deadline at
+once. `DeliveryOutcome::Stopped` means actual
+delivery-worker completion, while `TimedOut` means unfinished work at expiry.
+State persistence has its own outcome. Already-started storage, HTTP or
+callback work owns its resources until completion, potentially indefinitely if it
+never returns. Storage work retains its namespace lease while access is possible;
+request-only work does not. Arbitrary destructors of application objects captured
+by callbacks may block outside the SDK-controlled waiting bound.
+
+Configuration/flags requests run independently from event persistence and upload.
+A delivery flush is not a request-completion barrier. Requested reloads coalesce;
+a targeting change made with `reload: Some(false)` does not fetch. Complete flag
+responses replace the cache with successful records; partial responses merge
+successes and retain prior records. Accepted exposure reports deduplicate by key
+and typed value until an identity change, reset or shutdown, including across
+reloads and targeting updates.
+
 ## Request context
 
 With the optional `tower` feature, `tower::PostHogLayer` reads

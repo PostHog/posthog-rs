@@ -52,6 +52,9 @@ mod inbox;
 #[path = "transport_queue.rs"]
 mod queue;
 #[cfg(feature = "stateful")]
+#[path = "transport_remote_config.rs"]
+pub(super) mod remote_config;
+#[cfg(feature = "stateful")]
 #[path = "transport_requests.rs"]
 mod requests;
 #[cfg(all(test, feature = "stateful"))]
@@ -110,6 +113,10 @@ pub(crate) enum Control {
     /// Test-only: signal once the request worker reaches this point.
     #[cfg(all(test, feature = "stateful"))]
     RequestBarrier(mpsc::Sender<()>),
+    /// Stateful remote configuration: load it. Only the request worker
+    /// receives it.
+    #[cfg(feature = "stateful")]
+    RemoteConfig(remote_config::Task),
 }
 
 /// Completion signal handed to the worker so the caller can wait for a flush or
@@ -958,6 +965,8 @@ fn run_worker(
             Wake::Msg(Control::Flags(_)) => unreachable!("request-worker-only flags"),
             #[cfg(all(test, feature = "stateful"))]
             Wake::Msg(Control::RequestBarrier(_)) => unreachable!("request-worker-only barrier"),
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::RemoteConfig(_)) => unreachable!("request-worker-only config"),
             #[cfg(test)]
             Wake::Msg(Control::Tick(completion)) => {
                 // Defer the signal until after the shared servicing block below,
@@ -1020,6 +1029,8 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             Control::Flags(slot) => slot.close(),
             #[cfg(all(test, feature = "stateful"))]
             Control::RequestBarrier(_) => {}
+            #[cfg(feature = "stateful")]
+            Control::RemoteConfig(_) => {}
         }
     }
 }

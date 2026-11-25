@@ -72,6 +72,12 @@ fn preload_setting_only_controls_startup_requests() {
             then.status(200)
                 .json_body(serde_json::json!({"featureFlags":{}}));
         });
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/array/phc_test/config");
+            then.status(200)
+                .json_body(serde_json::json!({"hasFeatureFlags":enabled}));
+        });
         let (tx, rx) = std::sync::mpsc::channel();
         let mut config = Config::new("phc_test");
         config.on_feature_flags(move |_| {
@@ -85,10 +91,8 @@ fn preload_setting_only_controls_startup_requests() {
         config.persistence = Persistence::Memory;
         config.before_send(|_| None);
         let client = Client::init_blocking(config);
-        if enabled {
-            rx.recv_timeout(std::time::Duration::from_secs(5))
-                .expect("startup completion");
-        }
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("startup completion");
         flags.assert_calls(usize::from(enabled));
         client.reload_feature_flags();
         rx.recv_timeout(std::time::Duration::from_secs(5))

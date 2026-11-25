@@ -255,6 +255,16 @@ impl TransportHandle {
         })
     }
 
+    /// Load remote configuration on the request worker.
+    pub(crate) fn schedule_remote_config(&self, task: super::remote_config::Task) -> bool {
+        !self.is_closed()
+            && self
+                .delivery
+                .as_ref()
+                .and_then(|delivery| delivery.requests.as_ref())
+                .is_some_and(|requests| requests.sender().send(Control::RemoteConfig(task)).is_ok())
+    }
+
     /// Wait only for work preceding this FIFO position, not later requests.
     #[cfg(test)]
     pub(crate) fn request_barrier(&self) {
@@ -343,6 +353,18 @@ impl TransportHandle {
     /// Never waits.
     pub(crate) fn coordinator_stopped(&self) -> bool {
         finished(&self.worker)
+    }
+
+    /// Event delivery and the request worker have stopped.
+    #[cfg(test)]
+    pub(crate) fn all_stopped(&self) -> bool {
+        self.delivery_stopped()
+            && self.delivery.as_ref().map_or(true, |delivery| {
+                delivery
+                    .requests
+                    .as_ref()
+                    .map_or(true, super::requests::Worker::is_stopped)
+            })
     }
 
     /// Event delivery has stopped.

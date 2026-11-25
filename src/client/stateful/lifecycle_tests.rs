@@ -123,10 +123,10 @@ fn client_with_store(
         shutdown_timeout: config.shutdown_timeout,
         shutdown: Some(shutdown),
         producer: Some(Producer::new(config)),
-        flag_loader: Some(super::super::flags::FlagLoader::new(
+        flag_loader: Some(Arc::new(super::super::flags::FlagLoader::new(
             config.transport_options(),
             config.on_feature_flags.clone(),
-        )),
+        ))),
         state: Some(state),
         transport: Some(
             TransportHandle::spawn_stateful_with_deadline(
@@ -711,6 +711,73 @@ fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads()
         1
     );
     eprintln!("blocked-event shutdown_and_drop_us={}", elapsed.as_micros());
+}
+
+#[test]
+fn request_only_work_does_not_keep_event_storage_leased_after_delivery_stops() {
+    use crate::client::event_store::{FileEventStore, StoreLimits};
+    use std::io::{Read, Write};
+    let directory = Directory::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let (entered, waiting) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        entered.send(()).unwrap();
+        gate.recv_timeout(GATE_WAIT).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            .unwrap();
+    });
+    let mut config = config();
+    config.host = host;
+    config.shutdown_timeout = Duration::from_millis(20);
+    let state = StateWriter::new(
+        Snapshot::anonymous("anonymous".into()),
+        Backend::Memory,
+        WriterOptions::default(),
+        vec![],
+        Arc::new(SystemClock),
+    )
+    .unwrap();
+    let store = FileEventStore::open(
+        StorageDirectory::open(&directory.0).unwrap(),
+        StoreLimits {
+            max_events: 10,
+            max_bytes: 64 * 1024,
+        },
+    )
+    .unwrap();
+    let client = client_with_store(&config, state, Some(Box::new(store)));
+    client.load_remote_config(false);
+    waiting.recv_timeout(WAIT).unwrap();
+    let start = Instant::now();
+    client.shutdown_blocking(None);
+    let elapsed = start.elapsed();
+    let end = Instant::now() + WAIT;
+    while !client.transport.as_ref().unwrap().delivery_stopped() && Instant::now() < end {
+        thread::yield_now();
+    }
+    let leased = StorageDirectory::open(&directory.0);
+    let dropping = Instant::now();
+    drop(client);
+    let dropped = dropping.elapsed();
+    release.send(()).unwrap();
+    server.join().unwrap();
+    assert!(
+        leased.is_ok(),
+        "request-only completion retained event storage"
+    );
+    assert!(elapsed < Duration::from_secs(1));
+    assert!(dropped < Duration::from_secs(1));
+    eprintln!(
+        "blocked-request shutdown_wait_us={} immediate_drop_us={}",
+        elapsed.as_micros(),
+        dropped.as_micros()
+    );
 }
 
 /// The writer is inside its first save and a state change waits behind it.

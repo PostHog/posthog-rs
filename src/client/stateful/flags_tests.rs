@@ -660,6 +660,22 @@ fn close_from_capture_hook_rejects_active_flag_completion() {
 fn flag_load_revision_changes_only_with_effective_context_and_rejected_mutations_are_atomic() {
     let client = Client::init_blocking(config("http://127.0.0.1:1"));
     client.flush_blocking();
+    // The startup remote config load must settle so it cannot change the
+    // snapshot between the comparisons below.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while client
+        .state
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .remote_config_loading
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "remote config did not settle"
+        );
+        std::thread::yield_now();
+    }
     seed(&client);
     client.register(HashMap::from([("analytics-only".into(), json!(1))]));
     client.opt_out();

@@ -153,7 +153,7 @@ impl Slot {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).closed = true;
     }
 
-    fn is_closed(&self) -> bool {
+    pub(super) fn is_closed(&self) -> bool {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).closed
     }
 
@@ -175,7 +175,23 @@ impl Slot {
             }
             pending.task.take()
         };
-        let mut next = task;
+        if let Some(task) = task {
+            self.run_chain(task, http, options);
+        }
+    }
+
+    /// Run a task and its follow-ups under this slot's closure and supersede
+    /// rules. The startup remote-config completion uses this for its flags task.
+    pub(crate) fn run_chain(
+        &self,
+        task: Task,
+        http: &reqwest::blocking::Client,
+        options: &ClientOptions,
+    ) {
+        if self.is_closed() {
+            return;
+        }
+        let mut next = Some(task);
         while let Some(task) = next.take() {
             let Some(follow_up) = task.run(http, options, &|| self.is_closed()) else {
                 break;
