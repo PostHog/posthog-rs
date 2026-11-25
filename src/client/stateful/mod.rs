@@ -36,6 +36,7 @@ mod initialization;
 mod producer;
 mod properties;
 mod runtime;
+mod sessions;
 mod storage;
 mod writer;
 
@@ -45,6 +46,7 @@ pub use identity::{Alias, Identify, PersonProfiles, PersonProperties};
 pub use producer::{Capture, CaptureOutcome, Screen};
 pub use properties::Group;
 pub use runtime::{Client, DeliveryOutcome, DrainReport, PersistenceOutcome};
+pub use sessions::{SessionMode, SessionPersistence};
 pub use storage::Persistence;
 
 use std::collections::HashMap;
@@ -91,6 +93,11 @@ struct Snapshot {
     registered: HashMap<String, Value>,
     #[serde(default, deserialize_with = "lenient_groups")]
     groups: HashMap<String, String>,
+    // Records written before sessions lack this field and restore without one.
+    #[serde(default)]
+    session: Option<sessions::StoredSession>,
+    #[serde(skip)]
+    sessions: sessions::Sessions,
     // Process-local bookkeeping shares the same lock as identity, but is not persisted.
     #[serde(skip)]
     generation: u64,
@@ -157,6 +164,8 @@ impl Snapshot {
             opt_out: None,
             registered: HashMap::new(),
             groups: HashMap::new(),
+            session: None,
+            sessions: sessions::Sessions::default(),
             generation: 0,
             person_properties: None,
         }
@@ -174,6 +183,8 @@ impl Snapshot {
             opt_out,
             registered,
             groups,
+            session,
+            sessions: _,
             generation: _,
             person_properties: _,
         } = self;
@@ -185,10 +196,15 @@ impl Snapshot {
             && *opt_out == other.opt_out
             && *registered == other.registered
             && *groups == other.groups
+            && *session == other.session
     }
 
     fn is_valid(&self) -> bool {
         within_depth(self.registered.values())
+            && self
+                .session
+                .as_ref()
+                .map_or(true, sessions::StoredSession::is_valid)
             && !self.device_id.trim().is_empty()
             && !self.anonymous_id.trim().is_empty()
             && !self.distinct_id.trim().is_empty()

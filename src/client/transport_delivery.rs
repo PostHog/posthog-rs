@@ -16,7 +16,7 @@ use super::{
     build_http, Clock, Completion, Control, LaneConfig, TransportHandle, MAX_SHUTDOWN_TIMEOUT,
 };
 use crate::capture_event::CaptureEvent;
-use crate::client::event_store::{record_size, EventStore};
+use crate::client::event_store::EventStore;
 use crate::client::ClientOptions;
 
 /// The immediate result of admitting an event.
@@ -221,17 +221,22 @@ impl TransportHandle {
         )
     }
 
-    /// Admit an event. Measuring it is the only work done before the inbox's
-    /// short lock, and no user code runs, so callers may admit while holding
-    /// SDK locks.
+    /// Admit an event, measuring it here.
+    #[cfg(test)]
     pub(crate) fn enqueue_prepared(&self, event: CaptureEvent) -> Admission {
+        let bytes = crate::client::event_store::record_size(&event);
+        self.enqueue_measured(event, bytes)
+    }
+
+    /// Admit an event whose serialized size the caller measured before taking
+    /// an SDK lock. No user code runs, so callers may admit under SDK locks.
+    pub(crate) fn enqueue_measured(&self, event: CaptureEvent, bytes: usize) -> Admission {
         let Some(delivery) = &self.delivery else {
             return Admission::Closed;
         };
         if self.is_closed() {
             return Admission::Closed;
         }
-        let bytes = record_size(&event);
         let admission = delivery.inbox.admit(event, bytes);
         if admission == Admission::Accepted
             && delivery.inbox.arm()

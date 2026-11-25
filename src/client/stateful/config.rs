@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::{Persistence, PersonProfiles};
+use super::{Persistence, PersonProfiles, SessionMode, SessionPersistence};
 use crate::client::event_store::StoreLimits;
 use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
 use crate::client::{ClientOptions, OnErrorHook, PostHogError};
@@ -35,6 +35,11 @@ pub struct Config {
     pub opt_out: bool,
     /// Storage selection. Defaults to the OS local application-data directory.
     pub persistence: Persistence,
+    /// Session boundary ownership. Default: Automatic (30-minute idle, 24-hour max).
+    pub session_mode: SessionMode,
+    /// Session restart continuity. Default: Memory. Persistent uses the configured
+    /// state store; it does not override Persistence::Memory.
+    pub session_persistence: SessionPersistence,
     /// Separates the storage of clients that use the same project token. The
     /// storage namespace is the project token plus this name; the host does not
     /// change it. Default: "default".
@@ -120,6 +125,8 @@ impl Config {
             disabled: false,
             opt_out: false,
             persistence: Persistence::Automatic,
+            session_mode: SessionMode::Automatic,
+            session_persistence: SessionPersistence::Memory,
             instance_name: "default".into(),
             bootstrap_anonymous_id: None,
             bootstrap_identified_id: None,

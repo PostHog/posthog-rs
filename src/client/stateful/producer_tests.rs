@@ -50,7 +50,9 @@ fn assembly_preserves_rust_precedence_and_captures_identity_time_and_sdk() {
         .options
         .insert("process_person_profile".into(), true.into());
     input.groups.insert("company".into(), "typed".into());
-    let wire = producer.prepare(input.clone(), &snapshot(), now()).unwrap();
+    let wire = producer
+        .prepare(input.clone(), &snapshot(), now(), None)
+        .unwrap();
     assert_eq!(wire.event, "captured");
     assert_eq!(wire.distinct_id, "anonymous-id");
     assert_eq!(Some(wire.uuid), input.uuid);
@@ -85,7 +87,7 @@ fn sdk_name_and_version_fill_as_a_pair() {
     let lib = |properties: serde_json::Value| {
         let mut input = Capture::new("captured");
         input.properties = serde_json::from_value(properties).unwrap();
-        let wire = producer.prepare(input, &snapshot(), now()).unwrap();
+        let wire = producer.prepare(input, &snapshot(), now(), None).unwrap();
         (
             wire.properties["$lib"].clone(),
             wire.properties.get("$lib_version").cloned(),
@@ -130,7 +132,7 @@ fn person_profile_option_then_property_then_mode() {
         let mut input = Capture::new("captured");
         input.properties = serde_json::from_value(properties).unwrap();
         input.options = serde_json::from_value(options).unwrap();
-        let wire = producer.prepare(input, &snapshot(), now()).unwrap();
+        let wire = producer.prepare(input, &snapshot(), now(), None).unwrap();
         (
             wire.options.get("process_person_profile").cloned(),
             wire.properties.get("$process_person_profile").cloned(),
@@ -172,7 +174,7 @@ fn normalization_omits_custom_null_members_but_preserves_slots_and_protocol_payl
     input
         .options
         .insert("process_person_profile".into(), Value::Null);
-    let wire = producer.prepare(input, &snapshot(), now()).unwrap();
+    let wire = producer.prepare(input, &snapshot(), now(), None).unwrap();
     assert!(wire.properties.get("drop").is_none());
     assert_eq!(wire.properties["nested"], json!({"keep": 1}));
     assert_eq!(
@@ -213,7 +215,7 @@ fn hooks_see_enrichment_in_order_and_cleanup_does_not_restore_removed_data() {
         Some(event)
     });
     let wire = Producer::new(&config)
-        .prepare(Capture::new("hooked"), &snapshot(), now())
+        .prepare(Capture::new("hooked"), &snapshot(), now(), None)
         .unwrap();
     assert_eq!(wire.properties["$lib"], "hook-sdk");
     assert!(wire.properties.get("$lib_version").is_none());
@@ -241,7 +243,7 @@ fn hooks_see_merged_groups_and_can_replace_them() {
         json!({"company": "property", "project": "property"}),
     );
     let wire = Producer::new(&config)
-        .prepare(input, &snapshot(), now())
+        .prepare(input, &snapshot(), now(), None)
         .unwrap();
     assert_eq!(wire.properties["$groups"], json!({"team": "safe"}));
 }
@@ -266,7 +268,7 @@ fn drop_and_panic_stop_the_chain_and_never_return_the_original() {
         // A panic poisons the hook mutex; subsequent captures must still fail closed.
         for _ in 0..2 {
             assert!(matches!(
-                producer.prepare(Capture::new("private"), &snapshot(), now()),
+                producer.prepare(Capture::new("private"), &snapshot(), now(), None),
                 Err(CaptureOutcome::Dropped)
             ));
         }
@@ -285,12 +287,12 @@ fn input_and_transformed_names_are_validated_without_reenrichment() {
     });
     let producer = Producer::new(&config);
     assert!(matches!(
-        producer.prepare(Capture::new(" "), &snapshot(), now()),
+        producer.prepare(Capture::new(" "), &snapshot(), now(), None),
         Err(CaptureOutcome::Invalid)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(matches!(
-        producer.prepare(Capture::new("valid"), &snapshot(), now()),
+        producer.prepare(Capture::new("valid"), &snapshot(), now(), None),
         Err(CaptureOutcome::Invalid)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -301,7 +303,7 @@ fn replacement_hooks_keep_their_identity_and_metadata_removals() {
     let mut config = Config::new("phc_test");
     config.before_send(|_| Some(Event::new("replacement", "replacement-id")));
     let wire = Producer::new(&config)
-        .prepare(Capture::new("original"), &snapshot(), now())
+        .prepare(Capture::new("original"), &snapshot(), now(), None)
         .unwrap();
     assert_eq!(wire.event, "replacement");
     assert_eq!(wire.distinct_id, "replacement-id");
@@ -347,7 +349,9 @@ fn registered_context_matches_stateless_fill_and_wire_precedence() {
     input
         .options
         .insert("process_person_profile".into(), false.into());
-    let wire = producer.prepare(input.clone(), &state, now()).unwrap();
+    let wire = producer
+        .prepare(input.clone(), &state, now(), None)
+        .unwrap();
     // Use the existing public stateless context API as the like-for-like control.
     let mut server = Event::from_parts(
         input.event,
@@ -423,7 +427,7 @@ fn raw_group_scalars_and_nulls_keep_canonical_fill_until_typed_groups_override()
             if typed {
                 input.groups.insert("company".into(), "typed".into());
             }
-            let wire = producer.prepare(input, &state, now()).unwrap();
+            let wire = producer.prepare(input, &state, now(), None).unwrap();
             assert_eq!(
                 wire.properties["$groups"],
                 if typed {
@@ -442,8 +446,10 @@ fn unspecified_uuid_is_fresh_per_capture_and_explicit_time_is_kept() {
     let producer = Producer::new(&Config::new("phc_test"));
     let mut input = Capture::new("repeat");
     input.timestamp = Some("2024-01-01T00:00:00Z".parse().unwrap());
-    let first = producer.prepare(input.clone(), &snapshot(), now()).unwrap();
-    let second = producer.prepare(input, &snapshot(), now()).unwrap();
+    let first = producer
+        .prepare(input.clone(), &snapshot(), now(), None)
+        .unwrap();
+    let second = producer.prepare(input, &snapshot(), now(), None).unwrap();
     assert_ne!(first.uuid, second.uuid);
     assert_eq!(first.uuid.get_version_num(), 7);
     assert_eq!(first.timestamp, "2024-01-01T00:00:00.000Z");
@@ -458,11 +464,13 @@ fn a_registered_process_person_profile_never_reaches_identity_events() {
     state.registered = HashMap::from([("$process_person_profile".into(), json!(false))]);
     let producer = Producer::new(&Config::new("phc_test"));
     let ordinary = producer
-        .prepare(Capture::new("ordinary"), &state, now())
+        .prepare(Capture::new("ordinary"), &state, now(), None)
         .unwrap();
     assert_eq!(ordinary.options["process_person_profile"], false);
     for name in crate::event::IDENTIFY_STYLE_EVENTS {
-        let wire = producer.prepare(Capture::new(name), &state, now()).unwrap();
+        let wire = producer
+            .prepare(Capture::new(name), &state, now(), None)
+            .unwrap();
         assert_eq!(wire.options["process_person_profile"], true, "{}", name);
     }
 }

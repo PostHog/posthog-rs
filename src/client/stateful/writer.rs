@@ -235,6 +235,15 @@ impl Drop for WorkerExit {
     }
 }
 
+/// Person bookkeeping for an identity event being admitted. A `None`
+/// fingerprint is an update that may be personless.
+pub(super) struct PersonAdmission<'a> {
+    pub(super) generation: u64,
+    pub(super) distinct_id: &'a str,
+    pub(super) fingerprint: Option<[u8; 20]>,
+    pub(super) deduplicate: bool,
+}
+
 pub(super) struct StateWriter {
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -379,6 +388,8 @@ impl StateWriter {
             }
             let mut candidate = (*state.snapshot).clone();
             let result = change(&mut candidate);
+            // Process-local session activity does not change the already-validated
+            // persistence representation. Only changed persisted fields need encoding.
             if candidate.same_persisted_state(&state.snapshot) {
                 if candidate != *state.snapshot {
                     state.snapshot = Arc::new(candidate);
@@ -391,10 +402,7 @@ impl StateWriter {
             let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
             state.snapshot = Arc::new(candidate);
             state.revision = revision;
-            if state.mode == Mode::Persistent && state.due.is_none() {
-                state.due =
-                    Some(self.shared.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
-            }
+            self.schedule_write(&mut state);
             (revision, result)
         };
         self.shared.notify();
@@ -406,6 +414,7 @@ impl StateWriter {
     /// Fingerprints are not persisted, so this cannot schedule a writer notification.
     /// `None` is an update that may be personless: it never matches, and once
     /// admitted it clears the stored fingerprint.
+    #[cfg(test)]
     pub(super) fn admit_person(
         &self,
         generation: u64,
@@ -414,25 +423,88 @@ impl StateWriter {
         deduplicate: bool,
         admit: impl FnOnce() -> bool,
     ) {
-        let mut state = self.shared.lock();
-        let same_generation = state.snapshot.generation == generation;
-        if same_generation
-            && deduplicate
-            && fingerprint.is_some()
-            && state.snapshot.person_properties == fingerprint
-        {
-            return;
+        self.admit_capture(
+            None,
+            Some(PersonAdmission {
+                generation,
+                distinct_id,
+                fingerprint,
+                deduplicate,
+            }),
+            admit,
+        );
+    }
+
+    /// After a persisted change, write it once the coalescing delay passes,
+    /// unless a write is already due.
+    fn schedule_write(&self, state: &mut State) {
+        if state.mode == Mode::Persistent && state.due.is_none() {
+            state.due =
+                Some(self.shared.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
         }
-        if !admit() || state.closing.is_some() {
-            return;
-        }
-        if same_generation {
-            Arc::make_mut(&mut state.snapshot).person_properties = fingerprint;
-        } else if state.snapshot.distinct_id == distinct_id {
-            // An update prepared before a newer identity change for the same
-            // ID is now the latest for that person, so the newer
-            // fingerprint no longer describes what PostHog last received.
-            Arc::make_mut(&mut state.snapshot).person_properties = None;
+    }
+
+    /// Validate session persistence before callback-free queue admission, then
+    /// commit session activity and person bookkeeping in the same queue order.
+    pub(super) fn admit_capture(
+        &self,
+        session: Option<(
+            super::sessions::AdmissionSession,
+            super::sessions::SessionTime,
+            bool,
+        )>,
+        person: Option<PersonAdmission<'_>>,
+        admit: impl FnOnce() -> bool,
+    ) {
+        let persisted_changed = {
+            let mut state = self.shared.lock();
+            if state.closing.is_some()
+                || self
+                    .shared
+                    .deadline
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_some()
+            {
+                return;
+            }
+            let mut candidate = (*state.snapshot).clone();
+            if let Some(person) = person {
+                if candidate.generation == person.generation {
+                    if person.deduplicate
+                        && person.fingerprint.is_some()
+                        && candidate.person_properties == person.fingerprint
+                    {
+                        return;
+                    }
+                    candidate.person_properties = person.fingerprint;
+                } else if candidate.distinct_id == person.distinct_id {
+                    // An update prepared before a newer identity change for the
+                    // same ID is now the latest for that person, so the newer
+                    // fingerprint no longer describes what PostHog last received.
+                    candidate.person_properties = None;
+                }
+            }
+            if let Some((token, now, activity)) = session {
+                candidate.sessions.commit_admission(token, now, activity);
+                candidate.session = candidate.sessions.stored();
+            }
+            let persisted_changed = !candidate.same_persisted_state(&state.snapshot);
+            if persisted_changed && state.revision == u64::MAX {
+                return;
+            }
+            if !admit() {
+                return;
+            }
+            state.snapshot = Arc::new(candidate);
+            if persisted_changed {
+                state.revision += 1;
+                self.schedule_write(&mut state);
+            }
+            persisted_changed
+        };
+        if persisted_changed {
+            self.shared.notify();
         }
     }
 

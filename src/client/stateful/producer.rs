@@ -143,6 +143,7 @@ pub(super) struct Producer {
     hooks: Vec<BeforeSendHook>,
     pub(super) person_profiles: PersonProfiles,
     pub(super) default_opt_out: bool,
+    pub(super) session_clock: std::sync::Arc<dyn super::sessions::SessionClock>,
     /// The last screen name passed to `screen`, added to later events as
     /// `$screen_name`. Kept in memory only, as in posthog-ios and
     /// posthog-android.
@@ -168,6 +169,7 @@ impl Producer {
             hooks: config.before_send.clone(),
             person_profiles: config.person_profiles,
             default_opt_out: config.opt_out,
+            session_clock: std::sync::Arc::new(super::sessions::SystemSessionClock),
             last_screen: Mutex::new(None),
         }
     }
@@ -193,6 +195,7 @@ impl Producer {
         input: Capture,
         snapshot: &Snapshot,
         now: DateTime<Utc>,
+        session_id: Option<Uuid>,
     ) -> Result<CaptureEvent, CaptureOutcome> {
         if input.event.trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
@@ -232,6 +235,9 @@ impl Producer {
         }
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
+        }
+        if let Some(id) = session_id {
+            event.insert_prop_default("$session_id", id.to_string().into());
         }
         // Paired as the server client pairs them.
         crate::client::common::fill_sdk_identity(&mut event, &self.sdk_name, &self.sdk_version);
@@ -320,6 +326,7 @@ impl Client {
     /// the calling thread, outside client-state locks. Concurrent calls serialize
     /// each mutable hook; a hook must not wait for another capture of this client.
     /// Recursive same-thread capture is rejected rather than skipping hooks.
+    /// Session activity is committed only when local admission succeeds.
     pub fn capture(&self, input: impl Into<Capture>) -> CaptureOutcome {
         if self.is_disabled() {
             return CaptureOutcome::Disabled;
@@ -327,27 +334,110 @@ impl Client {
         if self.closed.load(Ordering::Acquire) {
             return CaptureOutcome::Closed;
         }
-        let snapshot = self.state.as_ref().unwrap().snapshot();
-        if self.snapshot_opted_out(&snapshot) {
+        if self.snapshot_opted_out(&self.state.as_ref().unwrap().snapshot()) {
             return CaptureOutcome::OptedOut;
         }
         let _guard = match CaptureGuard::enter(self) {
             Ok(guard) => guard,
             Err(outcome) => return outcome,
         };
-        self.capture_snapshot(input.into(), &snapshot)
+        let input = input.into();
+        if input.event.trim().is_empty() {
+            return CaptureOutcome::Invalid;
+        }
+        let state = self.state.as_ref().unwrap();
+        // With a valid live session, preparing attribution changes nothing, so
+        // skip the clone-and-compare of a state mutation on the common path.
+        let current = state.snapshot();
+        if !self.snapshot_opted_out(&current) {
+            if let Some(session) = current.sessions.live_admission(self.session_now()) {
+                return self.capture_with_session(input, &current, Some(session), true);
+            }
+        }
+        let snapshot = state.mutate(|snapshot| {
+            let opted_out = self.snapshot_opted_out(snapshot);
+            let now = self.session_now();
+            let session = (!opted_out).then(|| snapshot.sessions.prepare_admission(now));
+            (snapshot.clone(), session)
+        });
+        let Ok((_, (snapshot, session))) = snapshot else {
+            return CaptureOutcome::Closed;
+        };
+        self.capture_with_session(input, &snapshot, session, true)
     }
 
+    /// Passive identity/group events may create attribution, without touching idle time.
     /// The caller owns the recursion guard and the operation's identity snapshot.
     pub(super) fn capture_snapshot(&self, input: Capture, snapshot: &Snapshot) -> CaptureOutcome {
-        let wire = match self.prepare_snapshot(input, snapshot) {
-            Ok(wire) => wire,
-            Err(outcome) => return outcome,
-        };
+        let session = self.prepare_admission_session(snapshot.generation);
+        self.capture_with_session(input, snapshot, session, false)
+    }
+
+    /// Select attribution for an event built from an earlier identity snapshot.
+    /// A reset since then means the current session belongs to the next user,
+    /// so the event is sent without a session instead.
+    pub(super) fn prepare_admission_session(
+        &self,
+        generation: u64,
+    ) -> Option<super::sessions::AdmissionSession> {
+        let now = self.session_now();
+        self.state
+            .as_ref()
+            .unwrap()
+            .mutate(|snapshot| {
+                (snapshot.generation == generation && !self.snapshot_opted_out(snapshot))
+                    .then(|| snapshot.sessions.prepare_admission(now))
+            })
+            .ok()
+            .and_then(|(_, token)| token)
+    }
+
+    /// Attribution was selected with the operation's snapshot. Do not recheck
+    /// expiration here: crossing a boundary cannot erase the selected session.
+    fn capture_with_session(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+        session: Option<super::sessions::AdmissionSession>,
+        activity: bool,
+    ) -> CaptureOutcome {
+        let wire =
+            match self.prepare_with_session(input, snapshot, session.and_then(|token| token.id)) {
+                Ok(wire) => wire,
+                Err(outcome) => return outcome,
+            };
+        self.admit_wire(wire, session, activity)
+    }
+
+    fn admit_wire(
+        &self,
+        wire: CaptureEvent,
+        session: Option<super::sessions::AdmissionSession>,
+        activity: bool,
+    ) -> CaptureOutcome {
         let uuid = wire.uuid;
-        match self.transport.as_ref().unwrap().enqueue_prepared(wire) {
-            Admission::Accepted => CaptureOutcome::Accepted { uuid },
-            Admission::Closed => CaptureOutcome::Closed,
+        let now = self.session_now();
+        // Measure before taking the state lock, so large events do not extend
+        // it. Admission runs no user code, so it may run under the lock.
+        let bytes = crate::client::event_store::record_size(&wire);
+        let mut admission = None;
+        self.state.as_ref().unwrap().admit_capture(
+            session.map(|token| (token, now, activity)),
+            None,
+            || {
+                let result = self
+                    .transport
+                    .as_ref()
+                    .unwrap()
+                    .enqueue_measured(wire, bytes);
+                admission = Some(result);
+                result == Admission::Accepted
+            },
+        );
+        match admission {
+            Some(Admission::Accepted) => CaptureOutcome::Accepted { uuid },
+            // Not admitted: the client is closing.
+            _ => CaptureOutcome::Closed,
         }
     }
 
@@ -356,6 +446,16 @@ impl Client {
         &self,
         input: Capture,
         snapshot: &Snapshot,
+        session: Option<super::sessions::AdmissionSession>,
+    ) -> Result<CaptureEvent, CaptureOutcome> {
+        self.prepare_with_session(input, snapshot, session.and_then(|token| token.id))
+    }
+
+    fn prepare_with_session(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+        session_id: Option<Uuid>,
     ) -> Result<CaptureEvent, CaptureOutcome> {
         if self.closed.load(Ordering::Acquire) {
             return Err(CaptureOutcome::Closed);
@@ -363,12 +463,11 @@ impl Client {
         if self.snapshot_opted_out(snapshot) {
             return Err(CaptureOutcome::OptedOut);
         }
-        let wire = self
-            .producer
-            .as_ref()
-            .unwrap()
-            .prepare(input, snapshot, Utc::now())?;
-        // A hook can close the client. Its outer capture must not be admitted.
+        let wire =
+            self.producer
+                .as_ref()
+                .unwrap()
+                .prepare(input, snapshot, Utc::now(), session_id)?;
         if self.closed.load(Ordering::Acquire) {
             return Err(CaptureOutcome::Closed);
         }

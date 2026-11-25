@@ -5,7 +5,7 @@ use serde_json::Value;
 use sha1::{Digest, Sha1};
 
 use super::producer::{CaptureGuard, CaptureOutcome};
-use super::writer::UpdateError;
+use super::writer::{PersonAdmission, UpdateError};
 use super::{Capture, Client, Snapshot};
 use crate::client::transport::Admission;
 use crate::constants::PROCESS_PERSON_PROFILE_OPT;
@@ -348,6 +348,8 @@ impl Client {
     /// collection. Setup bootstrap is not
     /// reapplied. A hook may reset:
     /// its already-snapshotted outer event retains the old identity.
+    /// Ends the current session; Automatic mode starts a new one on the next event
+    /// or `get_session_id()`, Manual mode waits for `start_session()`.
     pub fn reset(&self) {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return;
@@ -356,8 +358,10 @@ impl Client {
         let _ = self.state.as_ref().unwrap().mutate(|state| {
             let generation = state.generation.wrapping_add(1);
             let device_id = state.device_id.clone();
+            let sessions = state.sessions.cleared();
             *state = Snapshot::anonymous(id);
             state.device_id = device_id;
+            state.sessions = sessions;
             state.generation = generation;
         });
         self.producer.as_ref().unwrap().clear_last_screen();
@@ -374,22 +378,33 @@ impl Client {
             self.capture_snapshot(event, snapshot);
             return;
         };
-        let Ok(wire) = self.prepare_snapshot(event, snapshot) else {
+        let session = self.prepare_admission_session(snapshot.generation);
+        let Ok(wire) = self.prepare_snapshot(event, snapshot, session) else {
             return;
         };
         // Read the setting as sent, after hooks: an update that may be
         // personless neither checks nor records the hash, and clears it.
         let fingerprint = surely_processes_person(wire.options.get(PROCESS_PERSON_PROFILE_OPT))
             .then_some(fingerprint);
-        // Admission runs no user code, so it may run under the state lock.
-        self.state.as_ref().unwrap().admit_person(
-            snapshot.generation,
-            &snapshot.distinct_id,
-            fingerprint,
-            deduplicate,
+        let now = self.session_now();
+        // Measure before taking the state lock, so large events do not extend
+        // it. Admission runs no user code, so it may run under the lock.
+        let bytes = crate::client::event_store::record_size(&wire);
+        self.state.as_ref().unwrap().admit_capture(
+            session.map(|token| (token, now, false)),
+            Some(PersonAdmission {
+                generation: snapshot.generation,
+                distinct_id: &snapshot.distinct_id,
+                fingerprint,
+                deduplicate,
+            }),
             || {
                 !self.closed.load(Ordering::Acquire)
-                    && self.transport.as_ref().unwrap().enqueue_prepared(wire)
+                    && self
+                        .transport
+                        .as_ref()
+                        .unwrap()
+                        .enqueue_measured(wire, bytes)
                         == Admission::Accepted
             },
         );
