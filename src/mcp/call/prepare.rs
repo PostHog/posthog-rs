@@ -15,7 +15,9 @@ use crate::mcp::analytics::Core;
 use crate::mcp::capture::EventContext;
 use crate::mcp::contract::arguments::{CONTEXT, CONVERSATION_ID};
 use crate::mcp::request_info::RequestInfo;
-use crate::mcp::session::{Conversation, SessionClaims, SessionSource, TransportSession};
+use crate::mcp::session::{
+    CallOnConnection, Conversation, SessionClaims, SessionSource, TransportSession,
+};
 use crate::mcp::tools::catalog::ToolFacts;
 use crate::mcp::tools::ownership::{strip_owned_arguments, ArgumentFlags};
 use crate::RequestContext;
@@ -51,7 +53,8 @@ pub(crate) struct PreparedCall {
     pub(crate) model: Option<Model>,
     pub(crate) parameters: Option<Value>,
     pub(crate) started: Instant,
-    pub(crate) transport: TransportSession,
+    /// Ends the call on a one-client connection when dropped.
+    pub(crate) on_connection: Option<CallOnConnection>,
     /// The client names its conversation in `_meta`, so its listing showed no
     /// `conversation_id` and no `_mcp_instructions`.
     pub(crate) handle_free: bool,
@@ -80,7 +83,7 @@ pub(crate) fn prepare_call(
     let facts = merge_facts(registered, core.catalog.get(name));
     let access = argument_access(core, facts.as_ref());
 
-    let transport = scope.transport.resolve_for_call();
+    let (transport, on_connection) = scope.transport.resolve_for_call();
     let client = scope.client_identity(transport.token_client.as_ref());
     let row = client.recognized_row();
     let handle_free = row.is_some_and(|row| row.handle_free);
@@ -117,7 +120,7 @@ pub(crate) fn prepare_call(
         conversation,
         parameters,
         started: scope.started,
-        transport: scope.transport.clone(),
+        on_connection,
         handle_free,
         tool_scope,
     }

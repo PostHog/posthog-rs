@@ -1,6 +1,9 @@
 use std::any::Any;
 use std::panic::{resume_unwind, AssertUnwindSafe};
 
+use std::future::Future;
+
+use futures_util::future::{select, Either};
 use futures_util::FutureExt;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode, InputRequiredResult,
@@ -46,15 +49,18 @@ impl<H: ServerHandler> Instrumented<H> {
             Some(_) => ToolExistence::Registered,
             None => ToolExistence::Unknown,
         };
-        let call = self.prepare(&facts, &request, registered, existence);
+        let mut call = self.prepare(&facts, &request, registered, existence);
         let mut downstream = request;
         downstream.arguments = call.dispatch_arguments.clone();
 
         let tool_context = call.tool_scope.context.clone();
+        let cancellation = context.ct.clone();
         let handler = async { self.inner.call_tool(downstream, context).await };
-        let handled = AssertUnwindSafe(tool_context.scope(handler))
-            .catch_unwind()
-            .await;
+        let handled = AssertUnwindSafe(tool_context.scope(handler)).catch_unwind();
+        let on_connection = call.on_connection.take();
+        let (handled, on_connection) =
+            release_when_cancelled(handled, cancellation.cancelled(), on_connection).await;
+        call.on_connection = on_connection.flatten();
         match handled {
             Ok(outcome) => self.record_outcome(call, facts.modern_protocol, outcome),
             Err(panic) => {
@@ -142,6 +148,26 @@ impl<H: ServerHandler> Instrumented<H> {
     }
 }
 
+/// Runs `handler` to its end, as the wrapped server would, but releases
+/// `held` once the call is cancelled: `rmcp` only signals cancellation, so a
+/// handler that ignores it could otherwise hold `held` for good. Gives `held`
+/// back when the handler ended first.
+async fn release_when_cancelled<T, H>(
+    handler: impl Future<Output = T>,
+    cancelled: impl Future<Output = ()>,
+    held: H,
+) -> (T, Option<H>) {
+    let handler = std::pin::pin!(handler);
+    let cancelled = std::pin::pin!(cancelled);
+    match select(handler, cancelled).await {
+        Either::Left((output, _)) => (output, Some(held)),
+        Either::Right(((), handler)) => {
+            drop(held);
+            (handler.await, None)
+        }
+    }
+}
+
 /// `rmcp` answers a legacy client's round with an error, which ends the call
 /// without a final outcome.
 fn input_required_end(round: &InputRequiredResult, modern_protocol: bool) -> CallEnd {
@@ -175,4 +201,56 @@ fn request_method(request: &rmcp::model::InputRequest) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+
+    struct Released(Arc<AtomicBool>);
+
+    impl Drop for Released {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_call_releases_its_hold_while_its_handler_runs_on() {
+        for cancelled in [true, false] {
+            let released = Arc::new(AtomicBool::new(false));
+            let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+            let (cancel, cancellation) = tokio::sync::oneshot::channel::<()>();
+            let watched = released.clone();
+            let handler = async move {
+                finished.await.ok();
+                watched.load(Ordering::SeqCst)
+            };
+            let cancellation = async move {
+                if cancellation.await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            };
+            let run = tokio::spawn(release_when_cancelled(
+                handler,
+                cancellation,
+                Released(released.clone()),
+            ));
+
+            if cancelled {
+                cancel.send(()).unwrap();
+            } else {
+                drop(cancel);
+            }
+            tokio::task::yield_now().await;
+            finish.send(()).unwrap();
+            let (released_before_handler_ended, held) = run.await.unwrap();
+
+            assert_eq!(released_before_handler_ended, cancelled);
+            assert_eq!(held.is_some(), !cancelled);
+        }
+    }
 }

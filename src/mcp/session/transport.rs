@@ -1,4 +1,4 @@
-use super::connection::Connection;
+use super::connection::{CallOnConnection, Connection};
 use super::ids::derive_session_id;
 use super::source::{Session, SessionSource};
 use super::token;
@@ -36,12 +36,15 @@ impl TransportSession {
         !matches!(self, TransportSession::None)
     }
 
-    pub(crate) fn resolve_for_call(&self) -> ResolvedSession {
+    /// A call's session, and on a connection the call, which ends when
+    /// dropped.
+    pub(crate) fn resolve_for_call(&self) -> (ResolvedSession, Option<CallOnConnection>) {
         match self {
             TransportSession::Connection(connection) => {
-                Self::generated(connection.session_for_call())
+                let (session_id, call) = connection.begin_call();
+                (Self::generated(session_id), Some(call))
             }
-            other => other.resolve(),
+            other => (other.resolve(), None),
         }
     }
 
@@ -52,12 +55,6 @@ impl TransportSession {
             TransportSession::Connection(connection) => {
                 Self::generated(connection.current_session())
             }
-        }
-    }
-
-    pub(crate) fn call_ended(&self) {
-        if let TransportSession::Connection(connection) = self {
-            connection.call_ended();
         }
     }
 

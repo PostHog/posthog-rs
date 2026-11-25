@@ -42,7 +42,7 @@ pub(crate) fn complete_call(
     result: CallToolResult,
 ) -> CallToolResult {
     let duration_ms = elapsed_ms(&call);
-    call.transport.call_ended();
+    call.on_connection.take();
     let response = core
         .options
         .capture_responses
@@ -71,7 +71,7 @@ pub(crate) fn complete_call(
 /// Sends the events of a call that ended without a result.
 pub(crate) fn end_call(core: &Core, mut call: PreparedCall, end: CallEnd) {
     let duration_ms = elapsed_ms(&call);
-    call.transport.call_ended();
+    call.on_connection.take();
     forget_undelivered_handle(&mut call);
     call.tool_scope.settle(&call.context.session);
     if !names_a_tool(&call) {
