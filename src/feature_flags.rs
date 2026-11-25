@@ -2,6 +2,7 @@ use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
@@ -577,6 +578,20 @@ struct PropertyMatchContext<'a> {
     known_absent_keys: Option<KnownAbsentKeys<'a>>,
     /// The flags being evaluated, from the innermost dependency outward.
     dependency_path: Option<&'a DependencyPath<'a>>,
+    /// Flag dependency work for this top-level evaluation.
+    dependency_results: &'a RefCell<DependencyResults>,
+}
+
+/// Flag dependency work shared by one top-level flag evaluation.
+#[derive(Default)]
+struct DependencyResults {
+    /// Conclusive results, keyed by flag key. Within one top-level evaluation a
+    /// flag's result depends only on the shared inputs, so a flag referenced
+    /// many times is evaluated once.
+    values: HashMap<String, FlagValue>,
+    /// Dependencies evaluated so far. Inconclusive results aren't reused, so
+    /// this bounds the work when shared dependencies can't be resolved.
+    evaluations: usize,
 }
 
 /// One flag on the chain of flag dependencies being evaluated, so a flag that
@@ -584,6 +599,8 @@ struct PropertyMatchContext<'a> {
 struct DependencyPath<'a> {
     flag_key: &'a str,
     parent: Option<&'a DependencyPath<'a>>,
+    /// The number of flags on the path, including this one.
+    depth: usize,
 }
 
 impl DependencyPath<'_> {
@@ -1071,7 +1088,14 @@ pub(crate) fn match_feature_flag_with_known_absent(
     ctx: &EvaluationContext,
     known_absent: &KnownAbsentProperties,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    match_feature_flag_in_context(flag, person_properties, ctx, known_absent, None)
+    match_feature_flag_in_context(
+        flag,
+        person_properties,
+        ctx,
+        known_absent,
+        None,
+        &RefCell::default(),
+    )
 }
 
 /// Evaluates a top-level flag, or a flag dependency with the same top-level
@@ -1082,10 +1106,12 @@ fn match_feature_flag_in_context(
     ctx: &EvaluationContext,
     known_absent: &KnownAbsentProperties,
     dependency_path: Option<&DependencyPath>,
+    dependency_results: &RefCell<DependencyResults>,
 ) -> Result<FlagValue, InconclusiveMatchError> {
     let dependency_path = DependencyPath {
         flag_key: &flag.key,
         parent: dependency_path,
+        depth: dependency_path.map_or(1, |path| path.depth + 1),
     };
     evaluate_feature_flag(
         flag,
@@ -1105,6 +1131,7 @@ fn match_feature_flag_in_context(
                     known_absent,
                     known_absent_keys,
                     dependency_path: Some(&dependency_path),
+                    dependency_results,
                 },
             )
         },
@@ -1256,6 +1283,7 @@ pub fn match_property_with_context(
             known_absent: &KnownAbsentProperties::default(),
             known_absent_keys: None,
             dependency_path: None,
+            dependency_results: &RefCell::default(),
         },
     )
 }
@@ -1303,6 +1331,7 @@ fn match_cohort_property(
             .known_absent_keys
             .filter(|keys| keys.filter_type == "person"),
         dependency_path: ctx.dependency_path,
+        dependency_results: ctx.dependency_results,
     };
     let mut active_cohorts = HashSet::new();
     let is_in_cohort =
@@ -1362,6 +1391,12 @@ impl CohortMatchError {
 /// also insufficient because each cohort can contain nested property groups.
 /// Real cohort nesting is a handful of levels at most.
 const MAX_COHORT_RESOLUTION_DEPTH: usize = 100;
+
+/// How many flags deep local evaluation follows flag dependencies.
+const MAX_FLAG_DEPENDENCY_DEPTH: usize = 100;
+
+/// How many flag dependencies one top-level flag evaluation evaluates at most.
+const MAX_FLAG_DEPENDENCY_EVALUATIONS: usize = 1000;
 
 /// Look up a cohort by ID and evaluate its property group against `properties`.
 ///
@@ -1602,13 +1637,49 @@ fn match_flag_dependency_property(
         )));
     }
 
-    let flag_value = match_feature_flag_in_context(
-        flag,
-        ctx.person_properties,
-        ctx.evaluation,
-        ctx.known_absent,
-        ctx.dependency_path,
-    )?;
+    let cached_value = ctx
+        .dependency_results
+        .borrow()
+        .values
+        .get(flag_key)
+        .cloned();
+    let flag_value = match cached_value {
+        Some(value) => value,
+        None => {
+            if ctx
+                .dependency_path
+                .is_some_and(|path| path.depth >= MAX_FLAG_DEPENDENCY_DEPTH)
+            {
+                return Err(InconclusiveMatchError::new(&format!(
+                    "Flag dependency chain is deeper than the limit of {}",
+                    MAX_FLAG_DEPENDENCY_DEPTH
+                )));
+            }
+            {
+                let mut results = ctx.dependency_results.borrow_mut();
+                if results.evaluations >= MAX_FLAG_DEPENDENCY_EVALUATIONS {
+                    return Err(InconclusiveMatchError::new(&format!(
+                        "Too many flag dependency evaluations, over the limit of {}",
+                        MAX_FLAG_DEPENDENCY_EVALUATIONS
+                    )));
+                }
+                results.evaluations += 1;
+            }
+            let value = match_feature_flag_in_context(
+                flag,
+                ctx.person_properties,
+                ctx.evaluation,
+                ctx.known_absent,
+                ctx.dependency_path,
+                ctx.dependency_results,
+            )?;
+            ctx.dependency_results
+                .borrow_mut()
+                .values
+                .insert(flag_key.to_string(), value.clone());
+            value
+        }
+    };
 
     // Compare the flag value with the expected value
     let expected = &property.value;
@@ -6484,6 +6555,170 @@ mod flag_dependency_context_tests {
 
         assert!(evaluate(&first, &[&first, &second], &Inputs::default()).is_err());
         assert!(evaluate(&own, &[&own], &Inputs::default()).is_err());
+    }
+
+    fn chain(length: usize) -> Vec<FeatureFlag> {
+        let mut flags = vec![flag(
+            "flag-0",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        )];
+        for i in 1..length {
+            flags.push(depends_on(
+                &format!("flag-{i}"),
+                None,
+                &format!("flag-{}", i - 1),
+            ));
+        }
+        flags
+    }
+
+    #[test]
+    fn dependency_chain_under_the_depth_limit_resolves() {
+        let flags = chain(MAX_FLAG_DEPENDENCY_DEPTH);
+        let refs: Vec<&FeatureFlag> = flags.iter().collect();
+
+        assert_eq!(
+            evaluate(flags.last().unwrap(), &refs, &Inputs::default()).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn dependency_chain_over_the_depth_limit_is_inconclusive() {
+        // Deep enough to overflow the stack without a limit.
+        let is_inconclusive = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let flags = chain(5_000);
+                let refs: Vec<&FeatureFlag> = flags.iter().collect();
+                evaluate(flags.last().unwrap(), &refs, &Inputs::default()).is_err()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(is_inconclusive);
+    }
+
+    /// Each flag requires the previous two, so without reusing results the
+    /// work doubles with every flag.
+    fn branching_graph(length: usize) -> Vec<FeatureFlag> {
+        let mut flags = vec![
+            flag(
+                "flag-0",
+                None,
+                json!({"properties": [], "rollout_percentage": 100}),
+            ),
+            flag(
+                "flag-1",
+                None,
+                json!({"properties": [], "rollout_percentage": 100}),
+            ),
+        ];
+        for i in 2..length {
+            flags.push(flag(
+                &format!("flag-{i}"),
+                None,
+                json!({
+                    "properties": [
+                        {"key": format!("$feature/flag-{}", i - 1), "value": true, "operator": "exact", "type": "flag"},
+                        {"key": format!("$feature/flag-{}", i - 2), "value": true, "operator": "exact", "type": "flag"}
+                    ],
+                    "rollout_percentage": 100
+                }),
+            ));
+        }
+        flags
+    }
+
+    #[test]
+    fn shared_dependencies_are_evaluated_once_per_evaluation() {
+        let flags = branching_graph(40);
+        let refs: Vec<&FeatureFlag> = flags.iter().collect();
+        let started = std::time::Instant::now();
+
+        assert_eq!(
+            evaluate(flags.last().unwrap(), &refs, &Inputs::default()).unwrap(),
+            FlagValue::Boolean(true)
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn inconclusive_shared_dependencies_stay_bounded() {
+        // No result below the top is conclusive, so none can be reused: the
+        // base flags either form a cycle or need a property that isn't given.
+        let missing_plan = json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100});
+        for base in [
+            [
+                depends_on("flag-0", None, "flag-1"),
+                depends_on("flag-1", None, "flag-0"),
+            ],
+            [
+                flag("flag-0", None, missing_plan.clone()),
+                flag("flag-1", None, missing_plan.clone()),
+            ],
+        ] {
+            let mut flags = branching_graph(40);
+            flags.splice(0..2, base);
+            let refs: Vec<&FeatureFlag> = flags.iter().collect();
+            let started = std::time::Instant::now();
+
+            assert!(evaluate(flags.last().unwrap(), &refs, &Inputs::default()).is_err());
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "took {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_budget_applies_to_each_top_level_flag() {
+        let mut flags = branching_graph(40);
+        flags.push(flag(
+            "independent",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        ));
+        flags[0] = flag(
+            "flag-0",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}),
+        );
+        let flags_by_key: HashMap<String, FeatureFlag> = flags
+            .iter()
+            .map(|flag| (flag.key.clone(), flag.clone()))
+            .collect();
+        let ctx = EvaluationContext {
+            cohorts: &HashMap::new(),
+            flags: &flags_by_key,
+            distinct_id: DISTINCT_ID,
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
+            property_matching_version: 1,
+        };
+        let known_absent = KnownAbsentProperties::default();
+        let heavy = match_feature_flag_with_known_absent(
+            &flags_by_key["flag-39"],
+            &HashMap::new(),
+            &ctx,
+            &known_absent,
+        );
+        let light = match_feature_flag_with_known_absent(
+            &depends_on("light", None, "independent"),
+            &HashMap::new(),
+            &ctx,
+            &known_absent,
+        );
+
+        assert!(heavy.is_err());
+        assert_eq!(light.unwrap(), FlagValue::Boolean(true));
     }
 
     #[test]
