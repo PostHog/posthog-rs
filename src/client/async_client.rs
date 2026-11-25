@@ -219,6 +219,15 @@ impl Client {
         }
     }
 
+    /// Captures an event the SDK already finalized, such as an MCP event after
+    /// its `before_send` hook, which a scope holding events must not change.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn capture_finalized(&self, event: Event) {
+        if let Some(transport) = &self.transport {
+            transport.enqueue(event);
+        }
+    }
+
     /// Capture an AI (LLM analytics) event, sending it to PostHog's AI
     /// ingestion endpoint.
     ///
