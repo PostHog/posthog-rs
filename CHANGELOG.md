@@ -1,5 +1,12 @@
 # posthog-rs
 
+## 1.6.0 — 2026-11-25
+
+### Minor changes
+
+- [8baa8e2](https://github.com/posthog/posthog-rs/commit/8baa8e223911935794b5a0cfe86bc8a26874b818) Events an MCP tool captures through `Client::capture` while its call runs carry that call's `$session_id`, `$mcp_session_source` and, when `identify` resolves one, its distinct ID and `$groups`, even when other calls run on the same server meanwhile. — Thanks @lucasheriques!
+- [3c24aeb](https://github.com/posthog/posthog-rs/commit/3c24aeb063a352248a6fd7804c4808e7e8c3a9e8) MCP analytics groups ChatGPT, Codex and VS Code tool calls by the conversation id each client sends in `_meta`, adds a `session_resolver` option that ranks ahead of every other session source, and sends `$mcp_session_source` on every MCP event. ChatGPT is no longer offered a `conversation_id` argument. — Thanks @lucasheriques!
+
 ## 1.5.0 — 2026-11-25
 
 ### Minor changes

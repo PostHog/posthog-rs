@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 1.6.0 — 2026-11-25
+
+### Patch changes
+
+- Updated dependencies: posthog@1.6.0
+
 ## 1.5.0 — 2026-11-25
 
 ### Patch changes
