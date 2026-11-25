@@ -1514,7 +1514,9 @@ fn slot_error(error: Option<&Value>) -> EmailError {
             "PostHog answered without a readable result for this email, so it may still go out.",
         );
     };
-    let code = text(error, "code").unwrap_or_else(|| "api_error".into());
+    let code = text(error, "code")
+        .filter(|code| !code.trim().is_empty())
+        .unwrap_or_else(|| "api_error".into());
     let status = error
         .get("status")
         .and_then(Value::as_u64)

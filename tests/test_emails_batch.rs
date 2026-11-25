@@ -402,8 +402,13 @@ async fn a_refusal_without_an_earlier_lost_answer_is_failed() {
 
 #[tokio::test]
 async fn a_recipient_posthog_could_not_confirm_is_unconfirmed() {
-    for code in ["delivery_unavailable", "idempotency_key_in_flight"] {
-        let server = ScriptedServer::start_async(vec![ok(vec![refused("m0", code, 503)])]).await;
+    for (answered, code) in [
+        ("delivery_unavailable", "delivery_unavailable"),
+        ("idempotency_key_in_flight", "idempotency_key_in_flight"),
+        (" ", "api_error"),
+    ] {
+        let server =
+            ScriptedServer::start_async(vec![ok(vec![refused("m0", answered, 503)])]).await;
         let client = client_for(&server).await;
 
         let result = client
