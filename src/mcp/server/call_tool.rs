@@ -51,10 +51,10 @@ impl<H: ServerHandler> Instrumented<H> {
         downstream.arguments = call.dispatch_arguments.clone();
 
         let tool_context = call.tool_scope.context.clone();
-        let handled =
-            AssertUnwindSafe(tool_context.scope(self.inner.call_tool(downstream, context)))
-                .catch_unwind()
-                .await;
+        let handler = async { self.inner.call_tool(downstream, context).await };
+        let handled = AssertUnwindSafe(tool_context.scope(handler))
+            .catch_unwind()
+            .await;
         match handled {
             Ok(outcome) => self.record_outcome(call, facts.modern_protocol, outcome),
             Err(panic) => {

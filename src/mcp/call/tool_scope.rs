@@ -19,6 +19,7 @@ impl ToolScope {
     pub(crate) fn new(host: Option<RequestContext>, call: &EventContext, pending: bool) -> Self {
         let mut context = host.unwrap_or_default();
         if let Some(identity) = &call.identity {
+            context.properties.remove(key::GROUPS);
             context.distinct_id = Some(identity.distinct_id.clone());
             if !identity.groups.is_empty() {
                 let groups = serde_json::to_value(&identity.groups).unwrap_or_default();
@@ -38,9 +39,9 @@ impl ToolScope {
     /// Sends the events that waited, in the call's final session.
     pub(crate) fn settle(&self, session: &Session) {
         if let Some(held) = &self.context.held {
-            let mut context = self.context.clone();
-            set_session(&mut context, session);
-            held.release(&context);
+            let mut deferred = RequestContext::new();
+            set_session(&mut deferred, session);
+            held.release(deferred.properties);
         }
     }
 }
@@ -73,6 +74,7 @@ mod tests {
 
     use super::*;
     use crate::mcp::session::SessionSource;
+    use crate::mcp::Identity;
 
     fn call(session: &str) -> EventContext {
         EventContext {
@@ -85,6 +87,33 @@ mod tests {
             server_build: None,
             host_properties: Map::new(),
             options: Map::new(),
+        }
+    }
+
+    #[test]
+    fn a_call_keeps_only_its_own_identitys_groups() {
+        let identity = |groups: &[(&str, &str)]| {
+            groups
+                .iter()
+                .fold(Identity::new("user"), |identity, (kind, key)| {
+                    identity.with_group(*kind, *key)
+                })
+        };
+        let mut parent = call("ses_parent");
+        parent.identity = Some(identity(&[("company", "acme")]));
+        let host = ToolScope::new(None, &parent, false).context.clone();
+        let cases = [
+            (identity(&[]), None),
+            (
+                identity(&[("company", "initech")]),
+                Some(serde_json::json!({ "company": "initech" })),
+            ),
+        ];
+        for (nested_identity, groups) in cases {
+            let mut nested = call("ses_nested");
+            nested.identity = Some(nested_identity);
+            let scope = ToolScope::new(Some(host.clone()), &nested, false);
+            assert_eq!(scope.context.properties.get(key::GROUPS).cloned(), groups);
         }
     }
 

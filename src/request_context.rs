@@ -46,7 +46,8 @@ enum Hold {
         events: Vec<(Event, Arc<TransportHandle>)>,
         dropped: bool,
     },
-    Released(RequestContext),
+    /// The properties the scope deferred, which fill each later event.
+    Released(HashMap<String, Value>),
 }
 
 #[cfg(feature = "async-client")]
@@ -65,8 +66,8 @@ impl HeldEvents {
     /// logging, since a subscriber that captures would re-enter it.
     fn hold(&self, mut event: Event, transport: &Arc<TransportHandle>) -> Option<Event> {
         let first_drop = match &mut *self.lock() {
-            Hold::Released(context) => {
-                context.apply_to_event(&mut event);
+            Hold::Released(deferred) => {
+                fill(&mut event, deferred);
                 return Some(event);
             }
             Hold::Waiting { events, dropped } if events.len() >= MAX_HELD_EVENTS => {
@@ -87,8 +88,8 @@ impl HeldEvents {
         }
         event.ensure_timestamp(chrono::Utc::now());
         match &mut *self.lock() {
-            Hold::Released(context) => {
-                context.apply_to_event(&mut event);
+            Hold::Released(deferred) => {
+                fill(&mut event, deferred);
                 transport.send_later(event);
             }
             Hold::Waiting { events, .. } if events.len() < MAX_HELD_EVENTS => {
@@ -99,25 +100,24 @@ impl HeldEvents {
         None
     }
 
-    /// Sends the held events with `context` applied. Only the first release
-    /// counts.
+    /// Sends the held events with the properties the scope deferred, which
+    /// fill only what each event leaves unset. Each event already took the
+    /// rest of its context when it was held, and may have been finalized since
+    /// (a `before_send` hook may have removed a property), so nothing else is
+    /// applied again. Only the first release counts.
     #[cfg(feature = "mcp")]
-    pub(crate) fn release(&self, context: &RequestContext) {
-        let released = RequestContext {
-            held: None,
-            ..context.clone()
-        };
+    pub(crate) fn release(&self, deferred: HashMap<String, Value>) {
         let events = {
             let mut hold = self.lock();
             let Hold::Waiting { events, .. } = &mut *hold else {
                 return;
             };
             let events = std::mem::take(events);
-            *hold = Hold::Released(released.clone());
+            *hold = Hold::Released(deferred.clone());
             events
         };
         for (mut event, transport) in events {
-            released.apply_to_event(&mut event);
+            fill(&mut event, &deferred);
             transport.send_later(event);
         }
     }
@@ -126,6 +126,13 @@ impl HeldEvents {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[cfg(feature = "async-client")]
+fn fill(event: &mut Event, deferred: &HashMap<String, Value>) {
+    for (key, value) in deferred {
+        event.insert_prop_default(key.clone(), value.clone());
     }
 }
 
@@ -426,7 +433,9 @@ mod test {
 mod held_tests {
     use std::sync::Arc;
 
-    use super::{HeldEvents, RequestContext};
+    use serde_json::Value;
+
+    use super::HeldEvents;
     use crate::client::TransportHandle;
     use crate::{ClientOptionsBuilder, Event};
 
@@ -450,8 +459,13 @@ mod held_tests {
             !transport.reserve_for_later(),
             "two held events fill the queue"
         );
-        held.release(&RequestContext::new());
-        let released = held.hold(Event::new_anon("late"), &transport);
-        assert!(released.is_some(), "a released scope sends at once");
+        let deferred = std::iter::once(("$session_id".to_string(), Value::from("ses_final")));
+        held.release(deferred.collect());
+        let late = held.hold(Event::new_anon("late"), &transport);
+        let late = late.expect("a released scope sends at once");
+        assert_eq!(
+            late.properties().get("$session_id"),
+            Some(&Value::from("ses_final"))
+        );
     }
 }
