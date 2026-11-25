@@ -1393,8 +1393,14 @@ mod blocking {
         empty.person_property_keys_known_absent = Some(Vec::new());
         empty.group_property_keys_known_absent = Some(Default::default());
         client.evaluate_flags("user-1", empty).unwrap();
+        let mut empty_group = EvaluateFlagsOptions::default();
+        empty_group.group_property_keys_known_absent = Some(std::collections::HashMap::from([(
+            "organization".to_string(),
+            Vec::new(),
+        )]));
+        client.evaluate_flags("user-1", empty_group).unwrap();
 
-        flags_mock.assert_calls(2);
+        flags_mock.assert_calls(3);
     }
 
     #[test]
@@ -2048,8 +2054,14 @@ mod async_tests {
         empty.person_property_keys_known_absent = Some(Vec::new());
         empty.group_property_keys_known_absent = Some(Default::default());
         client.evaluate_flags("user-1", empty).await.unwrap();
+        let mut empty_group = EvaluateFlagsOptions::default();
+        empty_group.group_property_keys_known_absent = Some(std::collections::HashMap::from([(
+            "organization".to_string(),
+            Vec::new(),
+        )]));
+        client.evaluate_flags("user-1", empty_group).await.unwrap();
 
-        flags_mock.assert_calls(2);
+        flags_mock.assert_calls(3);
     }
 
     #[tokio::test]

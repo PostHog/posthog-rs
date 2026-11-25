@@ -418,7 +418,7 @@ pub(super) fn validate_known_absent_keys(options: &EvaluateFlagsOptions) -> Resu
 }
 
 /// Adds the caller's known-absent keys to a `/flags` request body, leaving out
-/// a field the caller didn't provide or left empty.
+/// a field or group type the caller didn't provide or left empty.
 pub(super) fn add_known_absent_keys(
     payload: &mut serde_json::Value,
     options: &EvaluateFlagsOptions,
@@ -430,11 +430,13 @@ pub(super) fn add_known_absent_keys(
     {
         payload["person_property_keys_known_absent"] = serde_json::json!(keys);
     }
-    if let Some(groups) = options
+    let groups: HashMap<&String, &Vec<String>> = options
         .group_property_keys_known_absent
-        .as_ref()
-        .filter(|groups| !groups.is_empty())
-    {
+        .iter()
+        .flatten()
+        .filter(|(_, keys)| !keys.is_empty())
+        .collect();
+    if !groups.is_empty() {
         payload["group_property_keys_known_absent"] = serde_json::json!(groups);
     }
 }
