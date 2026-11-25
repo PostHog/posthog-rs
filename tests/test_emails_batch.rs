@@ -571,6 +571,7 @@ async fn one_ambiguous_answer_leaves_the_request_unconfirmed_without_a_later_err
             "idempotency_key_in_flight",
         ),
         (Answer::xml(409, "<h1>Conflict</h1>"), "api_error"),
+        (Answer::json(409, json!({"code": " "})), "api_error"),
         (
             Answer::json(409, json!({"code": 409, "detail": " "})),
             "api_error",

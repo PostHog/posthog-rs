@@ -1558,6 +1558,7 @@ fn batch_reply_error(
         );
         set_unless_answered("fix", "Split the recipients into smaller batches.");
     }
+    set_unless_answered("code", "api_error");
     if text(&fields, "code").as_deref() == Some("batch_unavailable") {
         fields.insert(
             "fix".into(),
