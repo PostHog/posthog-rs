@@ -2187,6 +2187,33 @@ mod async_tests {
 
 #[cfg(not(feature = "async-client"))]
 #[test]
+fn evaluate_flags_with_request_error_returns_invalid_arguments_as_the_error() {
+    let server = MockServer::start();
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(flags_response_fixture());
+    });
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host(server.base_url())
+            .build()
+            .unwrap(),
+    );
+
+    for options in over_limit_known_absent_options() {
+        let result = client.evaluate_flags_with_request_error("user-1", options);
+        assert!(
+            matches!(result, Err(posthog::Error::InvalidArgument(_))),
+            "{:?}",
+            result.map(|(_, request_error)| request_error)
+        );
+    }
+    flags_mock.assert_calls(0);
+}
+
+#[cfg(not(feature = "async-client"))]
+#[test]
 fn evaluate_flags_with_request_error_returns_a_snapshot_and_the_error() {
     let server = MockServer::start();
     server.mock(|when, then| {
@@ -2203,7 +2230,8 @@ fn evaluate_flags_with_request_error_returns_a_snapshot_and_the_error() {
     );
 
     let (flags, error) = client
-        .evaluate_flags_with_request_error("user-1", posthog::EvaluateFlagsOptions::default());
+        .evaluate_flags_with_request_error("user-1", posthog::EvaluateFlagsOptions::default())
+        .unwrap();
     assert!(
         matches!(
             error,

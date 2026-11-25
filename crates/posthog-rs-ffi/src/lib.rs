@@ -852,9 +852,10 @@ pub unsafe extern "C" fn posthog_evaluate_flags(
         let options = evaluate_flags_options(options_json)?;
         // A failed request still comes with a snapshot of the flags evaluated
         // locally, so reads return defaults and their events report the failure.
+        // Invalid options return an error without a snapshot.
         let (flags, request_error) = client
             .client
-            .evaluate_flags_with_request_error(distinct_id, options);
+            .evaluate_flags_with_request_error(distinct_id, options)?;
         flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));
         if let Some(error) = request_error {
             // The inputs were already checked, so this is the server's fault,
