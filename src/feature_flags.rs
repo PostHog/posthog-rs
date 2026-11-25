@@ -6397,6 +6397,40 @@ mod flag_dependency_context_tests {
     }
 
     #[test]
+    fn dependency_sees_person_properties_alongside_known_absent_keys() {
+        // The first group matches `tier` but is out of rollout, and `early_exit`
+        // stops there, so the parent is false and so is the child.
+        let parent: FeatureFlag = serde_json::from_value(json!({
+            "key": "parent",
+            "active": true,
+            "filters": {
+                "early_exit": true,
+                "groups": [
+                    {"properties": [{"key": "tier", "value": "vip", "operator": "exact", "type": "person"}], "rollout_percentage": 0},
+                    {"properties": [{"key": "plan", "operator": "is_not_set", "type": "person"}], "rollout_percentage": 100}
+                ]
+            }
+        }))
+        .unwrap();
+        let child = depends_on("child", None, "parent");
+        let plan = vec!["plan".to_string()];
+        let inputs = Inputs {
+            person_properties: props(&[("tier", json!("vip"))]),
+            known_absent: KnownAbsentProperties::new(Some(&plan), None),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&parent, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    #[test]
     fn dependency_resolves_its_own_cohort_filter() {
         let parent = flag(
             "in-cohort",
