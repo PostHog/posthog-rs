@@ -349,3 +349,125 @@ async fn the_mcp_hook_sees_the_options_and_what_it_returns_is_sent() {
     );
     assert_eq!(recorder.sent("$mcp_tool_call").await["options"], expected);
 }
+
+const CHATGPT: &str = "openai-mcp/1.0.0 (ChatGPT)";
+
+fn headers(user_agent: &str) -> http::HeaderMap {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("user-agent", user_agent.parse().unwrap());
+    headers
+}
+
+#[tokio::test]
+async fn only_a_handle_free_clients_manual_listing_leaves_out_conversation_id() {
+    let recorder = Recorder::new().await;
+    let analytics = McpAnalytics::new(recorder.client.clone(), McpOptions::default());
+    let counter = posthog_tool(json!({
+        "name": "count",
+        "inputSchema": { "type": "object", "properties": {} },
+        "outputSchema": { "type": "object", "properties": { "count": { "type": "number" } } },
+    }));
+
+    for (user_agent, advertised) in [(CHATGPT, false), ("example-client/1.0", true)] {
+        let tools = analytics.list_tools_for_request(vec![counter.clone()], &headers(user_agent));
+
+        let tool = serde_json::to_value(&tools[0]).unwrap();
+        let input = &tool["inputSchema"]["properties"];
+        let output = &tool["outputSchema"]["properties"];
+        assert!(input.get("context").is_some(), "{}", user_agent);
+        assert_eq!(
+            input.get("conversation_id").is_some(),
+            advertised,
+            "{}",
+            user_agent
+        );
+        assert_eq!(
+            output.get("_mcp_instructions").is_some(),
+            advertised,
+            "{}",
+            user_agent
+        );
+    }
+}
+
+fn posthog_tool(value: Value) -> Tool {
+    serde_json::from_value(value).unwrap()
+}
+
+#[tokio::test]
+async fn a_bound_handshake_names_the_client_of_a_manual_call() {
+    let recorder = Recorder::new().await;
+    let analytics = McpAnalytics::new(recorder.client.clone(), McpOptions::default());
+    let meta =
+        serde_json::from_value(json!({ "sessionId": "019a4f2e-1c3d-7b8a-9e0f-1a2b3c4d5e6f" }))
+            .unwrap();
+
+    let call = analytics.start_tool_call(
+        ToolCallRequest::new("search_docs", arguments(json!({ "query": "flags" })))
+            .tool(ToolRegistration::Registered(search_docs()))
+            .meta(meta)
+            .client_info(rmcp::model::Implementation::new(
+                "codex-mcp-client",
+                "0.50.0",
+            ))
+            .protocol_version("2025-11-25"),
+    );
+    let delivered = call.complete(CallToolResult::success(vec![ContentBlock::text("ok")]));
+
+    assert_eq!(
+        delivered.content.len(),
+        1,
+        "a recognized client id mints no handle"
+    );
+    let event = recorder.only("$mcp_tool_call").await;
+    assert_eq!(
+        text_property(&event, "$session_id"),
+        "ses_0fdf126b8e2c1f9689ca12f3dd3383e6"
+    );
+    assert_eq!(
+        text_property(&event, "$mcp_session_source"),
+        "client_metadata"
+    );
+    assert_eq!(
+        text_property(&event, "$mcp_client_name"),
+        "codex-mcp-client"
+    );
+    assert_eq!(text_property(&event, "$mcp_protocol_version"), "2025-11-25");
+}
+
+#[tokio::test]
+async fn a_manual_calls_context_gives_custom_events_its_final_session() {
+    for delivered in [true, false] {
+        let recorder = Recorder::new().await;
+        let analytics = McpAnalytics::new(recorder.client.clone(), McpOptions::default());
+        let call = analytics.start_tool_call(
+            ToolCallRequest::new("search_docs", arguments(json!({ "query": "flags" })))
+                .tool(ToolRegistration::Registered(search_docs())),
+        );
+
+        let context = call
+            .request_context()
+            .expect("a known tool's call has a context");
+        let client = recorder.client.clone();
+        context
+            .scope(async move { client.capture(posthog::Event::new_anon("docs_searched")) })
+            .await;
+        if delivered {
+            call.complete(CallToolResult::success(vec![ContentBlock::text("ok")]));
+        } else {
+            call.fail(ToolCallError::new(&UpstreamTimeout));
+        }
+
+        let custom = recorder.only("docs_searched").await;
+        let tool_call = recorder.only("$mcp_tool_call").await;
+        for key in ["$session_id", "$mcp_session_source"] {
+            assert_eq!(
+                text_property(&custom, key),
+                text_property(&tool_call, key),
+                "{} delivered {}",
+                key,
+                delivered
+            );
+        }
+    }
+}

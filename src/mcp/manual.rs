@@ -35,7 +35,7 @@ use super::call::{
     complete_call, end_call, prepare_call, CallEnd, CallRequest, PreparedCall, RequestScope,
     ToolExistence,
 };
-use super::capture::{Failure, ServerIdentity};
+use super::capture::{ClientIdentity, Failure, ServerIdentity};
 use super::session::TransportSession;
 use super::tools::catalog::ToolFacts;
 
@@ -64,6 +64,8 @@ pub struct ToolCallRequest {
     tool: ToolRegistration,
     transport_session: TransportSession,
     server: Option<Implementation>,
+    client_info: Option<Implementation>,
+    protocol_version: Option<String>,
     started: Option<Instant>,
     event_options: JsonObject,
 }
@@ -79,6 +81,8 @@ impl ToolCallRequest {
             tool: ToolRegistration::NoRegistry,
             transport_session: TransportSession::None,
             server: None,
+            client_info: None,
+            protocol_version: None,
             started: None,
             event_options: JsonObject::new(),
         }
@@ -105,6 +109,22 @@ impl ToolCallRequest {
     /// is a stateless request.
     pub fn transport_session(mut self, session: TransportSession) -> Self {
         self.transport_session = session;
+        self
+    }
+
+    /// The `clientInfo` of the `initialize` handshake bound to this request's
+    /// transport session, which names the client when the request does not.
+    /// Never one from a handshake with another client, such as the last one
+    /// a server shared by many clients received.
+    pub fn client_info(mut self, client: Implementation) -> Self {
+        self.client_info = Some(client);
+        self
+    }
+
+    /// The protocol revision that bound handshake negotiated, sent as
+    /// `$mcp_protocol_version` when the request names none itself.
+    pub fn protocol_version(mut self, version: impl Into<String>) -> Self {
+        self.protocol_version = Some(version.into());
         self
     }
 
@@ -176,9 +196,30 @@ impl ToolCallError {
 
 impl McpAnalytics {
     /// The tools to advertise: the server's own, with the enabled analytics
-    /// arguments added.
+    /// arguments added. Prefer [`list_tools_for_request`](Self::list_tools_for_request)
+    /// when the listing came over HTTP.
     pub fn list_tools(&self, tools: Vec<Tool>) -> Vec<Tool> {
+        self.advertise(tools, false)
+    }
+
+    /// Like [`list_tools`](Self::list_tools), for the listing request that
+    /// carried `headers`. A client that names every conversation itself, such
+    /// as ChatGPT, is offered no `conversation_id`.
+    pub fn list_tools_for_request(&self, tools: Vec<Tool>, headers: &http::HeaderMap) -> Vec<Tool> {
+        let client = ClientIdentity {
+            user_agent: headers
+                .get(http::header::USER_AGENT)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+            ..ClientIdentity::default()
+        };
+        let handle_free = client.recognized_row().is_some_and(|row| row.handle_free);
+        self.advertise(tools, handle_free)
+    }
+
+    fn advertise(&self, tools: Vec<Tool>, handle_free: bool) -> Vec<Tool> {
         let core = &self.core;
+        let injection = core.injection.for_client(handle_free);
         tools
             .into_iter()
             .map(|tool| {
@@ -187,7 +228,7 @@ impl McpAnalytics {
                 };
                 let facts = ToolFacts::from_descriptor(&descriptor, core.injection.enabled);
                 core.catalog.remember(&tool.name, facts);
-                serde_json::from_value(core.injection.inject(&descriptor)).unwrap_or(tool)
+                serde_json::from_value(injection.inject(&descriptor)).unwrap_or(tool)
             })
             .collect()
     }
@@ -226,6 +267,15 @@ impl McpAnalytics {
 }
 
 impl StartedToolCall {
+    /// The context to run the tool in, with
+    /// [`RequestContext::scope`](crate::RequestContext::scope), so events it
+    /// captures carry this call's session and identity. `None` for a call
+    /// to a tool the server does not have.
+    pub fn request_context(&self) -> Option<crate::RequestContext> {
+        let call = self.call.as_ref()?;
+        Some(call.tool_scope.context.clone())
+    }
+
     /// The arguments to hand the tool.
     pub fn arguments(&self) -> Option<&JsonObject> {
         self.arguments.as_ref()
@@ -281,6 +331,27 @@ fn registration(core: &Core, tool: &ToolRegistration) -> (Option<ToolFacts>, Too
     }
 }
 
+fn handshake(request: &ToolCallRequest) -> Option<ClientIdentity> {
+    let client = request.client_info.as_ref();
+    let protocol_version = request
+        .protocol_version
+        .clone()
+        .filter(|version| !version.is_empty());
+    if client.is_none() && protocol_version.is_none() {
+        return None;
+    }
+    Some(ClientIdentity {
+        name: client
+            .map(|client| client.name.clone())
+            .filter(|name| !name.is_empty()),
+        version: client
+            .map(|client| client.version.clone())
+            .filter(|version| !version.is_empty()),
+        protocol_version,
+        ..ClientIdentity::default()
+    })
+}
+
 fn scope(request: &ToolCallRequest) -> RequestScope<'_> {
     let started = request.started.unwrap_or_else(Instant::now);
     let elapsed =
@@ -294,7 +365,7 @@ fn scope(request: &ToolCallRequest) -> RequestScope<'_> {
         meta: request.meta.as_ref(),
         http: request.http.as_ref(),
         transport: &request.transport_session,
-        handshake: None,
+        handshake: handshake(request),
         server: server.unwrap_or_default(),
         timestamp: Utc::now() - elapsed,
         started,
