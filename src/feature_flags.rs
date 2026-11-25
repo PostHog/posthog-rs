@@ -275,6 +275,103 @@ pub struct FeatureFlag {
     pub has_experiment: Option<bool>,
 }
 
+/// Definition fields local evaluation needs that are not on the public
+/// [`FeatureFlag`] and [`FeatureFlagFilters`]. Those structs can be built with a
+/// literal, so a new public field would break callers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DefinitionMetadata {
+    /// Marks an early-access feature flag. The person property
+    /// `$feature_enrollment/<flag key>` decides it before its release conditions.
+    pub(crate) feature_enrollment: bool,
+    /// The flag's value is persisted per person, so only the server knows it.
+    pub(crate) ensure_experience_continuity: bool,
+}
+
+/// [`DefinitionMetadata`] by flag key. Flags without any are left out.
+pub(crate) type DefinitionMetadataMap = HashMap<String, DefinitionMetadata>;
+
+/// A flag definition as it is sent, with the fields of [`DefinitionMetadata`].
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WireFlag {
+    key: String,
+    active: bool,
+    #[serde(default)]
+    filters: WireFilters,
+    #[serde(default)]
+    has_experiment: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ensure_experience_continuity: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct WireFilters {
+    #[serde(default)]
+    groups: Vec<FeatureFlagCondition>,
+    #[serde(default)]
+    multivariate: Option<MultivariateFilter>,
+    #[serde(default)]
+    payloads: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    aggregation_group_type_index: Option<i32>,
+    #[serde(default)]
+    early_exit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feature_enrollment: Option<bool>,
+}
+
+impl WireFlag {
+    pub(crate) fn new(flag: FeatureFlag, metadata: DefinitionMetadata) -> Self {
+        // Destructured in full, so a new public field can't be left out here.
+        let FeatureFlag {
+            key,
+            active,
+            filters:
+                FeatureFlagFilters {
+                    groups,
+                    multivariate,
+                    payloads,
+                    aggregation_group_type_index,
+                    early_exit,
+                },
+            has_experiment,
+        } = flag;
+        Self {
+            key,
+            active,
+            filters: WireFilters {
+                groups,
+                multivariate,
+                payloads,
+                aggregation_group_type_index,
+                early_exit,
+                feature_enrollment: metadata.feature_enrollment.then_some(true),
+            },
+            has_experiment,
+            ensure_experience_continuity: metadata.ensure_experience_continuity.then_some(true),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (FeatureFlag, DefinitionMetadata) {
+        let metadata = DefinitionMetadata {
+            feature_enrollment: self.filters.feature_enrollment.unwrap_or(false),
+            ensure_experience_continuity: self.ensure_experience_continuity.unwrap_or(false),
+        };
+        let flag = FeatureFlag {
+            key: self.key,
+            active: self.active,
+            filters: FeatureFlagFilters {
+                groups: self.filters.groups,
+                multivariate: self.filters.multivariate,
+                payloads: self.filters.payloads,
+                aggregation_group_type_index: self.filters.aggregation_group_type_index,
+                early_exit: self.filters.early_exit,
+            },
+            has_experiment: self.has_experiment,
+        };
+        (flag, metadata)
+    }
+}
+
 /// Targeting rules and configuration for a feature flag.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FeatureFlagFilters {
@@ -936,6 +1033,24 @@ pub fn match_feature_flag_with_context(
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<FlagValue, InconclusiveMatchError> {
+    match_flag_definition(flag, person_properties, ctx, &HashMap::new())
+}
+
+/// [`match_feature_flag_with_context`] with the metadata of loaded definitions.
+pub(crate) fn match_flag_definition(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+    metadata: &DefinitionMetadataMap,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    if let Some(result) = metadata_result(flag, person_properties, metadata) {
+        return result;
+    }
+    let scope = EvaluationScope {
+        ctx,
+        person_properties,
+        metadata,
+    };
     evaluate_feature_flag(
         flag,
         ctx.distinct_id,
@@ -943,8 +1058,55 @@ pub fn match_feature_flag_with_context(
         ctx.groups,
         ctx.group_properties,
         ctx.group_type_mapping,
-        |property, properties| match_property_with_context(property, properties, ctx),
+        |property, properties| match_property_in_scope(property, properties, scope),
     )
+}
+
+/// The result of an active flag whose metadata decides it before its group
+/// aggregation and release conditions are read.
+pub(crate) fn metadata_result(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+    metadata: &DefinitionMetadataMap,
+) -> Option<Result<FlagValue, InconclusiveMatchError>> {
+    let metadata = metadata.get(&flag.key).filter(|_| flag.active)?;
+    if metadata.ensure_experience_continuity {
+        return Some(Err(InconclusiveMatchError::new(
+            "Flag has experience continuity enabled",
+        )));
+    }
+    metadata
+        .feature_enrollment
+        .then(|| match_feature_enrollment(flag, person_properties))
+}
+
+/// An early-access feature flag returns the person's enrollment at once:
+/// `true` or `"true"` means enrolled, and any other value that was passed,
+/// `null` included, means opted out. Without the enrollment property the flag
+/// can't be resolved locally.
+fn match_feature_enrollment(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    let enrollment_key = format!("$feature_enrollment/{}", flag.key);
+    match person_properties.get(&enrollment_key) {
+        None => Err(InconclusiveMatchError::new(&format!(
+            "Flag has feature enrollment and '{enrollment_key}' was not passed"
+        ))),
+        Some(serde_json::Value::Bool(enrolled)) => Ok(FlagValue::Boolean(*enrolled)),
+        Some(serde_json::Value::String(enrolled)) => Ok(FlagValue::Boolean(enrolled == "true")),
+        Some(_) => Ok(FlagValue::Boolean(false)),
+    }
+}
+
+/// What property filters are matched in, in addition to the properties of the
+/// condition's target.
+#[derive(Clone, Copy)]
+struct EvaluationScope<'a> {
+    ctx: &'a EvaluationContext<'a>,
+    /// The person's properties, also where the condition targets a group.
+    person_properties: &'a HashMap<String, serde_json::Value>,
+    metadata: &'a DefinitionMetadataMap,
 }
 
 /// Shared feature flag evaluation engine. Public entry points differ only in
@@ -1056,31 +1218,45 @@ pub fn match_property_with_context(
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<bool, InconclusiveMatchError> {
+    let scope = EvaluationScope {
+        ctx,
+        // Not read without metadata.
+        person_properties: properties,
+        metadata: &HashMap::new(),
+    };
+    match_property_in_scope(property, properties, scope)
+}
+
+fn match_property_in_scope(
+    property: &Property,
+    properties: &HashMap<String, serde_json::Value>,
+    scope: EvaluationScope,
+) -> Result<bool, InconclusiveMatchError> {
     // Check if this is a cohort membership check
     if property.property_type.as_deref() == Some("cohort") {
-        return match_cohort_property(property, properties, ctx);
+        return match_cohort_property(property, properties, scope);
     }
 
     // Check if this is a flag dependency check
     if property.key.starts_with("$feature/") {
-        return match_flag_dependency_property(property, ctx);
+        return match_flag_dependency_property(property, scope);
     }
 
     // Use the same snapshot version for direct and recursive cohort leaves.
-    match_property_with_version(property, properties, ctx.property_matching_version)
+    match_property_with_version(property, properties, scope.ctx.property_matching_version)
 }
 
 /// Evaluate cohort membership referenced by a flag property (`type = "cohort"`).
 fn match_cohort_property(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
 ) -> Result<bool, InconclusiveMatchError> {
     let cohort_id = cohort_id_to_string(&property.value)
         .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string or number"))?;
 
     let mut active_cohorts = HashSet::new();
-    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx, &mut active_cohorts, 0)
+    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, scope, &mut active_cohorts, 0)
         .map_err(CohortMatchError::into_inconclusive)?;
 
     // Cohort references omit the operator in API payloads, so "exact" means membership.
@@ -1147,11 +1323,11 @@ const MAX_COHORT_RESOLUTION_DEPTH: usize = 100;
 fn match_cohort_by_id(
     cohort_id: &str,
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
-    let cohort = ctx.cohorts.get(cohort_id).ok_or_else(|| {
+    let cohort = scope.ctx.cohorts.get(cohort_id).ok_or_else(|| {
         CohortMatchError::MissingCohort(InconclusiveMatchError::new(&format!(
             "Cohort '{}' not found in local cache",
             cohort_id
@@ -1179,7 +1355,7 @@ fn match_cohort_by_id(
     let result = match_property_group(
         &cohort.properties,
         properties,
-        ctx,
+        scope,
         active_cohorts,
         resolution_depth,
     );
@@ -1200,7 +1376,7 @@ fn match_cohort_by_id(
 fn match_property_group(
     group: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
@@ -1218,7 +1394,7 @@ fn match_property_group(
             "AND",
             arr,
             properties,
-            ctx,
+            scope,
             active_cohorts,
             resolution_depth,
         );
@@ -1247,7 +1423,7 @@ fn match_property_group(
         group_type,
         values,
         properties,
-        ctx,
+        scope,
         active_cohorts,
         resolution_depth,
     )
@@ -1264,7 +1440,7 @@ fn match_property_group_values(
     group_type: &str,
     values: &[serde_json::Value],
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
@@ -1279,14 +1455,26 @@ fn match_property_group_values(
     for value in values {
         let result = if value.get("values").is_some() {
             // Nested property group.
-            match_property_group(value, properties, ctx, active_cohorts, resolution_depth + 1)
+            match_property_group(
+                value,
+                properties,
+                scope,
+                active_cohorts,
+                resolution_depth + 1,
+            )
         } else if value.get("type").and_then(|t| t.as_str()) == Some("cohort") {
             // A cohort filter nested inside another cohort.
-            match_nested_cohort(value, properties, ctx, active_cohorts, resolution_depth + 1)
+            match_nested_cohort(
+                value,
+                properties,
+                scope,
+                active_cohorts,
+                resolution_depth + 1,
+            )
         } else {
             // Leaf property filter.
             match serde_json::from_value::<CohortProperty>(value.clone()) {
-                Ok(prop) => match_property_with_context(&prop.property, properties, ctx)
+                Ok(prop) => match_property_in_scope(&prop.property, properties, scope)
                     .map(|matches| matches != prop.negation)
                     .map_err(CohortMatchError::Inconclusive),
                 Err(e) => Err(CohortMatchError::InvalidDefinition(
@@ -1321,7 +1509,7 @@ fn match_property_group_values(
 fn match_nested_cohort(
     value: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
@@ -1342,7 +1530,7 @@ fn match_nested_cohort(
     let is_member = match_cohort_by_id(
         &cohort_id,
         properties,
-        ctx,
+        scope,
         active_cohorts,
         resolution_depth,
     )?;
@@ -1352,8 +1540,10 @@ fn match_nested_cohort(
 /// Evaluate flag dependency
 fn match_flag_dependency_property(
     property: &Property,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
 ) -> Result<bool, InconclusiveMatchError> {
+    let ctx = scope.ctx;
+
     // Extract flag key from "$feature/flag-key"
     let flag_key = property
         .key
@@ -1366,16 +1556,18 @@ fn match_flag_dependency_property(
 
     // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
     // Group context flows through from the outer ctx so dependent group/mixed flags can resolve.
-    let empty_props = HashMap::new();
-    let flag_value = match_feature_flag_with_version(
-        flag,
-        ctx.distinct_id,
-        &empty_props,
-        ctx.groups,
-        ctx.group_properties,
-        ctx.group_type_mapping,
-        ctx.property_matching_version,
-    )?;
+    let flag_value = match metadata_result(flag, scope.person_properties, scope.metadata) {
+        Some(result) => result?,
+        None => match_feature_flag_with_version(
+            flag,
+            ctx.distinct_id,
+            &HashMap::new(),
+            ctx.groups,
+            ctx.group_properties,
+            ctx.group_type_mapping,
+            ctx.property_matching_version,
+        )?,
+    };
 
     // Compare the flag value with the expected value
     let expected = &property.value;

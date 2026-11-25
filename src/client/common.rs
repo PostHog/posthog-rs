@@ -678,6 +678,7 @@ mod tests {
             group_type_mapping: HashMap::new(),
             cohorts: HashMap::new(),
             minimal_flag_called_events: true,
+            ..LocalEvaluationResponse::new(vec![])
         });
         LocalEvaluator::new(cache)
     }

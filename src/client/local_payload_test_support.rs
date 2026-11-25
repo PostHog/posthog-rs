@@ -113,6 +113,7 @@ pub(super) fn payload_definitions() -> LocalEvaluationResponse {
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
         minimal_flag_called_events: false,
+        ..LocalEvaluationResponse::new(vec![])
     }
 }
 
