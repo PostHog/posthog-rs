@@ -46,11 +46,13 @@ pub(crate) async fn answer_virtual_call(
             let stated = report.intent();
             call.intent = stated.and_then(|text| Intent::new(&text, FROM_CONTEXT_ARGUMENT));
             core.emit(|| vec![feedback_event(&call, &report)]);
-            feedback_reply(core, report).await
+            let context = call.tool_scope.context.clone();
+            context.scope(feedback_reply(core, report)).await
         }
     };
     let mut result = CallToolResult::success(vec![ContentBlock::text(reply)]);
     deliver_handle(&mut result, &call.conversation, false);
+    call.tool_scope.settle(&call.context.session);
     result
 }
 

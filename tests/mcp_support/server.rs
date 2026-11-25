@@ -1,7 +1,11 @@
 //! A test server whose tools act out the spec's acceptance scenarios, and
 //! that records the arguments each tool received.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use posthog::{Client, Event};
+use tokio::sync::Notify;
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
@@ -19,6 +23,51 @@ pub const PAGE_SIZE: usize = 100;
 pub struct TestServer {
     tools: Vec<Tool>,
     received: Arc<Mutex<Vec<ReceivedCall>>>,
+    custom_events: Option<Arc<CustomEvents>>,
+}
+
+/// `search_docs` waits until its query is released, then captures
+/// `docs_searched` through the host's client, as a tool handler would.
+struct CustomEvents {
+    client: Arc<Client>,
+    gates: Mutex<HashMap<String, Arc<Notify>>>,
+}
+
+impl CustomEvents {
+    fn gate(&self, query: &str) -> Arc<Notify> {
+        let mut gates = self.gates.lock().unwrap();
+        gates.entry(query.to_string()).or_default().clone()
+    }
+
+    async fn capture_after_release(&self, query: &str) {
+        self.gate(query).notified().await;
+        let mut event = posthog::RequestContext::current()
+            .map(|context| context.event("docs_searched"))
+            .unwrap_or_else(|| Event::new_anon("docs_searched"));
+        event.insert_prop("query", query).unwrap();
+        self.client.capture(event);
+        if query.starts_with("spread") {
+            self.capture_elsewhere().await;
+        }
+    }
+
+    /// A batch, an event in a nested scope, and one from work that outlives
+    /// the call.
+    async fn capture_elsewhere(&self) {
+        let context = posthog::RequestContext::current().unwrap_or_default();
+        self.client
+            .capture_batch(vec![context.event("docs_batched")], false);
+        let nested = context.clone().property("step", "nested").unwrap();
+        let client = self.client.clone();
+        let nested_capture = async move { client.capture(Event::new_anon("docs_nested")) };
+        nested.scope(nested_capture).await;
+        let client = self.client.clone();
+        let late = context.clone().scope(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            client.capture(context.event("docs_followed_up"));
+        });
+        tokio::spawn(late);
+    }
 }
 
 struct ReceivedCall {
@@ -34,8 +83,27 @@ impl TestServer {
     pub fn with_tools(tools: Vec<Tool>) -> Self {
         Self {
             tools,
-            received: Arc::default(),
+            ..Self::default()
         }
+    }
+
+    /// A server whose `search_docs` captures a custom event, and fails when
+    /// its query starts with `fail`.
+    pub fn with_custom_events(client: Arc<Client>) -> Self {
+        let custom_events = CustomEvents {
+            client,
+            gates: Mutex::default(),
+        };
+        Self {
+            custom_events: Some(Arc::new(custom_events)),
+            ..Self::new()
+        }
+    }
+
+    /// Lets the `search_docs` call for `query` go on, before or after it waits.
+    pub fn release(&self, query: &str) {
+        let custom_events = self.custom_events.as_ref().expect("custom events");
+        custom_events.gate(query).notify_one();
     }
 
     /// The arguments the tool named `name` received last.
@@ -153,6 +221,17 @@ impl ServerHandler for TestServer {
             tool: name.clone(),
             arguments: request.arguments.clone(),
         });
+        if let (Some(custom_events), "search_docs") = (&self.custom_events, name.as_str()) {
+            let query = request
+                .arguments
+                .as_ref()
+                .and_then(|arguments| arguments.get("query")?.as_str());
+            let query = query.unwrap_or_default().to_string();
+            custom_events.capture_after_release(&query).await;
+            if query.starts_with("fail") {
+                return Err(McpError::internal_error("search failed", None));
+            }
+        }
         let response = match name.as_str() {
             "fetch_page" => CallToolResult::error(vec![ContentBlock::text(FAILURE_MESSAGE)]).into(),
             "query" => return Err(McpError::internal_error("upstream timed out", None)),
