@@ -12,6 +12,7 @@ SDK usage examples and code snippets live in the official documentation so they 
 ## Documentation
 
 - [Rust library docs](https://posthog.com/docs/libraries/rust)
+- Stateful application client (`stateful` feature): local anonymous identity, capture/screen, native hooks and persistent delivery.
 
 ## Request context
 

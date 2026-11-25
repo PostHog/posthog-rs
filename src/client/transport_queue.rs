@@ -653,7 +653,7 @@ impl Coordinator {
     }
 
     fn report_storage(&self, operation: StorageOperation, error: &std::io::Error) {
-        super::storage::report_storage_error(&self.options.on_error, operation, error);
+        crate::client::common::report_storage_error(&self.options.on_error, operation, error);
     }
 }
 

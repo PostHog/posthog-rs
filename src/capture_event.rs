@@ -214,6 +214,10 @@ pub struct CaptureErrorResponse {
     pub error_uri: Option<String>,
 }
 
+#[cfg(all(test, feature = "stateful"))]
+#[path = "capture_event_stateful_tests.rs"]
+mod stateful_tests;
+
 /// Wire-shape tests for the capture event builder.
 #[cfg(test)]
 mod tests {

@@ -63,36 +63,45 @@ fn lib_version_parts(version: &str) -> Option<[u64; 3]> {
     parts.next().is_none().then_some(parsed)
 }
 
-/// Fills `$lib` and `$lib_version` as a pair with the identity the
-/// `posthog-sdk-info` header names, after every other layer and before the
-/// hooks. Only a non-empty string counts as set.
-///
-/// - No `$lib`: both get the SDK's values, replacing a lone `$lib_version`.
-/// - `$lib` is the SDK's name with no `$lib_version`: the version is filled.
-/// - Any other `$lib`: both are left as they are, so another library's name
-///   never gets this crate's version.
-///
-/// The `__major/minor/patch` parts are written whenever the SDK writes
+/// Fills `$lib` and `$lib_version` and their `__major/minor/patch` parts
+/// with the identity the `posthog-sdk-info` header names, after every other
+/// layer and before the hooks. The parts are written whenever the SDK writes
 /// `$lib_version`, and only then, so they always match it.
-fn apply_sdk_identity(event: &mut Event, identity: SdkIdentity) {
-    let properties = event.properties();
-    let lib = properties.get(LIB_PROP);
-    let fill_lib = !names_a_library(lib);
-    if !fill_lib
-        && (lib.and_then(serde_json::Value::as_str) != Some(identity.name)
-            || names_a_library(properties.get(LIB_VERSION_PROP)))
-    {
+fn apply_sdk_identity(event: &mut Event, identity: &SdkIdentity) {
+    if !fill_sdk_identity(event, &identity.name, &identity.version) {
         return;
     }
-    if fill_lib {
-        event.set_prop(LIB_PROP, identity.name.into());
-    }
-    event.set_prop(LIB_VERSION_PROP, identity.version.into());
-    if let Some(parts) = lib_version_parts(identity.version) {
+    if let Some(parts) = lib_version_parts(&identity.version) {
         for (key, part) in LIB_VERSION_PART_PROPS.iter().zip(parts.iter()) {
             event.set_prop(*key, (*part).into());
         }
     }
+}
+
+/// Fills `$lib` and `$lib_version` as a pair. Only a non-empty string counts
+/// as set.
+///
+/// - No `$lib`: both get the SDK's values, replacing a lone `$lib_version`.
+/// - `$lib` is the SDK's name with no `$lib_version`: the version is filled.
+/// - Any other `$lib`: both are left as they are, so another library's name
+///   never gets this SDK's version.
+///
+/// Returns whether the version was written.
+pub(super) fn fill_sdk_identity(event: &mut Event, name: &str, version: &str) -> bool {
+    let properties = event.properties();
+    let lib = properties.get(LIB_PROP);
+    let fill_lib = !names_a_library(lib);
+    if !fill_lib
+        && (lib.and_then(serde_json::Value::as_str) != Some(name)
+            || names_a_library(properties.get(LIB_VERSION_PROP)))
+    {
+        return false;
+    }
+    if fill_lib {
+        event.set_prop(LIB_PROP, name.into());
+    }
+    event.set_prop(LIB_VERSION_PROP, version.into());
+    true
 }
 
 fn flag_event_dedup_cache() -> FlagEventDedupCache {
@@ -163,7 +172,7 @@ pub(super) fn preprocess_capture_event(
     apply_capture_defaults(&mut event, defaults);
     event.merge_groups_into_properties();
     // After every other fill, so the pair rule sees the final `$lib`.
-    apply_sdk_identity(&mut event, defaults.identity);
+    apply_sdk_identity(&mut event, &defaults.identity);
     // Trims after every SDK fill and before the hooks, so properties a hook
     // adds to a minimized `$feature_flag_called` event are sent.
     event.apply_minimal_flag_called_allowlist();
@@ -171,7 +180,7 @@ pub(super) fn preprocess_capture_event(
     apply_before_send_hooks(hooks, event)
 }
 
-fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
+pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
     let mut current = Some(event);
 
     for hook in hooks {
@@ -204,6 +213,27 @@ pub(crate) fn apply_on_error_hooks(hooks: &[OnErrorHook], failure: &PostHogError
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.apply(failure))).is_err() {
             error!("panic in PostHog on_error hook; ignoring");
         }
+    }
+}
+
+/// Report persistence errors without putting backend paths or payloads in logs.
+#[cfg(feature = "stateful")]
+pub(super) fn report_storage_error(
+    hooks: &[OnErrorHook],
+    operation: super::StorageOperation,
+    error: &std::io::Error,
+) {
+    if hooks.is_empty() {
+        tracing::warn!(?operation, kind = ?error.kind(), "posthog-rs: storage operation failed");
+    } else {
+        let error = super::StorageError::from_io(error);
+        apply_on_error_hooks(
+            hooks,
+            &PostHogError::Storage(super::StorageFailure {
+                operation,
+                error: &error,
+            }),
+        );
     }
 }
 
@@ -981,7 +1011,7 @@ mod tests {
     fn sdk_version_parts_are_the_crate_version_as_numbers() {
         let mut event = Event::new("test", "user-1");
 
-        apply_sdk_identity(&mut event, SdkIdentity::DEFAULT);
+        apply_sdk_identity(&mut event, &SdkIdentity::DEFAULT);
 
         let expected: Vec<serde_json::Value> = [
             env!("CARGO_PKG_VERSION_MAJOR"),
@@ -1013,16 +1043,16 @@ mod tests {
         let mut filled = Event::new("test", "user-1");
         filled.insert_prop("$lib_version", "9.9.9").unwrap();
         filled.insert_prop("$lib_version__major", 9u64).unwrap();
-        apply_sdk_identity(&mut filled, SdkIdentity::DEFAULT);
+        apply_sdk_identity(&mut filled, &SdkIdentity::DEFAULT);
         let mut sdk = Event::new("test", "user-1");
-        apply_sdk_identity(&mut sdk, SdkIdentity::DEFAULT);
+        apply_sdk_identity(&mut sdk, &SdkIdentity::DEFAULT);
         assert_eq!(version_parts(&filled), version_parts(&sdk));
 
         // The caller named the library, so its parts stay and none are added.
         let mut kept = Event::new("test", "user-1");
         kept.insert_prop("$lib", "custom-lib").unwrap();
         kept.insert_prop("$lib_version__major", 9u64).unwrap();
-        apply_sdk_identity(&mut kept, SdkIdentity::DEFAULT);
+        apply_sdk_identity(&mut kept, &SdkIdentity::DEFAULT);
         assert_eq!(version_parts(&kept), vec![Some(&json!(9)), None, None]);
     }
 

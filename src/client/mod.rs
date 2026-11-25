@@ -54,9 +54,10 @@ impl CaptureCompression {
 mod blocking;
 mod capture;
 #[cfg(feature = "stateful")]
-#[allow(dead_code)] // Composed by the stateful delivery coordinator.
 mod event_store;
 mod retry;
+#[cfg(feature = "stateful")]
+pub mod stateful;
 pub(crate) use retry::parse_retry_after;
 mod transport;
 #[cfg(not(feature = "async-client"))]
@@ -110,16 +111,16 @@ const SDK_USERAGENT_NAME: &str = "posthog-rs";
 /// and `User-Agent` headers, and as the default `$lib` and `$lib_version`.
 /// An SDK that wraps this one replaces it with its own, so its events and
 /// requests are attributed to it rather than to this crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SdkIdentity {
-    pub(crate) name: &'static str,
-    pub(crate) version: &'static str,
+    pub(crate) name: std::borrow::Cow<'static, str>,
+    pub(crate) version: std::borrow::Cow<'static, str>,
 }
 
 impl SdkIdentity {
     pub(crate) const DEFAULT: SdkIdentity = SdkIdentity {
-        name: SDK_USERAGENT_NAME,
-        version: CRATE_VERSION,
+        name: std::borrow::Cow::Borrowed(SDK_USERAGENT_NAME),
+        version: std::borrow::Cow::Borrowed(CRATE_VERSION),
     };
 
     /// `<name>/<version>`, the `PostHog-Sdk-Info` and `User-Agent` value.
@@ -428,7 +429,7 @@ pub struct ClientOptions {
 /// Built once from [`ClientOptions`] and threaded through every event-producing
 /// path so each default is applied in exactly one place with caller-wins
 /// (`entry().or_insert`) semantics.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct CaptureDefaults {
     pub(crate) disable_geoip: bool,
     pub(crate) is_server: bool,
@@ -441,7 +442,7 @@ impl ClientOptions {
         CaptureDefaults {
             disable_geoip: self.disable_geoip,
             is_server: self.is_server,
-            identity: self.sdk_identity,
+            identity: self.sdk_identity.clone(),
         }
     }
 
@@ -521,7 +522,10 @@ impl ClientOptionsBuilder {
     /// bindings in `posthog-rs-ffi`. Not part of the supported API.
     #[doc(hidden)]
     pub fn sdk_identity(&mut self, name: &'static str, version: &'static str) -> &mut Self {
-        self.sdk_identity = Some(SdkIdentity { name, version });
+        self.sdk_identity = Some(SdkIdentity {
+            name: name.into(),
+            version: version.into(),
+        });
         self
     }
 

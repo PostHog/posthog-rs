@@ -40,26 +40,18 @@ use crate::error::Error;
 use crate::Event;
 
 #[cfg(feature = "stateful")]
-#[allow(dead_code)] // Composed by the stateful client layered above.
 #[path = "transport_delivery.rs"]
 mod delivery;
 #[cfg(feature = "stateful")]
-#[allow(dead_code)] // Composed by the stateful client layered above.
 #[path = "transport_inbox.rs"]
 mod inbox;
 #[cfg(feature = "stateful")]
-#[allow(dead_code)] // Composed by the stateful client layered above.
 #[path = "transport_queue.rs"]
 mod queue;
 #[cfg(all(test, feature = "stateful"))]
 #[path = "transport_startup_tests.rs"]
 mod startup_tests;
 #[cfg(feature = "stateful")]
-#[allow(dead_code)] // Composed by the stateful client layered above.
-#[path = "transport_storage.rs"]
-mod storage;
-#[cfg(feature = "stateful")]
-#[allow(dead_code)] // Composed by the stateful client layered above.
 #[path = "transport_table.rs"]
 mod table;
 #[cfg(feature = "stateful")]
@@ -94,19 +86,16 @@ pub(crate) enum Control {
     Tick(Completion),
     /// Stateful delivery: events are waiting in the inbox.
     #[cfg(feature = "stateful")]
-    #[allow(dead_code)] // Sent by the stateful client layered above.
     QueueWake,
     /// Stateful delivery: a flush covering every event admitted at or below
     /// `through`, the queue position when it was requested.
     #[cfg(feature = "stateful")]
-    #[allow(dead_code)] // Sent by the stateful client layered above.
     QueueFlush {
         completion: Completion,
         through: u64,
     },
     /// Stateful delivery: the executor finished a request.
     #[cfg(feature = "stateful")]
-    #[allow(dead_code)] // Sent by the stateful client layered above.
     Sent(Box<queue::Sent>),
 }
 

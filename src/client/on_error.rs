@@ -59,8 +59,8 @@ impl OnErrorHook {
     }
 }
 
-/// A delivery, network, or storage failure, passed by reference to each
-/// registered `on_error` hook.
+/// A delivery, network, storage, or initialization failure, passed by
+/// reference to each registered `on_error` hook.
 ///
 /// `#[non_exhaustive]`: new variants may be added as more surfaces gain hook
 /// coverage, so a `match` must include a wildcard arm.
@@ -83,6 +83,25 @@ pub enum PostHogError<'a> {
     /// usable, and what could not be persisted may be lost when the process
     /// exits.
     Storage(StorageFailure<'a>),
+    /// A stateful client could not be enabled. The returned client is disabled.
+    #[cfg(feature = "stateful")]
+    Initialization(InitializationFailure),
+}
+
+/// A sanitized initialization diagnostic. It never contains the project token.
+#[cfg(feature = "stateful")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct InitializationFailure {
+    pub(crate) message: &'static str,
+}
+
+#[cfg(feature = "stateful")]
+impl InitializationFailure {
+    /// The configuration or local startup problem that disabled the client.
+    pub fn message(&self) -> &str {
+        self.message
+    }
 }
 
 /// The persistence operation that failed.
