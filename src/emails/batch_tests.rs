@@ -221,6 +221,31 @@ mod async_client {
             (whole_call(429, "quota_limited"), "quota_limited", 429),
             (not_found, "not_found", 404),
             (Answer::xml(413, ""), "content_too_large", 413),
+            (
+                Answer::json(
+                    413,
+                    json!({
+                        "type": "invalid_request",
+                        "code": "content_too_large",
+                        "detail": "The batch is larger than PostHog takes in one request, so PostHog didn't send it.",
+                        "fix": "Split the recipients into smaller batches.",
+                    }),
+                ),
+                "content_too_large",
+                413,
+            ),
+            (
+                Answer::json(
+                    409,
+                    json!({
+                        "type": "invalid_request",
+                        "code": "batch_unavailable",
+                        "detail": "Batch sends aren't available for this project yet, so PostHog didn't send any of these emails.",
+                    }),
+                ),
+                "batch_unavailable",
+                409,
+            ),
         ] {
             let server = ScriptedServer::start(vec![Answer::lost(), refusal]);
             let client = client_for(&server).await;
@@ -235,9 +260,14 @@ mod async_client {
             assert_eq!((error.code(), error.status()), (code, Some(status)));
             assert!(
                 !error.message().contains("sent no email")
-                    && !error.message().contains("didn't send it"),
+                    && !error.message().contains("didn't send"),
                 "{}",
                 error.message()
+            );
+            assert!(
+                says_to_resend_with_its_key(Some(&error)),
+                "{:?}",
+                error.fix()
             );
             assert_eq!(server.requests().len(), 2);
             let result = error.batch_result().unwrap();

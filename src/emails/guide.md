@@ -128,7 +128,9 @@ given or made by the client, that every retry reuses. Check each result's
   after a lost answer or a `409` other than `batch_unavailable`. Send it again with the same key within 24 hours of
   the first request that used it, so it goes out once. It stays
   `Unconfirmed` when a later answer refuses it, since that doesn't prove it
-  wasn't sent: `later_error` holds that answer.
+  wasn't sent: `later_error` holds that answer. The request's error then
+  says some of its emails may have gone out, and its fix is to send each
+  recipient again with the same key.
 
 The client never reads an email by its key, so an `Unconfirmed` result
 stays that way: send it again with the same key, and PostHog queues it at

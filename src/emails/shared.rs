@@ -1564,29 +1564,19 @@ fn batch_reply_error(
                 Some("not_found" | "api_error")
             ))
     {
-        let (missing, fix) = if from_template {
+        let (detail, fix) = if from_template {
             (
-                "PostHog found no template with this ID, or batch sends aren't available for this project",
+                "PostHog found no template with this ID, or batch sends aren't available for this project, so it sent no email of this request.",
                 "Check template_id. If it is right, send each recipient on its own with send() and its idempotency_key until batch sends are available.",
             )
         } else {
             (
-                "Batch sends, or sending email from code, aren't available for this project",
+                "Batch sends, or sending email from code, aren't available for this project, so PostHog sent no email of this request.",
                 "If this project can send email from code, send each recipient on its own with send() and its idempotency_key until batch sends are available.",
             )
         };
-        let sent_nothing = if from_template {
-            "so it sent no email of this request."
-        } else {
-            "so PostHog sent no email of this request."
-        };
-        let detail = refusal_text(missing, sent_nothing, lost_before);
         fields.remove("why");
-        for (name, value) in [
-            ("code", "not_found"),
-            ("detail", detail.as_str()),
-            ("fix", fix),
-        ] {
+        for (name, value) in [("code", "not_found"), ("detail", detail), ("fix", fix)] {
             fields.insert(name.into(), Value::String(value.into()));
         }
     }
@@ -1602,11 +1592,7 @@ fn batch_reply_error(
         set_unless_answered("code", "content_too_large");
         set_unless_answered(
             "detail",
-            &refusal_text(
-                "The batch is larger than PostHog takes in one request",
-                "so PostHog didn't send it.",
-                lost_before,
-            ),
+            "The batch is larger than PostHog takes in one request, so PostHog didn't send it.",
         );
         set_unless_answered("fix", "Split the recipients into smaller batches.");
     }
@@ -1617,17 +1603,20 @@ fn batch_reply_error(
             Value::String("Until batch sends are on for the project, send each email the batch didn't queue with send() and its recipient's idempotency_key.".into()),
         );
     }
-    reply_error(&fields, status, retry_after)
-}
-
-/// A refusal sent nothing, unless an earlier attempt of the request got no
-/// answer and may have queued some of its emails.
-fn refusal_text(refused: &str, sent_nothing: &str, lost_before: bool) -> String {
+    // PostHog's text speaks for this attempt only, and an earlier attempt that
+    // got no answer may have queued every email of the request.
     if lost_before {
-        format!("{refused}. An earlier attempt of this request got no answer, so some of its emails may have gone out: read each recipient's result.")
-    } else {
-        format!("{refused}, {sent_nothing}")
+        let code = text(&fields, "code").unwrap_or_default();
+        fields.insert(
+            "detail".into(),
+            Value::String(format!("PostHog refused a retry of this request with {code}. An earlier attempt got no answer, so some of its emails may have gone out: read each recipient's result.")),
+        );
+        fields.insert(
+            "fix".into(),
+            Value::String("Send each recipient again with the same idempotency_key within 24 hours of the first request that used it, so each email goes out once.".into()),
+        );
     }
+    reply_error(&fields, status, retry_after)
 }
 
 fn closed(nothing_done: &str) -> EmailError {
