@@ -61,27 +61,42 @@ impl HeldEvents {
     }
 
     /// Gives the event back, with the released context, once there is one.
+    /// A held event takes its queue slot now; the mutex is never held while
+    /// logging, since a subscriber that captures would re-enter it.
     fn hold(&self, mut event: Event, transport: &Arc<TransportHandle>) -> Option<Event> {
+        let first_drop = match &mut *self.lock() {
+            Hold::Released(context) => {
+                context.apply_to_event(&mut event);
+                return Some(event);
+            }
+            Hold::Waiting { events, dropped } if events.len() >= MAX_HELD_EVENTS => {
+                Some(!std::mem::replace(dropped, true))
+            }
+            Hold::Waiting { .. } => None,
+        };
+        if let Some(first_drop) = first_drop {
+            if first_drop {
+                tracing::warn!(
+                    "a scope held {MAX_HELD_EVENTS} events waiting for their session; dropping the rest"
+                );
+            }
+            return None;
+        }
+        if !transport.reserve_for_later() {
+            return None;
+        }
+        event.ensure_timestamp(chrono::Utc::now());
         match &mut *self.lock() {
             Hold::Released(context) => {
                 context.apply_to_event(&mut event);
-                Some(event)
+                transport.send_later(event);
             }
             Hold::Waiting { events, .. } if events.len() < MAX_HELD_EVENTS => {
-                event.ensure_timestamp(chrono::Utc::now());
                 events.push((event, Arc::clone(transport)));
-                None
             }
-            Hold::Waiting { dropped, .. } => {
-                if !*dropped {
-                    *dropped = true;
-                    tracing::warn!(
-                        "a scope held {MAX_HELD_EVENTS} events waiting for their session; dropping the rest"
-                    );
-                }
-                None
-            }
+            Hold::Waiting { .. } => transport.unreserve(),
         }
+        None
     }
 
     /// Sends the held events with `context` applied. Only the first release
@@ -103,7 +118,7 @@ impl HeldEvents {
         };
         for (mut event, transport) in events {
             released.apply_to_event(&mut event);
-            transport.enqueue(event);
+            transport.send_later(event);
         }
     }
 
@@ -404,5 +419,39 @@ mod test {
                 ("product_tour_id".to_string(), json!("tour")),
             ]
         );
+    }
+}
+
+#[cfg(all(test, feature = "mcp"))]
+mod held_tests {
+    use std::sync::Arc;
+
+    use super::{HeldEvents, RequestContext};
+    use crate::client::TransportHandle;
+    use crate::{ClientOptionsBuilder, Event};
+
+    #[test]
+    fn held_events_count_against_the_queue_bound() {
+        let options = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host("http://127.0.0.1:9".to_string())
+            .flush_interval_ms(60_000u64)
+            .max_queue_size(2usize)
+            .build()
+            .unwrap();
+        let transport = Arc::new(TransportHandle::spawn(options));
+        let held = HeldEvents::new();
+
+        for _ in 0..3 {
+            assert!(held.hold(Event::new_anon("held"), &transport).is_none());
+        }
+
+        assert!(
+            !transport.reserve_for_later(),
+            "two held events fill the queue"
+        );
+        held.release(&RequestContext::new());
+        let released = held.hold(Event::new_anon("late"), &transport);
+        assert!(released.is_some(), "a released scope sends at once");
     }
 }

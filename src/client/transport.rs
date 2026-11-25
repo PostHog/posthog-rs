@@ -338,6 +338,34 @@ impl TransportHandle {
         }
     }
 
+    /// Reserves a queue slot for an event sent later, so a held event counts
+    /// against the queue bound like a queued one. False when the queue is full
+    /// (warning once) or the client is closed.
+    #[cfg(feature = "async-client")]
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub(crate) fn reserve_for_later(&self) -> bool {
+        !self.closed.load(Ordering::Acquire) && self.try_reserve()
+    }
+
+    /// Sends an event whose slot `reserve_for_later` took, or gives the slot
+    /// back if the client closed meanwhile.
+    #[cfg(feature = "async-client")]
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub(crate) fn send_later(&self, event: Event) {
+        if self.closed.load(Ordering::Acquire) {
+            dec_len(&self.len, 1);
+        } else {
+            self.send_reserved(event);
+        }
+    }
+
+    /// Gives back a slot `reserve_for_later` took for an event never sent.
+    #[cfg(feature = "async-client")]
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub(crate) fn unreserve(&self) {
+        dec_len(&self.len, 1);
+    }
+
     /// Like `enqueue`, but never logs — no full-queue `warn!`. The panic hook
     /// enqueues through this on the *panicking* thread, which must not run
     /// arbitrary tracing-subscriber code (a subscriber could panic or wait on a

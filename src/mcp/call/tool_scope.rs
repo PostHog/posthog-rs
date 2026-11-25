@@ -25,9 +25,10 @@ impl ToolScope {
                 context.properties.insert(key::GROUPS.to_string(), groups);
             }
         }
+        context.held = pending.then(HeldEvents::new);
         if pending {
-            context.held = Some(HeldEvents::new());
             context.properties.remove(key::SESSION_ID);
+            context.properties.remove(key::SESSION_SOURCE);
         } else {
             set_session(&mut context, &call.session);
         }
@@ -63,4 +64,52 @@ fn set_session(context: &mut RequestContext, session: &Session) {
         key::SESSION_SOURCE.to_string(),
         Value::from(session.source.as_str()),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use serde_json::Map;
+
+    use super::*;
+    use crate::mcp::session::SessionSource;
+
+    fn call(session: &str) -> EventContext {
+        EventContext {
+            timestamp: Utc::now(),
+            session: Session::new(session.to_string(), SessionSource::Conversation),
+            conversation_id: None,
+            identity: None,
+            client: Default::default(),
+            server: Default::default(),
+            server_build: None,
+            host_properties: Map::new(),
+            options: Map::new(),
+        }
+    }
+
+    #[test]
+    fn a_nested_call_takes_none_of_its_parents_session_or_hold() {
+        let parent = ToolScope::new(None, &call("ses_parent"), true);
+        let mut host = parent.context.clone();
+        set_session(
+            &mut host,
+            &Session::new("ses_host".into(), SessionSource::Transport),
+        );
+        for pending in [true, false] {
+            let nested = ToolScope::new(Some(host.clone()), &call("ses_nested"), pending);
+
+            let held = nested.context.held.as_ref();
+            assert!(held != parent.context.held.as_ref(), "pending {}", pending);
+            assert_eq!(held.is_some(), pending);
+            let properties = &nested.context.properties;
+            let expected =
+                (!pending).then(|| (Value::from("ses_nested"), Value::from("conversation")));
+            let actual = properties
+                .get(key::SESSION_ID)
+                .cloned()
+                .zip(properties.get(key::SESSION_SOURCE).cloned());
+            assert_eq!(actual, expected, "pending {}", pending);
+        }
+    }
 }
