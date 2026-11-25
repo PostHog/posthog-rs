@@ -570,6 +570,11 @@ async fn one_ambiguous_answer_leaves_the_request_unconfirmed_without_a_later_err
             whole_call(409, "idempotency_key_in_flight"),
             "idempotency_key_in_flight",
         ),
+        (Answer::xml(409, "<h1>Conflict</h1>"), "api_error"),
+        (
+            Answer::json(409, json!({"code": 409, "detail": " "})),
+            "api_error",
+        ),
     ] {
         let server = ScriptedServer::start_async(vec![answer, status_found("m0")]).await;
         let client = client_for(&server).await;
@@ -584,7 +589,10 @@ async fn one_ambiguous_answer_leaves_the_request_unconfirmed_without_a_later_err
         let result = error.batch_result().unwrap();
         assert_eq!(statuses(result), vec![Unconfirmed, Unconfirmed]);
         assert!(
-            result.results.iter().all(|r| r.later_error.is_none()),
+            result
+                .results
+                .iter()
+                .all(|r| r.later_error.is_none() && says_to_resend_with_its_key(r.error.as_ref())),
             "{}",
             code
         );

@@ -1378,8 +1378,12 @@ impl<'a> BatchRun<'a> {
         };
         let fields = reply_fields(reply.payload);
         if !is_success(reply.status) {
+            // Only `batch_unavailable` says a 409 queued nothing. A 409 with
+            // no code, as from a proxy, may hide an in-flight key.
+            let uncoded_conflict = reply.status == 409
+                && text(&fields, "code").map_or(true, |code| code.trim().is_empty());
             let error = batch_reply_error(fields, reply.status, reply.retry_after);
-            if error.code() == IN_FLIGHT_CODE {
+            if error.code() == IN_FLIGHT_CODE || uncoded_conflict {
                 self.unclear(Some(&error), Some(&error));
             } else if reply.status >= 500 {
                 self.unclear(Some(&unconfirmed()), Some(&error));
