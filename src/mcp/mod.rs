@@ -55,6 +55,8 @@
 //! [`RequestContext::event`](crate::RequestContext::event) to take that
 //! distinct ID. Work the handler spawns onto another task takes the context
 //! only when scoped with [`RequestContext::scope`](crate::RequestContext::scope).
+//! With the manual API, run the tool in
+//! [`StartedToolCall::request_context`] for the same.
 //! On a call that hands the agent a new conversation handle, these events wait
 //! until the call ends, then take the call's final session; an immediate
 //! capture, which cannot wait, carries no session.
