@@ -122,7 +122,7 @@ impl<'a> Emails<'a> {
             )
             .await?;
         let result = shared::parse_send_reply(reply, schedule)?;
-        shared::log_warnings(&result);
+        shared::log_warnings(&result.warnings);
         Ok(result)
     }
 

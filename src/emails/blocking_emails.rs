@@ -118,7 +118,7 @@ impl<'a> Emails<'a> {
             max_retries,
         )?;
         let result = shared::parse_send_reply(reply, schedule)?;
-        shared::log_warnings(&result);
+        shared::log_warnings(&result.warnings);
         Ok(result)
     }
 

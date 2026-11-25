@@ -650,15 +650,35 @@ pub(crate) mod tests {
 
     /// Run `f` and return its result with every log line it emitted on this thread.
     pub(crate) fn with_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let writer = logs.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || LogWriter(writer.clone()))
-            .finish();
-        let result = tracing::subscriber::with_default(subscriber, f);
-        let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        (result, logged)
+        let logs = CapturedLogs::start();
+        let result = f();
+        (result, logs.read())
+    }
+
+    /// Every log line emitted on this thread while it lives, across awaits on
+    /// a current-thread runtime too.
+    pub(crate) struct CapturedLogs {
+        logs: Arc<Mutex<Vec<u8>>>,
+        _default: tracing::subscriber::DefaultGuard,
+    }
+
+    impl CapturedLogs {
+        pub(crate) fn start() -> Self {
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let writer = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || LogWriter(writer.clone()))
+                .finish();
+            Self {
+                logs,
+                _default: tracing::subscriber::set_default(subscriber),
+            }
+        }
+
+        pub(crate) fn read(&self) -> String {
+            String::from_utf8(self.logs.lock().unwrap().clone()).unwrap()
+        }
     }
 
     /// Build options and return them with every log line emitted while building.

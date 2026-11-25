@@ -948,7 +948,10 @@ pub(crate) fn parse_send_reply(
             {
                 Some(requested)
             }
-            _ => return Err(schedule_not_confirmed(id, status)),
+            _ => {
+                log_warnings(&warnings);
+                return Err(schedule_not_confirmed(id, status));
+            }
         },
     };
     Ok(SendEmailResult {
@@ -1009,8 +1012,8 @@ pub(crate) fn parse_status_reply(reply: Accepted) -> Result<EmailStatus, EmailEr
     }
 }
 
-pub(crate) fn log_warnings(result: &SendEmailResult) {
-    for warning in &result.warnings {
+pub(crate) fn log_warnings(warnings: &[EmailWarning]) {
+    for warning in warnings {
         warn!(
             "PostHog email warning {}: {}",
             warning.code, warning.message
