@@ -135,8 +135,9 @@ limit past its retries, or never answers it, the call returns an
 [`batch_result`](crate::EmailError::batch_result) holds every recipient.
 When the client shuts down, the batch sends no retry, and a shutdown during
 a wait before a retry returns at once. The code `batch_unavailable` (`409`)
-means the project can't send batches yet, and a `404` that the template
-doesn't exist or batch sends are off for the project: send each email the
+means the project can't send batches yet. A `404` `not_found` means PostHog
+found no template with that ID or batch sends aren't available for the
+project: check the template ID, and if it is right, send each email the
 batch didn't queue with [`Emails::send`] and its recipient's idempotency
 key. A batch takes no `cc`, `bcc`, attachments or `scheduled_at`.
 

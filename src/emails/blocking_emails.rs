@@ -154,9 +154,11 @@ impl<'a> Emails<'a> {
     /// content or template data sent to every recipient is over PostHog's
     /// limit, and splitting doesn't help: send larger emails one at a time
     /// with [`send`](Self::send). The code is `batch_unavailable` when
-    /// the project can't send batches yet, and a `404` means the template
-    /// doesn't exist or batch sends are off: send each email the batch didn't
-    /// queue with [`send`](Self::send) and its recipient's idempotency key.
+    /// the project can't send batches yet. A `404` `not_found` means PostHog
+    /// found no template with that ID or batch sends aren't available for the
+    /// project: check the template ID, and if it is right, send each email
+    /// the batch didn't queue with [`send`](Self::send) and its recipient's
+    /// idempotency key.
     /// `client_closed` means the client shut down before a retry: it sends no
     /// retry, and returns at once from the wait before it.
     ///

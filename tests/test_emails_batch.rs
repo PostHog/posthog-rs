@@ -539,31 +539,48 @@ async fn batch_unavailable_is_not_retried_and_says_to_send_singly() {
 }
 
 #[tokio::test]
-async fn a_404_says_batch_sends_are_unavailable() {
-    for answer in [
-        Answer::xml(404, "<h1>Not Found</h1>"),
-        Answer::json(
-            404,
-            json!({"type": "invalid_request", "code": "not_found", "detail": "Not found."}),
+async fn a_404_without_a_field_says_the_template_or_batch_sends_are_missing() {
+    let template_fix = "Check template_id. If it is right, send each recipient on its own with send() and its idempotency_key until batch sends are available.";
+    let code_fix = "Send each recipient on its own with send() and its idempotency_key until batch sends are available.";
+    let forms: [(posthog::SendBatch, &str, &str); 2] = [
+        (
+            template(recipients(2)).into(),
+            "PostHog found no template with this ID, or batch sends aren't available for this project, so it sent no email of this request.",
+            template_fix,
         ),
-    ] {
-        let server = ScriptedServer::start_async(vec![answer]).await;
-        let client = client_for(&server).await;
+        (
+            CodeBatch::new("digest", "News", recipients(2)).text("x").into(),
+            "Batch sends from code aren't available for this project, so PostHog sent no email of this request.",
+            code_fix,
+        ),
+    ];
+    for (batch, message, fix) in forms {
+        for answer in [
+            Answer::json(
+                404,
+                json!({"type": "invalid_request", "code": "not_found", "detail": "Not found.", "attr": null}),
+            ),
+            Answer::json(
+                404,
+                json!({"type": "invalid_request", "code": "not_found", "detail": "Endpoint not found."}),
+            ),
+            Answer::xml(404, "<h1>Not Found</h1>"),
+        ] {
+            let server = ScriptedServer::start_async(vec![answer]).await;
+            let client = client_for(&server).await;
 
-        let error = client
-            .emails()
-            .batch(template(recipients(1)))
-            .await
-            .unwrap_err();
+            let error = client.emails().batch(batch.clone()).await.unwrap_err();
 
-        assert_eq!(error.code(), "not_found");
-        assert_eq!(error.kind(), EmailErrorKind::NotFound);
-        assert!(error.why().unwrap().contains("batch sends"));
-        assert_eq!(
-            error.fix(),
-            Some("Check template_id, or send each email the batch didn't queue with send() and its recipient's idempotency_key.")
-        );
-        assert_eq!(server.requests().len(), 1);
+            assert_eq!((error.code(), error.status()), ("not_found", Some(404)));
+            assert_eq!(error.kind(), EmailErrorKind::NotFound);
+            assert_eq!((error.message(), error.fix()), (message, Some(fix)));
+            assert_eq!(error.why(), None);
+            assert_eq!(
+                statuses(error.batch_result().unwrap()),
+                vec![Failed, Failed]
+            );
+            assert_eq!(server.requests().len(), 1);
+        }
     }
 }
 

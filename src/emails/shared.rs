@@ -1128,6 +1128,7 @@ pub(crate) struct PreparedBatch {
     body: Bytes,
     results: Vec<BatchEmailResult>,
     max_retries: Option<u32>,
+    from_template: bool,
 }
 
 pub(crate) fn prepare_batch(batch: SendBatch) -> Result<PreparedBatch, EmailError> {
@@ -1135,6 +1136,7 @@ pub(crate) fn prepare_batch(batch: SendBatch) -> Result<PreparedBatch, EmailErro
         SendBatch::Template(batch) => batch.recipients.len(),
         SendBatch::Code(batch) => batch.recipients.len(),
     })?;
+    let from_template = matches!(batch, SendBatch::Template(_));
     let (mut body, recipients, max_retries) = match batch {
         SendBatch::Template(batch) => {
             let body = template_body(&batch.template_id, batch.template_data.as_ref())?;
@@ -1178,6 +1180,7 @@ pub(crate) fn prepare_batch(batch: SendBatch) -> Result<PreparedBatch, EmailErro
         body: Bytes::from(encode(&body)?),
         results,
         max_retries,
+        from_template,
     })
 }
 
@@ -1296,6 +1299,7 @@ pub(crate) struct BatchRun<'a> {
     max_retries: u32,
     phase: Phase,
     stopped_by: Option<EmailError>,
+    from_template: bool,
 }
 
 impl<'a> BatchRun<'a> {
@@ -1322,6 +1326,7 @@ impl<'a> BatchRun<'a> {
             max_retries: prepared.max_retries.unwrap_or(connection.max_retries),
             phase: Phase::Send,
             stopped_by: None,
+            from_template: prepared.from_template,
         })
     }
 
@@ -1382,7 +1387,8 @@ impl<'a> BatchRun<'a> {
             // no code, as from a proxy, may hide an in-flight key.
             let uncoded_conflict = reply.status == 409
                 && text(&fields, "code").map_or(true, |code| code.trim().is_empty());
-            let error = batch_reply_error(fields, reply.status, reply.retry_after);
+            let error =
+                batch_reply_error(fields, reply.status, reply.retry_after, self.from_template);
             if error.code() == IN_FLIGHT_CODE || uncoded_conflict {
                 self.unclear(Some(&error), Some(&error));
             } else if reply.status >= 500 {
@@ -1531,7 +1537,37 @@ fn batch_reply_error(
     mut fields: Map<String, Value>,
     status: u16,
     retry_after: Option<Duration>,
+    from_template: bool,
 ) -> EmailError {
+    let blank = |name: &str, fields: &Map<String, Value>| {
+        text(fields, name).map_or(true, |answered| answered.trim().is_empty())
+    };
+    // PostHog answers an unknown template, batch sends that are off and a
+    // server without the route with the same 404, so none of them is named.
+    if status == 404
+        && blank("attr", &fields)
+        && (blank("code", &fields)
+            || matches!(
+                text(&fields, "code").as_deref(),
+                Some("not_found" | "api_error")
+            ))
+    {
+        let (detail, fix) = if from_template {
+            (
+                "PostHog found no template with this ID, or batch sends aren't available for this project, so it sent no email of this request.",
+                "Check template_id. If it is right, send each recipient on its own with send() and its idempotency_key until batch sends are available.",
+            )
+        } else {
+            (
+                "Batch sends from code aren't available for this project, so PostHog sent no email of this request.",
+                "Send each recipient on its own with send() and its idempotency_key until batch sends are available.",
+            )
+        };
+        fields.remove("why");
+        for (name, value) in [("code", "not_found"), ("detail", detail), ("fix", fix)] {
+            fields.insert(name.into(), Value::String(value.into()));
+        }
+    }
     let mut set_unless_answered = |name: &str, value: &str| {
         if text(&fields, name).map_or(true, |answered| answered.trim().is_empty()) {
             fields.insert(name.into(), Value::String(value.into()));
@@ -1539,18 +1575,6 @@ fn batch_reply_error(
     };
     if status == 404 {
         set_unless_answered("code", "not_found");
-        set_unless_answered(
-            "detail",
-            "PostHog found no batch send for this request, so no email was sent.",
-        );
-        set_unless_answered(
-            "why",
-            "The template doesn't exist, or batch sends are off for this project or this PostHog version.",
-        );
-        set_unless_answered(
-            "fix",
-            "Check template_id, or send each email the batch didn't queue with send() and its recipient's idempotency_key.",
-        );
     }
     if status == 413 {
         set_unless_answered("code", "content_too_large");
