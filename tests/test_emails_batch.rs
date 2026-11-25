@@ -598,6 +598,8 @@ async fn one_ambiguous_answer_leaves_the_request_unconfirmed_without_a_later_err
             Answer::json(409, json!({"code": 409, "detail": " "})),
             "api_error",
         ),
+        (Answer::json(409, json!({"code": "api_error"})), "api_error"),
+        (Answer::json(409, json!({"code": "conflict"})), "conflict"),
     ] {
         let server = ScriptedServer::start_async(vec![answer, status_found("m0")]).await;
         let client = client_for(&server).await;

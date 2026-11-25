@@ -125,7 +125,7 @@ given or made by the client, that every retry reuses. Check each result's
 - `Failed`: PostHog refused it, and `error` says why, such as a suppressed
   address. PostHog may still name the refused email in `message_id`.
 - `Unconfirmed`: the client can't tell whether PostHog accepted it, such as
-  after a lost answer or a `409` without a code. Send it again with the same key within 24 hours of
+  after a lost answer or a `409` other than `batch_unavailable`. Send it again with the same key within 24 hours of
   the first request that used it, so it goes out once. It stays
   `Unconfirmed` when a later answer refuses it, since that doesn't prove it
   wasn't sent: `later_error` holds that answer.

@@ -1386,13 +1386,21 @@ impl<'a> BatchRun<'a> {
         };
         let fields = reply_fields(reply.payload);
         if !is_success(reply.status) {
-            // Only `batch_unavailable` says a 409 queued nothing. A 409 with
-            // no code, as from a proxy, may hide an in-flight key.
-            let uncoded_conflict = reply.status == 409
-                && text(&fields, "code").map_or(true, |code| code.trim().is_empty());
-            let error =
-                batch_reply_error(fields, reply.status, reply.retry_after, self.from_template);
-            if error.code() == IN_FLIGHT_CODE || uncoded_conflict {
+            let lost_before = self
+                .results
+                .iter()
+                .any(|result| result.status == BatchEmailStatus::Unconfirmed);
+            let error = batch_reply_error(
+                fields,
+                reply.status,
+                reply.retry_after,
+                self.from_template,
+                lost_before,
+            );
+            // Only `batch_unavailable` says a 409 queued nothing. Any other
+            // 409, as from a proxy, may hide an in-flight key.
+            let unclear_conflict = reply.status == 409 && error.code() != "batch_unavailable";
+            if error.code() == IN_FLIGHT_CODE || unclear_conflict {
                 self.unclear(Some(&error), Some(&error));
             } else if reply.status >= 500 {
                 self.unclear(Some(&unconfirmed()), Some(&error));
@@ -1541,6 +1549,7 @@ fn batch_reply_error(
     status: u16,
     retry_after: Option<Duration>,
     from_template: bool,
+    lost_before: bool,
 ) -> EmailError {
     let blank = |name: &str, fields: &Map<String, Value>| {
         text(fields, name).map_or(true, |answered| answered.trim().is_empty())
@@ -1555,19 +1564,29 @@ fn batch_reply_error(
                 Some("not_found" | "api_error")
             ))
     {
-        let (detail, fix) = if from_template {
+        let (missing, fix) = if from_template {
             (
-                "PostHog found no template with this ID, or batch sends aren't available for this project, so it sent no email of this request.",
+                "PostHog found no template with this ID, or batch sends aren't available for this project",
                 "Check template_id. If it is right, send each recipient on its own with send() and its idempotency_key until batch sends are available.",
             )
         } else {
             (
-                "Batch sends, or sending email from code, aren't available for this project, so PostHog sent no email of this request.",
+                "Batch sends, or sending email from code, aren't available for this project",
                 "If this project can send email from code, send each recipient on its own with send() and its idempotency_key until batch sends are available.",
             )
         };
+        let sent_nothing = if from_template {
+            "so it sent no email of this request."
+        } else {
+            "so PostHog sent no email of this request."
+        };
+        let detail = refusal_text(missing, sent_nothing, lost_before);
         fields.remove("why");
-        for (name, value) in [("code", "not_found"), ("detail", detail), ("fix", fix)] {
+        for (name, value) in [
+            ("code", "not_found"),
+            ("detail", detail.as_str()),
+            ("fix", fix),
+        ] {
             fields.insert(name.into(), Value::String(value.into()));
         }
     }
@@ -1583,7 +1602,11 @@ fn batch_reply_error(
         set_unless_answered("code", "content_too_large");
         set_unless_answered(
             "detail",
-            "The batch is larger than PostHog takes in one request, so PostHog didn't send it.",
+            &refusal_text(
+                "The batch is larger than PostHog takes in one request",
+                "so PostHog didn't send it.",
+                lost_before,
+            ),
         );
         set_unless_answered("fix", "Split the recipients into smaller batches.");
     }
@@ -1595,6 +1618,16 @@ fn batch_reply_error(
         );
     }
     reply_error(&fields, status, retry_after)
+}
+
+/// A refusal sent nothing, unless an earlier attempt of the request got no
+/// answer and may have queued some of its emails.
+fn refusal_text(refused: &str, sent_nothing: &str, lost_before: bool) -> String {
+    if lost_before {
+        format!("{refused}. An earlier attempt of this request got no answer, so some of its emails may have gone out: read each recipient's result.")
+    } else {
+        format!("{refused}, {sent_nothing}")
+    }
 }
 
 fn closed(nothing_done: &str) -> EmailError {

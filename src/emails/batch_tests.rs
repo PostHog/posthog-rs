@@ -220,6 +220,7 @@ mod async_client {
         for (refusal, code, status) in [
             (whole_call(429, "quota_limited"), "quota_limited", 429),
             (not_found, "not_found", 404),
+            (Answer::xml(413, ""), "content_too_large", 413),
         ] {
             let server = ScriptedServer::start(vec![Answer::lost(), refusal]);
             let client = client_for(&server).await;
@@ -232,6 +233,12 @@ mod async_client {
                 .unwrap_err();
 
             assert_eq!((error.code(), error.status()), (code, Some(status)));
+            assert!(
+                !error.message().contains("sent no email")
+                    && !error.message().contains("didn't send it"),
+                "{}",
+                error.message()
+            );
             assert_eq!(server.requests().len(), 2);
             let result = error.batch_result().unwrap();
             assert!(
