@@ -872,7 +872,8 @@ enum ConditionTarget<'a> {
         properties: &'a HashMap<String, serde_json::Value>,
         known_absent_keys: Option<KnownAbsentKeys<'a>>,
     },
-    /// Skip this condition (group type unknown or required group not passed in).
+    /// Skip this condition (group type unknown, or the required group key is
+    /// missing or empty).
     Skip,
     /// Required group properties not provided — try other conditions, surface
     /// inconclusive if nothing else matches.
@@ -915,7 +916,9 @@ fn resolve_condition_target<'a>(
             let Some(group_type) = group_type_mapping.get(&key) else {
                 return ConditionTarget::Skip;
             };
-            let Some(group_key) = groups.get(group_type) else {
+            // An empty group key counts as no key, matching the PostHog Rust
+            // backend's `is_usable_group_key`.
+            let Some(group_key) = groups.get(group_type).filter(|key| !key.is_empty()) else {
                 return ConditionTarget::Skip;
             };
             let known_absent_keys =
@@ -7199,6 +7202,101 @@ mod flag_dependency_context_tests {
                 FlagValue::Boolean(expected)
             );
         }
+    }
+
+    /// The empty string is the only unusable group key the `String`-typed
+    /// `groups` map can carry, and it counts as no key.
+    fn empty_group_key_inputs(group_properties: bool) -> Inputs {
+        Inputs {
+            groups: HashMap::from([("organization".to_string(), String::new())]),
+            group_properties: if group_properties {
+                HashMap::from([(
+                    "organization".to_string(),
+                    props(&[("tier", json!("enterprise"))]),
+                )])
+            } else {
+                HashMap::new()
+            },
+            ..Inputs::default()
+        }
+    }
+
+    #[test]
+    fn empty_group_key_skips_group_conditions() {
+        let org_flag = flag(
+            "org-flag",
+            Some(0),
+            json!({"properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group"}], "rollout_percentage": 100}),
+        );
+        let org_rollout = flag(
+            "org-rollout",
+            Some(0),
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        for with_properties in [false, true] {
+            let inputs = empty_group_key_inputs(with_properties);
+            for flag in [&org_flag, &org_rollout] {
+                assert_eq!(
+                    evaluate(flag, &[], &inputs).unwrap(),
+                    FlagValue::Boolean(false),
+                    "{} with group properties: {with_properties}",
+                    flag.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_group_key_leaves_the_person_condition_to_decide() {
+        let mixed: FeatureFlag = serde_json::from_value(json!({
+            "key": "mixed",
+            "active": true,
+            "filters": {"groups": [
+                {"properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group", "group_type_index": 0}], "rollout_percentage": 100, "aggregation_group_type_index": 0},
+                {"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}
+            ]}
+        }))
+        .unwrap();
+        for (plan, expected) in [("pro", true), ("free", false)] {
+            for with_properties in [false, true] {
+                let inputs = Inputs {
+                    person_properties: props(&[("plan", json!(plan))]),
+                    ..empty_group_key_inputs(with_properties)
+                };
+                assert_eq!(
+                    evaluate(&mixed, &[], &inputs).unwrap(),
+                    FlagValue::Boolean(expected),
+                    "plan {plan}, group properties: {with_properties}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn group_dependency_with_an_empty_group_key_is_false() {
+        let parent = flag(
+            "org-parent",
+            Some(0),
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "org-parent");
+        for with_properties in [false, true] {
+            assert_eq!(
+                evaluate(&child, &[&parent], &empty_group_key_inputs(with_properties)).unwrap(),
+                FlagValue::Boolean(false),
+                "group properties: {with_properties}"
+            );
+        }
+    }
+
+    #[test]
+    fn usable_group_key_without_group_properties_stays_inconclusive() {
+        let org_flag = flag(
+            "org-flag",
+            Some(0),
+            json!({"properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group"}], "rollout_percentage": 100}),
+        );
+        assert!(evaluate(&org_flag, &[], &Inputs::default()).is_err());
     }
 
     #[test]

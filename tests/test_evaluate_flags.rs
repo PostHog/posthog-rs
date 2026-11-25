@@ -205,6 +205,113 @@ fn known_absent_options(flag_keys: &[&str]) -> posthog::EvaluateFlagsOptions {
     options
 }
 
+/// Local definitions for an `organization` group flag, a mixed flag whose
+/// person condition matches `plan = pro`, and a person flag that depends on
+/// the group flag.
+fn empty_group_key_definitions_fixture() -> Value {
+    json!({
+        "flags": [
+            {
+                "key": "org-flag",
+                "active": true,
+                "filters": {
+                    "aggregation_group_type_index": 0,
+                    "groups": [{
+                        "properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group", "group_type_index": 0}],
+                        "rollout_percentage": 100
+                    }]
+                }
+            },
+            {
+                "key": "mixed",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group", "group_type_index": 0}],
+                            "rollout_percentage": 100,
+                            "aggregation_group_type_index": 0
+                        },
+                        {
+                            "properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}],
+                            "rollout_percentage": 100
+                        }
+                    ]
+                }
+            },
+            {
+                "key": "org-child",
+                "active": true,
+                "filters": {
+                    "groups": [{
+                        "properties": [{"key": "$feature/org-flag", "value": true, "operator": "exact", "type": "flag"}],
+                        "rollout_percentage": 100
+                    }]
+                }
+            }
+        ],
+        "group_type_mapping": {"0": "organization"},
+        "cohorts": {}
+    })
+}
+
+const EMPTY_GROUP_KEY_FLAG_KEYS: [&str; 3] = ["org-flag", "mixed", "org-child"];
+
+fn mock_empty_group_key_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200)
+            .json_body(empty_group_key_definitions_fixture());
+    })
+}
+
+/// An empty `organization` key, the only unusable group key the
+/// `String`-typed `groups` option can carry, with matching group properties.
+fn empty_group_key_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOptions {
+    let mut options = posthog::EvaluateFlagsOptions::default();
+    options.flag_keys = Some(
+        EMPTY_GROUP_KEY_FLAG_KEYS
+            .iter()
+            .map(|key| key.to_string())
+            .collect(),
+    );
+    options.groups = Some(
+        vec![("organization".to_string(), String::new())]
+            .into_iter()
+            .collect(),
+    );
+    options.person_properties = Some(
+        vec![("plan".to_string(), json!("pro"))]
+            .into_iter()
+            .collect(),
+    );
+    options.group_properties = Some(
+        vec![(
+            "organization".to_string(),
+            vec![("tier".to_string(), json!("enterprise"))]
+                .into_iter()
+                .collect(),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    options.only_evaluate_locally = only_evaluate_locally;
+    options
+}
+
+fn assert_empty_group_key_results(snapshot: &posthog::FeatureFlagEvaluations) {
+    use posthog::FlagValue;
+    assert_eq!(
+        snapshot.get_flag("org-flag"),
+        Some(FlagValue::Boolean(false))
+    );
+    assert_eq!(snapshot.get_flag("mixed"), Some(FlagValue::Boolean(true)));
+    assert_eq!(
+        snapshot.get_flag("org-child"),
+        Some(FlagValue::Boolean(false))
+    );
+}
+
 fn local_evaluation_client_options(base_url: String) -> posthog::ClientOptions {
     posthog::ClientOptionsBuilder::default()
         .api_key("test_api_key".to_string())
@@ -1361,6 +1468,33 @@ mod blocking {
     }
 
     #[test]
+    fn empty_group_key_resolves_locally_without_a_request() {
+        let server = MockServer::start();
+        mock_empty_group_key_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_path_mock(&server);
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        for only_evaluate_locally in [false, true] {
+            let snapshot = client
+                .evaluate_flags("user-1", empty_group_key_options(only_evaluate_locally))
+                .unwrap();
+            assert_empty_group_key_results(&snapshot);
+
+            let mut event = Event::new("checkout-started", "user-1");
+            event.with_flags(&snapshot);
+            client.capture(event);
+        }
+        client.flush();
+
+        flags_mock.assert_calls(0);
+        assert!(capture_mock.calls() > 0);
+    }
+
+    #[test]
     fn remote_fallback_sends_known_absent_keys() {
         let server = MockServer::start();
         mock_known_absent_definitions(&server);
@@ -2017,6 +2151,34 @@ mod async_tests {
             Some(FlagValue::Boolean(true))
         );
         flags_mock.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn empty_group_key_resolves_locally_without_a_request() {
+        let server = MockServer::start();
+        mock_empty_group_key_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_path_mock(&server);
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        for only_evaluate_locally in [false, true] {
+            let snapshot = client
+                .evaluate_flags("user-1", empty_group_key_options(only_evaluate_locally))
+                .await
+                .unwrap();
+            assert_empty_group_key_results(&snapshot);
+
+            let mut event = Event::new("checkout-started", "user-1");
+            event.with_flags(&snapshot);
+            client.capture(event);
+        }
+        client.flush().await;
+
+        flags_mock.assert_calls(0);
+        assert!(capture_mock.calls() > 0);
     }
 
     #[tokio::test]
