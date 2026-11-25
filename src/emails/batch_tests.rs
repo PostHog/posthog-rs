@@ -212,25 +212,38 @@ mod async_client {
     }
 
     #[tokio::test]
-    async fn a_throttled_retry_after_a_lost_answer_leaves_every_recipient_unconfirmed() {
-        let server = ScriptedServer::start(vec![Answer::lost(), whole_call(429, "quota_limited")]);
-        let client = client_for(&server).await;
-        let _time = virtual_time::start_at(start());
+    async fn a_refused_retry_after_a_lost_answer_leaves_every_recipient_unconfirmed() {
+        let not_found = Answer::json(
+            404,
+            json!({"type": "invalid_request", "code": "not_found", "detail": "Not found.", "attr": null}),
+        );
+        for (refusal, code, status) in [
+            (whole_call(429, "quota_limited"), "quota_limited", 429),
+            (not_found, "not_found", 404),
+        ] {
+            let server = ScriptedServer::start(vec![Answer::lost(), refusal]);
+            let client = client_for(&server).await;
+            let _time = virtual_time::start_at(start());
 
-        let error = client
-            .emails()
-            .batch(template(2).max_retries(1))
-            .await
-            .unwrap_err();
+            let error = client
+                .emails()
+                .batch(template(2).max_retries(1))
+                .await
+                .unwrap_err();
 
-        assert_eq!((error.code(), error.status()), ("quota_limited", Some(429)));
-        assert_eq!(server.requests().len(), 2);
-        let result = error.batch_result().unwrap();
-        assert!(result.results.iter().all(|r| {
-            r.status == Unconfirmed
-                && says_to_resend_with_its_key(r.error.as_ref())
-                && r.later_error.as_ref().unwrap().code() == "quota_limited"
-        }));
+            assert_eq!((error.code(), error.status()), (code, Some(status)));
+            assert_eq!(server.requests().len(), 2);
+            let result = error.batch_result().unwrap();
+            assert!(
+                result.results.iter().all(|r| {
+                    r.status == Unconfirmed
+                        && says_to_resend_with_its_key(r.error.as_ref())
+                        && r.later_error.as_ref().unwrap().code() == code
+                }),
+                "{}",
+                code
+            );
+        }
     }
 
     /// Paused time moves only by the runtime's timers, so the request times

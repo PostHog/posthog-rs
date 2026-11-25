@@ -541,7 +541,7 @@ async fn batch_unavailable_is_not_retried_and_says_to_send_singly() {
 #[tokio::test]
 async fn a_404_without_a_field_says_the_template_or_batch_sends_are_missing() {
     let template_fix = "Check template_id. If it is right, send each recipient on its own with send() and its idempotency_key until batch sends are available.";
-    let code_fix = "Send each recipient on its own with send() and its idempotency_key until batch sends are available.";
+    let code_fix = "If this project can send email from code, send each recipient on its own with send() and its idempotency_key until batch sends are available.";
     let forms: [(posthog::SendBatch, &str, &str); 2] = [
         (
             template(recipients(2)).into(),
@@ -550,7 +550,7 @@ async fn a_404_without_a_field_says_the_template_or_batch_sends_are_missing() {
         ),
         (
             CodeBatch::new("digest", "News", recipients(2)).text("x").into(),
-            "Batch sends from code aren't available for this project, so PostHog sent no email of this request.",
+            "Batch sends, or sending email from code, aren't available for this project, so PostHog sent no email of this request.",
             code_fix,
         ),
     ];

@@ -1559,8 +1559,8 @@ fn batch_reply_error(
             )
         } else {
             (
-                "Batch sends from code aren't available for this project, so PostHog sent no email of this request.",
-                "Send each recipient on its own with send() and its idempotency_key until batch sends are available.",
+                "Batch sends, or sending email from code, aren't available for this project, so PostHog sent no email of this request.",
+                "If this project can send email from code, send each recipient on its own with send() and its idempotency_key until batch sends are available.",
             )
         };
         fields.remove("why");
