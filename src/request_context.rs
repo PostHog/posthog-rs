@@ -67,7 +67,7 @@ impl HeldEvents {
     fn hold(&self, mut event: Event, transport: &Arc<TransportHandle>) -> Option<Event> {
         let first_drop = match &mut *self.lock() {
             Hold::Released(deferred) => {
-                fill(&mut event, deferred);
+                fill_properties(&mut event, deferred);
                 return Some(event);
             }
             Hold::Waiting { events, dropped } if events.len() >= MAX_HELD_EVENTS => {
@@ -89,7 +89,7 @@ impl HeldEvents {
         event.ensure_timestamp(chrono::Utc::now());
         match &mut *self.lock() {
             Hold::Released(deferred) => {
-                fill(&mut event, deferred);
+                fill_properties(&mut event, deferred);
                 transport.send_later(event);
             }
             Hold::Waiting { events, .. } if events.len() < MAX_HELD_EVENTS => {
@@ -117,7 +117,7 @@ impl HeldEvents {
             events
         };
         for (mut event, transport) in events {
-            fill(&mut event, &deferred);
+            fill_properties(&mut event, &deferred);
             transport.send_later(event);
         }
     }
@@ -126,13 +126,6 @@ impl HeldEvents {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-#[cfg(feature = "async-client")]
-fn fill(event: &mut Event, deferred: &HashMap<String, Value>) {
-    for (key, value) in deferred {
-        event.insert_prop_default(key.clone(), value.clone());
     }
 }
 
@@ -262,14 +255,7 @@ impl RequestContext {
         if !event.request_context_applied {
             event.apply_identify_style_person_default();
         }
-        let skip_session = event.event_name() == "$groupidentify";
-        for (key, value) in &self.properties {
-            // A session on `$groupidentify` would reassign the session to the group's distinct id.
-            if skip_session && key == "$session_id" {
-                continue;
-            }
-            event.insert_prop_default(key.clone(), value.clone());
-        }
+        fill_properties(event, &self.properties);
         for (key, value) in &self.options {
             event.insert_option_default(key.clone(), value.clone());
         }
@@ -323,6 +309,18 @@ pub(crate) fn current_distinct_id() -> Option<String> {
     #[cfg(not(feature = "async-client"))]
     {
         None
+    }
+}
+
+/// Fills the properties `event` leaves unset.
+fn fill_properties(event: &mut Event, properties: &HashMap<String, Value>) {
+    let skip_session = event.event_name() == "$groupidentify";
+    for (key, value) in properties {
+        // A session on `$groupidentify` would reassign the session to the group's distinct id.
+        if skip_session && key == "$session_id" {
+            continue;
+        }
+        event.insert_prop_default(key.clone(), value.clone());
     }
 }
 
@@ -461,11 +459,19 @@ mod held_tests {
         );
         let deferred = std::iter::once(("$session_id".to_string(), Value::from("ses_final")));
         held.release(deferred.collect());
-        let late = held.hold(Event::new_anon("late"), &transport);
-        let late = late.expect("a released scope sends at once");
-        assert_eq!(
-            late.properties().get("$session_id"),
-            Some(&Value::from("ses_final"))
-        );
+        let cases = [
+            ("late", Some(Value::from("ses_final"))),
+            ("$groupidentify", None),
+        ];
+        for (name, session) in cases.iter().cloned() {
+            let late = held.hold(Event::new_anon(name), &transport);
+            let late = late.expect("a released scope sends at once");
+            assert_eq!(
+                late.properties().get("$session_id").cloned(),
+                session,
+                "{}",
+                name
+            );
+        }
     }
 }
