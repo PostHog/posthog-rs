@@ -59,6 +59,10 @@ impl Client {
     /// Remember one group membership and attempt `$groupidentify` on every valid
     /// call, even for the same key without properties. Enables person processing
     /// without identifying the user. Opted-out/Never/disabled/closed clients no-op.
+    /// Changed membership replaces scoped flag targeting and reloads flags. Supplied
+    /// properties for the same membership merge without an immediate reload, leaving
+    /// out of flag targeting any value nested more than 100 levels deep; a load
+    /// already in flight continues with the new targeting.
     /// Membership is visible before hooks run; rejected events do not roll it back
     /// or schedule replay. Persistence and delivery remain asynchronous.
     pub fn group(&self, group: impl Into<Group>) {
@@ -69,17 +73,28 @@ impl Client {
     /// current client identity and nests properties under `$group_set`. Like group,
     /// every valid call enables processing and attempts an event unless opted out,
     /// Never, disabled or closed. Rejection does not roll back processing or replay.
+    /// Properties mirror into flag targeting only for the remembered key of this
+    /// type, without an immediate reload; a load already in flight continues with
+    /// the new targeting.
     pub fn group_identify(&self, group: impl Into<Group>) {
         self.capture_group(group, false);
     }
 
     /// Remove remembered membership locally without emitting an event or disabling
     /// person processing. Available while opted out or configured with Never.
+    /// Clears this type's flag targeting and reloads when membership was removed.
     /// Disabled/closed clients no-op; already captured events are unchanged.
     pub fn remove_group(&self, group_type: &str) {
-        self.change_context(|state| {
-            state.groups.remove(group_type);
+        if self.is_disabled() || self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let result = self.state.as_ref().unwrap().mutate(|state| {
+            state.flags.group_properties.remove(group_type);
+            state.groups.remove(group_type).is_some()
         });
+        if matches!(result, Ok((_, true))) {
+            self.reload_feature_flags();
+        }
     }
 
     /// Change registered properties or groups locally. An unchanged state is
@@ -118,12 +133,23 @@ impl Client {
                 return None;
             }
             state.person_processing = true;
-            if remember {
+            let changed = remember && state.groups.get(&group_type) != Some(&group_key);
+            if changed {
+                state.flags.group_properties.remove(&group_type);
                 state.groups.insert(group_type.clone(), group_key.clone());
             }
-            Some(state.clone())
+            // A direct profile update for another group must not target the
+            // currently remembered group of the same type.
+            if state.groups.get(&group_type) == Some(&group_key) && !properties.is_empty() {
+                state.flags.mirror_group(&group_type, &properties);
+                state.retarget_flags();
+            }
+            Some((state.clone(), changed))
         });
-        if let Ok((_, Some(snapshot))) = result {
+        if let Ok((_, Some((snapshot, changed)))) = result {
+            if changed {
+                self.reload_feature_flags();
+            }
             let mut event = Capture::new("$groupidentify");
             event.options = options;
             event

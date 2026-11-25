@@ -44,6 +44,7 @@ impl Drop for Directory {
 
 fn memory_config() -> Config {
     let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
     config.host = "http://127.0.0.1:1".into();
     config.persistence = Persistence::Memory;
     config.shutdown_timeout = Duration::from_millis(50);
@@ -355,7 +356,7 @@ fn startup_tolerates_additive_state_fields() {
     let directory = Directory::new();
     fs::create_dir_all(directory.scope()).unwrap();
     let path = directory.scope().join("state.json");
-    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","device_id":"device","identified":true,"person_processing":true,"opt_out":true,"registered":{},"groups":{},"session":null,"future_field":42}}"#).unwrap();
+    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","device_id":"device","identified":true,"person_processing":true,"opt_out":true,"registered":{},"groups":{},"flags":{"person_properties":{},"group_properties":{},"cache":null},"session":null,"future_field":42}}"#).unwrap();
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.get_anonymous_id(), "anonymous");
     assert_eq!(client.get_distinct_id(), "person");
@@ -371,12 +372,17 @@ fn startup_tolerates_additive_state_fields() {
 }
 
 #[test]
-fn startup_rewrites_invalid_optional_session_without_mutation() {
+fn startup_rewrites_invalid_optional_flags_and_session_without_mutation() {
     let directory = Directory::new();
     fs::create_dir_all(directory.scope()).unwrap();
     let mut snapshot = super::Snapshot::anonymous("restored-anonymous".into());
     snapshot.opt_out = Some(true);
+    snapshot
+        .flags
+        .person_properties
+        .insert("plan".into(), serde_json::json!("pro"));
     let mut value = serde_json::json!({"version":1,"state":snapshot});
+    value["state"]["flags"]["cache"] = serde_json::json!(false);
     value["state"]["session"] = serde_json::json!(false);
     let path = directory.scope().join("state.json");
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
@@ -387,6 +393,11 @@ fn startup_rewrites_invalid_optional_session_without_mutation() {
     assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
     let rewritten: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(rewritten["state"]["device_id"], "restored-anonymous");
+    assert_eq!(
+        rewritten["state"]["flags"]["person_properties"]["plan"],
+        "pro"
+    );
+    assert!(rewritten["state"]["flags"]["cache"].is_null());
     assert!(rewritten["state"]["session"].is_null());
     client.shutdown_blocking(None);
 }

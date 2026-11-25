@@ -48,9 +48,32 @@ pub(super) struct Delivery {
     pub(super) drain_timeout: Duration,
     executor: Mutex<Option<JoinHandle<()>>>,
     pub(super) executor_id: Option<ThreadId>,
+    /// One active feature flag request plus one replaceable pending request.
+    flags: Arc<super::flags::Slot>,
+    /// Sends feature flag requests, independent of event delivery.
+    requests: Option<super::requests::Worker>,
 }
 
 impl Delivery {
+    pub(super) fn close_requests(&self) {
+        self.flags.close();
+        if let Some(requests) = &self.requests {
+            requests.request_close();
+        }
+    }
+
+    pub(super) fn join_requests(&self) {
+        if let Some(requests) = &self.requests {
+            requests.join();
+        }
+    }
+
+    pub(super) fn on_request_worker(&self) -> bool {
+        self.requests
+            .as_ref()
+            .is_some_and(super::requests::Worker::on_worker_thread)
+    }
+
     pub(super) fn select_deadline(&self, at: Instant) {
         let mut deadline = self.deadline.lock().unwrap_or_else(|p| p.into_inner());
         if deadline.is_none() {
@@ -184,10 +207,11 @@ impl TransportHandle {
             }
         };
         let worker_id = Some(worker.thread().id());
-        Ok(Self {
+        let flags = Arc::new(super::flags::Slot::default());
+        let mut handle = Self {
             tx,
             len: pending,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(Some(worker)),
             full_warned: AtomicBool::new(false),
             max_queue_size,
@@ -196,13 +220,57 @@ impl TransportHandle {
             worker_id,
             delivery: Some(Delivery {
                 inbox,
-                deadline,
+                deadline: deadline.clone(),
                 drain_timeout: Duration::from_millis(options.shutdown_timeout_ms)
                     .min(MAX_SHUTDOWN_TIMEOUT),
                 executor: Mutex::new(Some(executor)),
                 executor_id,
+                flags: flags.clone(),
+                requests: None,
             }),
+        };
+        match super::requests::Worker::spawn(options, flags, handle.closed.clone(), deadline) {
+            Ok(requests) => {
+                handle.delivery.as_mut().expect("set above").requests = Some(requests);
+                Ok(handle)
+            }
+            Err(failure) => {
+                handle.request_close();
+                handle.join();
+                Err(failure)
+            }
+        }
+    }
+
+    /// Schedule a feature flag request: one runs at a time and one more waits,
+    /// replaced by any later request. The completion must not retain this
+    /// transport.
+    pub(crate) fn schedule_flags(&self, task: super::flags::Task) -> bool {
+        self.delivery.as_ref().is_some_and(|delivery| {
+            delivery.requests.as_ref().is_some_and(|requests| {
+                delivery
+                    .flags
+                    .enqueue(task, requests.sender(), &self.closed)
+            })
         })
+    }
+
+    /// Wait only for work preceding this FIFO position, not later requests.
+    #[cfg(test)]
+    pub(crate) fn request_barrier(&self) {
+        let requests = self
+            .delivery
+            .as_ref()
+            .and_then(|delivery| delivery.requests.as_ref())
+            .expect("stateful request worker");
+        assert!(
+            !requests.on_worker_thread(),
+            "request barrier cannot wait on itself"
+        );
+        let (tx, rx) = mpsc::channel();
+        requests.sender().send(Control::RequestBarrier(tx)).unwrap();
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("request worker did not reach bounded completion barrier");
     }
 
     /// Test seam: stateful delivery on the system clock with its own deadline.
@@ -277,8 +345,8 @@ impl TransportHandle {
         finished(&self.worker)
     }
 
-    /// Whether every delivery thread has finished. Never waits.
-    pub(crate) fn all_stopped(&self) -> bool {
+    /// Event delivery has stopped.
+    pub(crate) fn delivery_stopped(&self) -> bool {
         finished(&self.worker)
             && self
                 .delivery

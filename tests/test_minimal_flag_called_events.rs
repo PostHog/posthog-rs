@@ -6,8 +6,6 @@
 //! Uses a small recording HTTP server (rather than httpmock) so the exact
 //! `$feature_flag_called` request body can be inspected.
 
-#![cfg(feature = "async-client")]
-
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -46,6 +44,33 @@ const ALLOWLIST: &[&str] = &[
     "$is_server",
     "$os",
     "$os_version",
+    "$referring_domain",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_content",
+    "utm_term",
+    "gad_source",
+    "mc_cid",
+    "gclid",
+    "gclsrc",
+    "dclid",
+    "gbraid",
+    "wbraid",
+    "fbclid",
+    "msclkid",
+    "twclid",
+    "li_fat_id",
+    "igshid",
+    "ttclid",
+    "rdt_cid",
+    "epik",
+    "qclid",
+    "sccid",
+    "oppref",
+    "bfcid",
+    "irclid",
+    "_kx",
 ];
 
 fn flags_fixture(gate: bool) -> Value {
@@ -185,20 +210,29 @@ fn start_recording_server(gate: bool) -> RecordingServer {
 
 /// Drive one flag evaluation through the real client and return the properties
 /// of the captured `$feature_flag_called` event.
-async fn captured_flag_called_properties(
-    gate: bool,
-    flag_key: &str,
-) -> serde_json::Map<String, Value> {
+fn captured_flag_called_properties(gate: bool, flag_key: &str) -> serde_json::Map<String, Value> {
     let server = start_recording_server(gate);
 
     let options: posthog::ClientOptions = ("phc_test", server.base_url.as_str()).into();
-    let client = posthog::client(options).await;
-    let snapshot = client
-        .evaluate_flags("user-1", EvaluateFlagsOptions::default())
-        .await
-        .expect("evaluate_flags");
-    let _ = snapshot.is_enabled(flag_key);
-    client.flush().await;
+    #[cfg(feature = "async-client")]
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client = posthog::client(options).await;
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .expect("evaluate_flags");
+        let _ = snapshot.is_enabled(flag_key);
+        client.flush().await;
+    });
+    #[cfg(not(feature = "async-client"))]
+    {
+        let client = posthog::client(options);
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .expect("evaluate_flags");
+        let _ = snapshot.is_enabled(flag_key);
+        client.flush();
+    }
 
     let props = extract_flag_called(&server.captured.lock().unwrap())
         .expect("no $feature_flag_called event was captured after flush");
@@ -218,9 +252,9 @@ fn extract_flag_called(bodies: &[Vec<u8>]) -> Option<serde_json::Map<String, Val
     None
 }
 
-#[tokio::test]
-async fn remote_gate_on_no_experiment_sends_minimal_event() {
-    let props = captured_flag_called_properties(true, "plain").await;
+#[test]
+fn remote_gate_on_no_experiment_sends_minimal_event() {
+    let props = captured_flag_called_properties(true, "plain");
 
     for key in props.keys() {
         assert!(
@@ -240,9 +274,9 @@ async fn remote_gate_on_no_experiment_sends_minimal_event() {
     assert!(!props.contains_key("$feature/plain"));
 }
 
-#[tokio::test]
-async fn remote_experiment_linked_keeps_full_event() {
-    let props = captured_flag_called_properties(true, "experiment").await;
+#[test]
+fn remote_experiment_linked_keeps_full_event() {
+    let props = captured_flag_called_properties(true, "experiment");
     // Experiment-linked flags always keep the full shape for exposure analysis.
     assert_eq!(
         props.get("$feature_flag_has_experiment"),
@@ -251,9 +285,9 @@ async fn remote_experiment_linked_keeps_full_event() {
     assert_eq!(props.get("$feature/experiment"), Some(&json!("test")));
 }
 
-#[tokio::test]
-async fn remote_gate_off_keeps_full_event() {
-    let props = captured_flag_called_properties(false, "plain").await;
+#[test]
+fn remote_gate_off_keeps_full_event() {
+    let props = captured_flag_called_properties(false, "plain");
     // Gate absent -> full event even though the flag has no experiment.
     assert_eq!(
         props.get("$feature_flag_has_experiment"),

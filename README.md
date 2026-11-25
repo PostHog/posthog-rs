@@ -12,7 +12,7 @@ SDK usage examples and code snippets live in the official documentation so they 
 ## Documentation
 
 - [Rust library docs](https://posthog.com/docs/libraries/rust)
-- Stateful application client (`stateful` feature): local anonymous identity, identify, alias and reset, opt-in/opt-out consent, registered properties and groups, sessions (automatic or manual, optionally persisted), capture/screen, native hooks and persistent delivery.
+- Stateful application client (`stateful` feature): local anonymous identity, identify, alias and reset, opt-in/opt-out consent, registered properties and groups, sessions (automatic or manual, optionally persisted), feature flags (cached and persisted reads, bootstrap, preload/reload, listeners, person and group targeting), capture/screen, native hooks and persistent delivery.
 
 ## Request context
 

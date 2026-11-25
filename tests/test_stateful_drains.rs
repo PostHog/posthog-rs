@@ -15,6 +15,7 @@ use stateful_support::accept_all;
 
 fn config(server: &MockServer) -> Config {
     let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
     config.host = server.base_url();
     config.persistence = Persistence::Memory;
     config.flush_interval = Duration::from_secs(3600);
@@ -516,4 +517,99 @@ fn a_client_created_right_after_drop_following_a_hook_shutdown_restores_the_iden
     let restored = distinct_id_after_drop(client, &server, &directory);
     let _ = std::fs::remove_dir_all(&directory);
     assert_eq!(restored, id, "re-init right after Drop lost the identity");
+}
+
+/// A server that holds the default flags preload longer than the configured
+/// 1 s request timeout, so the request would time out and be retried.
+fn slow_flags(server: &MockServer) -> (httpmock::Mock<'_>, Config) {
+    let flags = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200)
+            .delay(Duration::from_secs(5))
+            .json_body(serde_json::json!({"flags": {}}));
+    });
+    let mut setup = config(server);
+    setup.preload_feature_flags = true;
+    setup.request_timeout = Duration::from_secs(1);
+    setup.shutdown_timeout = Duration::from_secs(10);
+    (flags, setup)
+}
+
+fn wait_for_preload(flags: &httpmock::Mock<'_>) {
+    let started = std::time::Instant::now();
+    while flags.calls() == 0 && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(flags.calls(), 1, "the preload request did not start");
+}
+
+// Shutdown discards a flags result, so it neither waits for the request nor
+// lets it retry, as Drop, posthog-ios and posthog-android do.
+#[test]
+fn shutdown_does_not_wait_for_or_retry_an_in_flight_flags_request() {
+    let server = MockServer::start();
+    let (flags, setup) = slow_flags(&server);
+    let client = Client::init_blocking(setup);
+    wait_for_preload(&flags);
+    let started = std::time::Instant::now();
+    let report = client.shutdown_blocking(None);
+    let elapsed = started.elapsed();
+    // Past the 1 s timeout plus the 300 ms backoff, when a retry would be sent.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(report.delivery, DeliveryOutcome::Stopped);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "shutdown waited {:?}",
+        elapsed
+    );
+    assert_eq!(
+        flags.calls(),
+        1,
+        "the flags request was retried after shutdown"
+    );
+}
+
+// Shutdown discards the result of an in-flight flags request, so a failure
+// that arrives afterwards is not reported either.
+#[test]
+fn a_flags_failure_arriving_after_shutdown_is_not_reported() {
+    let server = MockServer::start();
+    let flags = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        // 503 is not retried, so the failure is reported as soon as it arrives.
+        then.status(503).delay(Duration::from_millis(500));
+    });
+    let mut setup = config(&server);
+    setup.preload_feature_flags = true;
+    let (errors_tx, errors) = std::sync::mpsc::channel();
+    setup.on_error(move |_| {
+        let _ = errors_tx.send(());
+    });
+    let client = Client::init_blocking(setup);
+    wait_for_preload(&flags);
+    client.shutdown_blocking(None);
+    drop(client);
+    // Well past the delayed response.
+    assert!(
+        errors.recv_timeout(Duration::from_secs(2)).is_err(),
+        "on_error ran after shutdown returned"
+    );
+}
+
+#[cfg(feature = "async-client")]
+#[test]
+fn async_shutdown_does_not_wait_for_an_in_flight_flags_request() {
+    let server = MockServer::start();
+    let (flags, setup) = slow_flags(&server);
+    let client = Client::init_blocking(setup);
+    wait_for_preload(&flags);
+    let started = std::time::Instant::now();
+    let report = futures::executor::block_on(client.shutdown(None));
+    let elapsed = started.elapsed();
+    assert_eq!(report.delivery, DeliveryOutcome::Stopped);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "shutdown waited {:?}",
+        elapsed
+    );
 }

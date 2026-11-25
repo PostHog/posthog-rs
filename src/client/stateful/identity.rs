@@ -174,10 +174,18 @@ impl Client {
     /// Update identity synchronously, then attempt its event through ordinary capture.
     /// A different already-identified ID is ignored: call reset before switching users.
     /// Dropped/full events do not roll back local state or schedule linking-event replay.
+    /// Properties also merge into local flag targeting before hooks, independently
+    /// of analytics dedup/admission; a value nested more than 100 levels deep is
+    /// left out of flag targeting only. Anonymous identity changes reload flags; same-ID
+    /// promotion reloads only with properties. Identified property updates do not.
     /// Persistence and delivery are asynchronous; this is not an ingestion acknowledgment.
     /// While opted out, the identity still changes, but no `$identify` or `$set`
     /// event is sent, now or after opt-in.
     pub fn identify(&self, input: impl Into<Identify>) {
+        self.identify_with_reload(input, true);
+    }
+
+    fn identify_with_reload(&self, input: impl Into<Identify>, reload: bool) {
         let Some(_guard) = self.identity_guard("identify") else {
             return;
         };
@@ -200,6 +208,10 @@ impl Client {
             // Set only when an anonymous user becomes a different person.
             let anon_distinct_id = (was_anonymous && state.distinct_id != input.distinct_id)
                 .then(|| state.distinct_id.clone());
+            // A new person, or the first properties for one, retargets flags.
+            let refresh = was_anonymous && (anon_distinct_id.is_some() || has_properties);
+            // Local targeting is independent of analytics admission and dedup.
+            state.flags.mirror_person(&input.set, &input.set_once);
             if was_anonymous {
                 state.identify_as(input.distinct_id);
             } else if !has_properties {
@@ -223,7 +235,7 @@ impl Client {
                     .properties
                     .insert("$anon_distinct_id".into(), old_id.into());
             }
-            Some((event, state.clone(), !was_anonymous))
+            Some((event, state.clone(), refresh, !was_anonymous))
         });
         if reset_required {
             tracing::warn!("posthog-rs: reset before identifying a different user");
@@ -234,7 +246,10 @@ impl Client {
             );
         }
         match result {
-            Ok((_, Some((event, snapshot, deduplicate)))) => {
+            Ok((_, Some((event, snapshot, refresh, deduplicate)))) => {
+                if reload && refresh {
+                    self.reload_feature_flags();
+                }
                 self.capture_person(event, &snapshot, Some(fingerprint), deduplicate);
             }
             Err(UpdateError::Invalid) => {
@@ -285,7 +300,12 @@ impl Client {
     }
 
     /// Update the current person's properties without identifying. Empty maps are a no-op.
-    /// Only accepted updates are deduplicated. State enablement survives capture rejection.
+    /// Only accepted analytics updates are deduplicated. Local flag targeting merges
+    /// set-once absent keys, then set values, even when analytics is deduplicated or
+    /// rejected, leaving out values nested more than 100 levels deep. It does not
+    /// reload flags, even when a load is in flight: the next load uses the new
+    /// targeting, as in posthog-ios and posthog-android. State enablement
+    /// survives rejection.
     pub fn set_person_properties(&self, input: impl Into<PersonProperties>) {
         let Some(_guard) = self.identity_guard("set_person_properties") else {
             return;
@@ -301,6 +321,7 @@ impl Client {
         let fingerprint = properties_hash(&set, &set_once);
         let deduplicable = surely_processes_person(options.get(PROCESS_PERSON_PROFILE_OPT));
         let result = self.state.as_ref().unwrap().mutate(|state| {
+            state.flags.mirror_person(&set, &set_once);
             if deduplicable && state.person_properties == Some(fingerprint) {
                 return None;
             }
@@ -355,7 +376,7 @@ impl Client {
             return;
         }
         let id = uuid::Uuid::now_v7().to_string();
-        let _ = self.state.as_ref().unwrap().mutate(|state| {
+        let result = self.state.as_ref().unwrap().mutate(|state| {
             let generation = state.generation.wrapping_add(1);
             let device_id = state.device_id.clone();
             let sessions = state.sessions.cleared();
@@ -365,6 +386,9 @@ impl Client {
             state.generation = generation;
         });
         self.producer.as_ref().unwrap().clear_last_screen();
+        if result.is_ok() {
+            self.reload_feature_flags();
+        }
     }
 
     fn capture_person(
@@ -425,7 +449,8 @@ impl Client {
         } else {
             // As in posthog-ios, posthog-android and posthog-js: identify does
             // nothing with person profiles off, so the anonymous user stays.
-            self.identify(id);
+            // Reconcile setup identity without an intermediate flags request.
+            self.identify_with_reload(id, false);
         }
     }
 }

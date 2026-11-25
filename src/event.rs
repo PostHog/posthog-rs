@@ -32,7 +32,8 @@ pub(crate) const IDENTIFY_STYLE_EVENTS: [&str; 6] = [
 /// cheap, static, low-cardinality identity useful for platform/runtime
 /// breakdowns (`$lib`, `$lib_version`, `$os`, `$os_version`), processing-control
 /// sentinels (`$geoip_disable`, `$process_person_profile`, `$is_server`),
-/// correctness-required `$groups`, and linkage identifiers.
+/// correctness-required `$groups`, linkage identifiers, and already-registered
+/// session attribution.
 pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
     // Identity
     "$feature_flag",
@@ -62,6 +63,34 @@ pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
     "$lib",
     "$lib_version",
     "$is_server",
+    // Session attribution
+    "$referring_domain",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_content",
+    "utm_term",
+    "gad_source",
+    "mc_cid",
+    "gclid",
+    "gclsrc",
+    "dclid",
+    "gbraid",
+    "wbraid",
+    "fbclid",
+    "msclkid",
+    "twclid",
+    "li_fat_id",
+    "igshid",
+    "ttclid",
+    "rdt_cid",
+    "epik",
+    "qclid",
+    "sccid",
+    "oppref",
+    "bfcid",
+    "irclid",
+    "_kx",
     // Static platform/runtime identity
     "$os",
     "$os_version",

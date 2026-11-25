@@ -30,6 +30,13 @@
 
 mod config;
 mod consent;
+mod flag_bootstrap;
+mod flag_listeners;
+mod flag_reads;
+mod flag_report;
+mod flag_state;
+mod flag_targeting;
+mod flags;
 mod identity;
 #[cfg(feature = "async-client")]
 mod initialization;
@@ -41,7 +48,10 @@ mod storage;
 mod writer;
 
 pub use crate::client::on_error::InitializationFailure;
+pub use crate::client::transport::flags::LoadError as FeatureFlagLoadError;
 pub use config::Config;
+pub use flag_listeners::{FeatureFlagsSubscription, FeatureFlagsUpdate};
+pub use flag_reads::{FeatureFlagContext, FeatureFlagLookup, FeatureFlagResult};
 pub use identity::{Alias, Identify, PersonProfiles, PersonProperties};
 pub use producer::{Capture, CaptureOutcome, Screen};
 pub use properties::Group;
@@ -93,6 +103,12 @@ struct Snapshot {
     registered: HashMap<String, Value>,
     #[serde(default, deserialize_with = "lenient_groups")]
     groups: HashMap<String, String>,
+    // Records written before feature flags, or flags this build can't read,
+    // restore without targeting or a cache.
+    #[serde(default, deserialize_with = "flag_state::lenient_flags")]
+    flags: flag_state::FlagState,
+    #[serde(skip)]
+    flag_load: flag_state::FlagLoadState,
     // Records written before sessions lack this field and restore without one.
     #[serde(default)]
     session: Option<sessions::StoredSession>,
@@ -164,6 +180,8 @@ impl Snapshot {
             opt_out: None,
             registered: HashMap::new(),
             groups: HashMap::new(),
+            flags: flag_state::FlagState::default(),
+            flag_load: flag_state::FlagLoadState::default(),
             session: None,
             sessions: sessions::Sessions::default(),
             generation: 0,
@@ -183,6 +201,8 @@ impl Snapshot {
             opt_out,
             registered,
             groups,
+            flags,
+            flag_load: _,
             session,
             sessions: _,
             generation: _,
@@ -196,11 +216,13 @@ impl Snapshot {
             && *opt_out == other.opt_out
             && *registered == other.registered
             && *groups == other.groups
+            && *flags == other.flags
             && *session == other.session
     }
 
     fn is_valid(&self) -> bool {
-        within_depth(self.registered.values())
+        self.flags.is_valid()
+            && within_depth(self.registered.values())
             && self
                 .session
                 .as_ref()

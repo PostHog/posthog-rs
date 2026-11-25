@@ -1,0 +1,1189 @@
+use super::*;
+use crate::client::stateful::{Config, Persistence, Snapshot};
+use crate::feature_flag_evaluations::EvaluatedFlagRecord;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[path = "flag_bootstrap_tests.rs"]
+mod bootstrap;
+#[path = "flag_listener_tests.rs"]
+mod listeners;
+#[path = "flag_reads_tests.rs"]
+mod reads;
+
+const WAIT: Duration = Duration::from_secs(5);
+
+struct Server {
+    host: String,
+    requests: mpsc::Receiver<Value>,
+    release: mpsc::Sender<()>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl Server {
+    fn new(responses: Vec<(u16, Value)>) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let (requests_tx, requests) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            for (status, response) in responses {
+                loop {
+                    let deadline = Instant::now() + WAIT;
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error)
+                                if error.kind() == std::io::ErrorKind::WouldBlock
+                                    && Instant::now() < deadline =>
+                            {
+                                thread::sleep(Duration::from_millis(1))
+                            }
+                            Err(error) => panic!("bounded flag fixture accept: {}", error),
+                        }
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(WAIT)).unwrap();
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        assert!(header.len() < 8192);
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).unwrap();
+                        header.push(byte[0]);
+                    }
+                    let header = String::from_utf8(header).unwrap();
+                    if header.starts_with("GET /array/") && header.contains("/config HTTP/1.1\r\n")
+                    {
+                        let body = br#"{"hasFeatureFlags":true}"#;
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                            body.len()
+                        )
+                        .unwrap();
+                        stream.write_all(body).unwrap();
+                        continue;
+                    }
+                    assert!(header.starts_with("POST /flags/?v=2 HTTP/1.1\r\n"));
+                    let length: usize = header
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    requests_tx
+                        .send(serde_json::from_slice(&body).unwrap())
+                        .unwrap();
+                    release_rx.recv_timeout(WAIT).unwrap();
+                    let body = serde_json::to_vec(&response).unwrap();
+                    write!(
+                        stream,
+                        "HTTP/1.1 {} Test\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                        status,
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&body).unwrap();
+                    break;
+                }
+            }
+        });
+        Self {
+            host,
+            requests,
+            release,
+            thread,
+        }
+    }
+
+    fn request(&self) -> Value {
+        self.requests.recv_timeout(WAIT).unwrap()
+    }
+    fn respond(&self) {
+        self.release.send(()).unwrap();
+    }
+    fn finish(self) {
+        self.thread.join().unwrap();
+    }
+}
+
+fn config(host: &str) -> Config {
+    let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
+    config.host = host.into();
+    config.persistence = Persistence::Memory;
+    config.bootstrap_anonymous_id = Some("device".into());
+    config.flush_interval = Duration::from_secs(60);
+    config.shutdown_timeout = Duration::from_secs(1);
+    config.before_send(|_| None);
+    config
+}
+
+fn record(payload: Option<Value>) -> EvaluatedFlagRecord {
+    EvaluatedFlagRecord {
+        enabled: true,
+        variant: None,
+        payload,
+        id: None,
+        version: None,
+        reason: None,
+        locally_evaluated: false,
+        has_experiment: None,
+        minimal_flag_called_events: false,
+    }
+}
+
+fn loaded(records: HashMap<String, EvaluatedFlagRecord>, partial: bool) -> flags::LoadedFlags {
+    flags::LoadedFlags {
+        records,
+        request_id: Some("seed".into()),
+        evaluated_at: Some(1),
+        partial,
+        invalid_payloads: false,
+        failed: Default::default(),
+    }
+}
+
+fn seed(client: &Client) {
+    client
+        .state
+        .as_ref()
+        .unwrap()
+        .mutate(|state| {
+            state.flags.cache = Some(Arc::new(FlagCache::updated(
+                None,
+                Arc::new(FlagContext::current(state, false)),
+                loaded(
+                    HashMap::from([("old".into(), record(Some(json!("old-payload"))))]),
+                    false,
+                ),
+            )));
+        })
+        .unwrap();
+}
+
+#[test]
+fn public_reload_sends_exact_current_context_while_opted_out() {
+    let server = Server::new(vec![(
+        200,
+        json!({"featureFlags":{"checkout":false},"featureFlagPayloads":{"checkout":"\"123\""},"requestId":"wire"}),
+    )]);
+    let mut config = config(&server.host);
+    config.disable_geoip = true;
+    config.opt_out = true;
+    config.bootstrap_anonymous_id = None;
+    config.bootstrap_identified_id = Some("person".into());
+    config
+        .platform_context
+        .insert("not-targeting".into(), json!(true));
+    let client = Client::init_blocking(config);
+    let device = client.get_anonymous_id();
+    client.register(HashMap::from([("also-not-targeting".into(), json!(true))]));
+    client
+        .state
+        .as_ref()
+        .unwrap()
+        .mutate(|state| {
+            state.groups.insert("company".into(), "acme".into());
+            state
+                .flags
+                .person_properties
+                .insert("plan".into(), json!("pro"));
+            state
+                .flags
+                .group_properties
+                .insert("company".into(), HashMap::from([("tier".into(), json!(2))]));
+        })
+        .unwrap();
+    client.reload_feature_flags();
+    let request = server.request();
+    // Ordinary state access and mutation do not wait for the blocked HTTP call.
+    assert_eq!(client.get_distinct_id(), "person");
+    client.opt_in();
+    client.register(HashMap::from([("during-http".into(), json!(true))]));
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    assert_eq!(
+        request,
+        json!({"api_key":"phc_test","distinct_id":"person","$anon_distinct_id":device,"$device_id":device,
+        "groups":{"company":"acme"},"person_properties":{"plan":"pro"},"group_properties":{"company":{"tier":2}},"geoip_disable":true,
+        "evaluation_runtime":"client"})
+    );
+    let state = client.state.as_ref().unwrap().snapshot();
+    let cache = state.flags.cache.as_ref().unwrap();
+    assert!(!cache.flags["checkout"].record.enabled);
+    assert_eq!(cache.flags["checkout"].record.payload, Some(json!("123")));
+    assert_eq!(cache.flags["checkout"].context.distinct_id, "person");
+    assert_eq!(state.flag_load.completed.as_ref().unwrap().error, None);
+}
+
+#[test]
+fn property_change_in_flight_installs_the_response_and_follows_up() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"obsolete":true}})),
+        (200, json!({"featureFlags":{"current":true}})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    seed(&client);
+    client.reload_feature_flags();
+    server.request();
+    client.set_person_properties_for_flags(HashMap::from([("plan".into(), json!(2))]), Some(false));
+    server.respond();
+    // The response for the old targeting is installed, and the load continues
+    // with a follow-up for the current targeting instead of being lost.
+    let follow_up = server.request();
+    assert_eq!(follow_up["person_properties"]["plan"], json!(2));
+    let first = client.state.as_ref().unwrap().snapshot();
+    let first = first.flags.cache.as_ref().unwrap();
+    assert!(first.flags.contains_key("obsolete"));
+    assert!(first.context.person_properties.is_empty());
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    let state = client.state.as_ref().unwrap().snapshot();
+    let cache = state.flags.cache.as_ref().unwrap();
+    assert!(cache.flags.contains_key("current"));
+    assert!(!cache.flags.contains_key("obsolete"));
+    assert!(state.flag_load.completed.is_some());
+    assert_eq!(state.flag_load.request, 2);
+    assert_eq!(state.flag_load.revision, 1);
+}
+
+#[test]
+fn analytics_person_properties_in_flight_start_no_follow_up_request() {
+    let server = Server::new(vec![(200, json!({"featureFlags":{"first":true}}))]);
+    let client = Client::init_blocking(config(&server.host));
+    client.reload_feature_flags();
+    server.request();
+    client.set_person_properties(HashMap::from([("plan".into(), json!("pro"))]));
+    server.respond();
+    // The fixture stops listening, so a follow-up could not go unnoticed.
+    server.finish();
+    client.transport.as_ref().unwrap().request_barrier();
+    let state = client.state.as_ref().unwrap().snapshot();
+    // As in posthog-ios and posthog-android, the next load uses the new targeting.
+    assert_eq!(state.flags.person_properties["plan"], json!("pro"));
+    assert!(state
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("first"));
+    assert_eq!(state.flag_load.request, 1);
+}
+
+#[test]
+fn identified_set_in_flight_starts_no_follow_up_request() {
+    let server = Server::new(vec![(200, json!({"featureFlags":{"first":true}}))]);
+    let client = Client::init_blocking(config(&server.host));
+    client.identify("person");
+    server.request();
+    let mut update = crate::client::stateful::Identify::new("person");
+    update.set.insert("plan".into(), json!("pro"));
+    client.identify(update);
+    server.respond();
+    // The fixture stops listening, so a follow-up could not go unnoticed.
+    server.finish();
+    client.transport.as_ref().unwrap().request_barrier();
+    let state = client.state.as_ref().unwrap().snapshot();
+    // Like analytics person properties, `$set` waits for the next load.
+    assert_eq!(state.flags.person_properties["plan"], json!("pro"));
+    assert_eq!(state.flag_load.request, 1);
+}
+
+#[test]
+fn group_properties_in_flight_follow_up_for_the_current_membership() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"first":true}})),
+        (200, json!({"featureFlags":{"second":true}})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    client.group(crate::client::stateful::Group::new("company", "acme"));
+    server.request();
+    let mut update = crate::client::stateful::Group::new("company", "acme");
+    update.properties.insert("tier".into(), json!(2));
+    client.group_identify(update);
+    server.respond();
+    // Group properties are direct flag targeting, so the load follows up.
+    let follow_up = server.request();
+    assert_eq!(follow_up["group_properties"]["company"]["tier"], json!(2));
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    let state = client.state.as_ref().unwrap().snapshot();
+    assert_eq!(state.flag_load.request, 2);
+}
+
+#[test]
+fn group_targeting_change_in_flight_installs_the_response_and_follows_up() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"obsolete":true}})),
+        (200, json!({"featureFlags":{"current":true}})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    seed(&client);
+    client.reload_feature_flags();
+    server.request();
+    client.set_group_properties_for_flags(
+        "company",
+        HashMap::from([("tier".into(), json!(2))]),
+        Some(false),
+    );
+    server.respond();
+    // The response for the old targeting is installed, and the load continues
+    // with a follow-up for the current targeting instead of being lost.
+    let follow_up = server.request();
+    assert_eq!(follow_up["group_properties"]["company"]["tier"], json!(2));
+    let first = client.state.as_ref().unwrap().snapshot();
+    assert!(first
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("obsolete"));
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    let state = client.state.as_ref().unwrap().snapshot();
+    let cache = state.flags.cache.as_ref().unwrap();
+    assert!(cache.flags.contains_key("current"));
+    assert!(!cache.flags.contains_key("obsolete"));
+    assert!(state.flag_load.completed.is_some());
+    assert_eq!(state.flag_load.request, 2);
+    assert_eq!(state.flag_load.revision, 1);
+}
+
+#[test]
+fn identity_and_group_changes_keep_the_cache_until_replaced_and_reject_late_results() {
+    for operation in 0..4 {
+        let server = Server::new(vec![
+            (200, json!({"featureFlags":{"obsolete":true}})),
+            (200, json!({"featureFlags":{"current":true}})),
+        ]);
+        let client = Client::init_blocking(config(&server.host));
+        client
+            .state
+            .as_ref()
+            .unwrap()
+            .mutate(|state| {
+                state.groups.insert("company".into(), "old".into());
+            })
+            .unwrap();
+        client
+            .state
+            .as_ref()
+            .unwrap()
+            .mutate(|state| {
+                state.flags.group_properties.insert(
+                    "company".into(),
+                    HashMap::from([("old-target".into(), json!(true))]),
+                );
+            })
+            .unwrap();
+        seed(&client);
+        client.reload_feature_flags();
+        server.request();
+        match operation {
+            0 => client.identify("person"),
+            1 => client.group(("company", "new")),
+            2 => client.remove_group("company"),
+            _ => client.reset(),
+        }
+        let before_release = client.state.as_ref().unwrap().snapshot();
+        server.respond();
+        let current = server.request();
+        let after_obsolete = client.state.as_ref().unwrap().snapshot();
+        server.respond();
+        client.transport.as_ref().unwrap().request_barrier();
+        server.finish();
+        assert_eq!(current["distinct_id"], before_release.distinct_id);
+        assert_eq!(current["groups"], json!(before_release.groups));
+        // The late response is not applied. The earlier flags stay until the
+        // current one replaces them, except after reset, which clears them.
+        assert!(!after_obsolete
+            .flags
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.flags.contains_key("obsolete")));
+        assert!(after_obsolete.flag_load.completed.is_none());
+        assert_eq!(before_release.flags.cache.is_none(), operation == 3);
+        if operation != 0 {
+            assert!(!before_release
+                .flags
+                .group_properties
+                .contains_key("company"));
+        }
+        let after = client.state.as_ref().unwrap().snapshot();
+        let cache = after.flags.cache.as_ref().unwrap();
+        assert_eq!(cache.flags.len(), 1);
+        assert!(cache.flags.contains_key("current"));
+        assert!(after.flag_load.revision > 1);
+    }
+}
+
+#[test]
+fn concurrent_reloads_keep_only_latest_requested_context_and_install_the_active_result() {
+    let server = Server::new(vec![
+        (
+            200,
+            json!({"featureFlags":{"obsolete":true},"requestId":"old"}),
+        ),
+        (
+            200,
+            json!({"featureFlags":{"latest":true},"requestId":"new"}),
+        ),
+    ]);
+    let client = Arc::new(Client::init_blocking(config(&server.host)));
+    client.reload_feature_flags();
+    server.request();
+    let threads: Vec<_> = (0..4)
+        .map(|i| {
+            let client = client.clone();
+            thread::spawn(move || {
+                for j in 0..25 {
+                    client
+                        .state
+                        .as_ref()
+                        .unwrap()
+                        .mutate(|state| {
+                            state
+                                .flags
+                                .person_properties
+                                .insert("version".into(), json!([i, j]));
+                        })
+                        .unwrap();
+                    client.reload_feature_flags();
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    client
+        .state
+        .as_ref()
+        .unwrap()
+        .mutate(|state| {
+            state
+                .flags
+                .person_properties
+                .insert("version".into(), json!("latest"));
+        })
+        .unwrap();
+    client.reload_feature_flags();
+    server.respond();
+    let latest = server.request();
+    // The active response is installed for its own context before the pending
+    // request for the latest context runs.
+    let before_release = client.state.as_ref().unwrap().snapshot();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    let active = before_release.flags.cache.as_ref().unwrap();
+    assert_eq!(active.flags["obsolete"].request_id.as_deref(), Some("old"));
+    assert!(active.context.person_properties.is_empty());
+    assert_eq!(
+        before_release.flag_load.completed.as_ref().unwrap().request,
+        1
+    );
+    assert_eq!(latest["person_properties"]["version"], "latest");
+    let state = client.state.as_ref().unwrap().snapshot();
+    assert_eq!(state.flag_load.request, 102);
+    let cache = state.flags.cache.as_ref().unwrap();
+    assert_eq!(cache.flags.len(), 1);
+    assert_eq!(cache.flags["latest"].request_id.as_deref(), Some("new"));
+    assert_eq!(cache.context.person_properties["version"], "latest");
+}
+
+#[test]
+fn partial_merge_preserves_record_provenance_through_a_restart() {
+    let server = Server::new(vec![
+        (
+            200,
+            json!({"flags":{
+            "a":{"key":"a","enabled":true,"metadata":{"id":1,"version":1,"payload":"\"first\"","has_experiment":false}},
+            "b":{"key":"b","enabled":true,"metadata":{"id":2,"version":1,"payload":"null"}}
+        },"requestId":"first","evaluatedAt":10,"minimalFlagCalledEvents":true}),
+        ),
+        (
+            200,
+            json!({"flags":{
+            "a":{"key":"a","enabled":false,"failed":true},
+            "b":{"key":"b","enabled":false,"metadata":{"id":2,"version":2,"payload":"false"}},
+            "c":{"key":"c","enabled":true}
+        },"requestId":"second","evaluatedAt":20,"errorsWhileComputingFlags":true}),
+        ),
+        (200, json!({"featureFlags":{},"requestId":"empty"})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    client.reload_feature_flags();
+    server.request();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    let first = client.state.as_ref().unwrap().snapshot();
+    client
+        .state
+        .as_ref()
+        .unwrap()
+        .mutate(|state| {
+            state
+                .flags
+                .person_properties
+                .insert("plan".into(), json!("pro"));
+        })
+        .unwrap();
+    client.reload_feature_flags();
+    server.request();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    let second = client.state.as_ref().unwrap().snapshot();
+    let cache = second.flags.cache.as_ref().unwrap();
+    assert_eq!(cache.flags.len(), 3);
+    assert_eq!(
+        cache.flags["a"],
+        first.flags.cache.as_ref().unwrap().flags["a"]
+    );
+    assert_eq!(cache.flags["a"].request_id.as_deref(), Some("first"));
+    assert_eq!(cache.flags["a"].record.payload, Some(json!("first")));
+    assert!(cache.flags["a"].record.minimal_flag_called_events);
+    assert_eq!(cache.flags["b"].record.payload, Some(json!(false)));
+    assert!(!cache.flags["b"].record.enabled);
+    assert!(!cache.flags["b"].record.minimal_flag_called_events);
+    assert_eq!(cache.flags["b"].request_id.as_deref(), Some("second"));
+    assert_eq!(cache.flags["b"].evaluated_at, Some(20));
+    assert!(cache.flags["b"].partial);
+    assert_eq!(cache.flags["b"].context.person_properties["plan"], "pro");
+    // A restart restores every cached record, as the other SDKs do.
+    let restored: Snapshot =
+        serde_json::from_slice(&serde_json::to_vec(second.as_ref()).unwrap()).unwrap();
+    assert_eq!(restored.flag_load.revision, 0);
+    let restored = restored.flags.cache.as_ref().unwrap();
+    assert_eq!(restored.flags["a"], cache.flags["a"]);
+    assert_eq!(restored.flags["b"], cache.flags["b"]);
+    client.reload_feature_flags();
+    server.request();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    let final_state = client.state.as_ref().unwrap().snapshot();
+    assert!(final_state.flags.cache.as_ref().unwrap().flags.is_empty());
+    assert!(!final_state.flag_load.completed.as_ref().unwrap().partial);
+    // Earlier immutable snapshots remain coherent after replacement.
+    assert_eq!(first.flags.cache.as_ref().unwrap().flags.len(), 2);
+    assert_eq!(second.flags.cache.as_ref().unwrap().flags.len(), 3);
+}
+
+#[test]
+fn failures_retain_cache_and_completion_records_error_for_the_request() {
+    let server = Server::new(vec![
+        (503, json!({})),
+        (200, json!({"quotaLimited":["feature_flags"]})),
+        (200, json!({"flags":null})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    seed(&client);
+    let initial = client
+        .state
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .flags
+        .cache
+        .clone();
+    for error in [
+        flags::LoadError::Http(503),
+        flags::LoadError::QuotaLimited,
+        flags::LoadError::InvalidResponse,
+    ] {
+        client.reload_feature_flags();
+        server.request();
+        server.respond();
+        client.transport.as_ref().unwrap().request_barrier();
+        let state = client.state.as_ref().unwrap().snapshot();
+        assert_eq!(state.flags.cache, initial);
+        assert_eq!(
+            state.flag_load.completed.as_ref().unwrap().error,
+            Some(error)
+        );
+        assert_eq!(
+            state.flag_load.completed.as_ref().unwrap().request,
+            state.flag_load.request
+        );
+    }
+    server.finish();
+}
+
+#[test]
+fn close_from_capture_hook_rejects_active_flag_completion() {
+    let server = Server::new(vec![(200, json!({"featureFlags":{"late":true}}))]);
+    let weak = Arc::new(Mutex::new(std::sync::Weak::<Client>::new()));
+    let in_hook = weak.clone();
+    let mut config = config(&server.host);
+    // Replace the event-dropping fixture hook so closure actually runs.
+    config.before_send.clear();
+    config.before_send(move |event| {
+        if let Some(client) = in_hook.lock().unwrap().upgrade() {
+            assert_eq!(
+                client.shutdown_blocking(Some(Duration::ZERO)).delivery,
+                crate::client::stateful::DeliveryOutcome::Deferred
+            );
+        }
+        Some(event)
+    });
+    let client = Arc::new(Client::init_blocking(config));
+    *weak.lock().unwrap() = Arc::downgrade(&client);
+    client.reload_feature_flags();
+    server.request();
+    let outcome = client.capture("close");
+    server.respond();
+    client.shutdown_blocking(None);
+    server.finish();
+    assert_eq!(outcome, crate::client::stateful::CaptureOutcome::Closed);
+    let state = client.state.as_ref().unwrap().snapshot();
+    assert!(state.flags.cache.is_none());
+    assert!(state.flag_load.completed.is_none());
+}
+
+#[test]
+fn flag_load_revision_changes_only_with_effective_context_and_rejected_mutations_are_atomic() {
+    let client = Client::init_blocking(config("http://127.0.0.1:1"));
+    client.flush_blocking();
+    seed(&client);
+    client.register(HashMap::from([("analytics-only".into(), json!(1))]));
+    client.opt_out();
+    client.opt_in();
+    client.get_session_id();
+    client.identify("device"); // Identified bit alone is not an evaluation input.
+    let writer = client.state.as_ref().unwrap();
+    assert_eq!(writer.snapshot().flag_load.revision, 0);
+    assert!(writer.snapshot().flags.cache.is_some());
+    writer
+        .mutate(|state| state.flags.person_properties.insert("p".into(), json!(1)))
+        .unwrap();
+    assert_eq!(writer.snapshot().flag_load.revision, 1);
+    writer
+        .mutate(|state| state.flags.person_properties.insert("p".into(), json!(1)))
+        .unwrap();
+    assert_eq!(writer.snapshot().flag_load.revision, 1);
+    let before = writer.snapshot();
+    assert!(writer
+        .mutate(|state| {
+            state.distinct_id = "rejected".into();
+            state.anonymous_id.clear();
+        })
+        .is_err());
+    assert_eq!(writer.snapshot(), before);
+    writer
+        .mutate(|state| {
+            state
+                .flags
+                .group_properties
+                .insert("company".into(), HashMap::from([("p".into(), json!(1))]))
+        })
+        .unwrap();
+    assert_eq!(writer.snapshot().flag_load.revision, 2);
+    client.reset();
+    assert_eq!(writer.snapshot().flag_load.revision, 3);
+    assert!(writer.snapshot().flags.cache.is_none());
+    let disabled = Client::init_blocking(Config::new(""));
+    disabled.reload_feature_flags();
+    client.shutdown_blocking(None);
+    client.reload_feature_flags();
+}
+
+#[test]
+fn a_queued_refresh_installs_the_active_response_and_reset_discards_it() {
+    for reset in [false, true] {
+        let server = Server::new(vec![
+            (200, json!({"featureFlags":{"old":true}})),
+            (200, json!({"featureFlags":{"new":true}})),
+        ]);
+        let client = Client::init_blocking(config(&server.host));
+        client.reload_feature_flags();
+        server.request();
+        let first = client.state.as_ref().unwrap().snapshot();
+        if reset {
+            client.reset();
+        } else {
+            client.reload_feature_flags();
+        }
+        let pending = client.state.as_ref().unwrap().snapshot();
+        if reset {
+            assert_eq!(first.flag_load.request, pending.flag_load.request);
+            assert_ne!(first.flag_load.revision, pending.flag_load.revision);
+        } else {
+            assert_ne!(first.flag_load.request, pending.flag_load.request);
+            assert_eq!(first.flag_load.revision, pending.flag_load.revision);
+        }
+        server.respond();
+        server.request();
+        let intermediate = client.state.as_ref().unwrap().snapshot();
+        server.respond();
+        client.transport.as_ref().unwrap().request_barrier();
+        server.finish();
+        // Reset changes the identity, so its earlier response never installs.
+        // A refresh for the same identity still installs the active response.
+        assert_eq!(
+            intermediate
+                .flags
+                .cache
+                .as_ref()
+                .is_some_and(|cache| cache.flags.contains_key("old")),
+            !reset
+        );
+        assert_eq!(intermediate.flag_load.completed.is_some(), !reset);
+        let cache = client
+            .state
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .flags
+            .cache
+            .clone()
+            .unwrap();
+        assert_eq!(cache.flags.len(), 1);
+        assert!(cache.flags.contains_key("new"));
+    }
+}
+
+#[test]
+fn a_targeting_change_reverted_in_flight_installs_the_response() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"old":true}})),
+        (200, json!({"featureFlags":{"new":true}})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    client.reload_feature_flags();
+    server.request();
+    let writer = client.state.as_ref().unwrap();
+    client.set_person_properties_for_flags(
+        HashMap::from([("plan".into(), json!("pro"))]),
+        Some(false),
+    );
+    client.reset_person_properties_for_flags(Some(false));
+    server.respond();
+    // The revision moved, so a follow-up runs even though the targeting matches again.
+    let follow_up = server.request();
+    assert_eq!(follow_up["person_properties"], json!({}));
+    assert!(writer
+        .snapshot()
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("old"));
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    assert_eq!(writer.snapshot().flag_load.revision, 2);
+    assert!(writer
+        .snapshot()
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("new"));
+}
+
+#[test]
+fn public_restart_restores_every_cached_record() {
+    let path = std::env::temp_dir().join(format!("posthog-flag-restore-{}", uuid::Uuid::now_v7()));
+    let server = Server::new(vec![
+        (
+            200,
+            json!({"featureFlags":{"old":true},"requestId":"first"}),
+        ),
+        (
+            200,
+            json!({"featureFlags":{"fresh":false},"featureFlagPayloads":{"fresh":null},"errorsWhileComputingFlags":true,"requestId":"second"}),
+        ),
+    ]);
+    let make_config = || {
+        let mut config = config(&server.host);
+        config.persistence = Persistence::Directory(path.clone());
+        config
+    };
+    let client = Client::init_blocking(make_config());
+    client.reload_feature_flags();
+    server.request();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    client
+        .state
+        .as_ref()
+        .unwrap()
+        .mutate(|state| {
+            state
+                .flags
+                .person_properties
+                .insert("plan".into(), json!("pro"))
+        })
+        .unwrap();
+    client.reload_feature_flags();
+    server.request();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    assert_eq!(
+        client
+            .state
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .flags
+            .cache
+            .as_ref()
+            .unwrap()
+            .flags
+            .len(),
+        2
+    );
+    assert_eq!(
+        client.shutdown_blocking(None).state,
+        crate::client::stateful::PersistenceOutcome::Persisted
+    );
+    drop(client);
+    let restored = Client::init_blocking(make_config());
+    let snapshot = restored.state.as_ref().unwrap().snapshot();
+    let cache = snapshot.flags.cache.as_ref().unwrap();
+    // Records evaluated with older targeting are restored too, as the other
+    // SDKs restore their whole cache.
+    assert_eq!(cache.flags.len(), 2);
+    assert!(cache.flags["old"].record.enabled);
+    assert!(!cache.flags["fresh"].record.enabled);
+    assert_eq!(cache.flags["fresh"].record.payload, Some(Value::Null));
+    assert_eq!(cache.flags["fresh"].request_id.as_deref(), Some("second"));
+    assert_eq!(
+        cache.flags["fresh"].context.person_properties["plan"],
+        "pro"
+    );
+    assert_eq!(
+        restored.shutdown_blocking(None).state,
+        crate::client::stateful::PersistenceOutcome::Persisted
+    );
+    drop(restored);
+    server.finish();
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn fitting_partial_replacements_are_admitted_in_either_hash_iteration_order() {
+    let context = Arc::new(FlagContext::current(
+        &Snapshot::anonymous("device".into()),
+        false,
+    ));
+    for grows_first in [false, true] {
+        let mut replacements = HashMap::from([
+            ("a".to_string(), record(None)),
+            ("b".to_string(), record(None)),
+        ]);
+        // Select sizes from the actual iteration order, without changing its keys
+        // or capacity. Both paths are deterministic regardless of randomized hash seeds.
+        let keys: Vec<_> = replacements.keys().cloned().collect();
+        let grow = &keys[usize::from(!grows_first)];
+        let shrink = &keys[usize::from(grows_first)];
+        let old = HashMap::from([
+            (grow.clone(), record(Some(json!("x".repeat(400 * 1024))))),
+            (shrink.clone(), record(Some(json!("x".repeat(1400 * 1024))))),
+        ]);
+        let previous = FlagCache::updated(None, context.clone(), loaded(old, false));
+        replacements.get_mut(grow).unwrap().payload = Some(json!("x".repeat(800 * 1024)));
+        replacements.get_mut(shrink).unwrap().payload = Some(json!(""));
+        let updated =
+            FlagCache::updated(Some(&previous), context.clone(), loaded(replacements, true));
+        assert_eq!(updated.flags.len(), 2);
+        assert_eq!(
+            updated.flags[grow]
+                .record
+                .payload
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .len(),
+            800 * 1024
+        );
+        assert_eq!(updated.flags[shrink].record.payload, Some(json!("")));
+        assert_eq!(
+            previous.flags[shrink]
+                .record
+                .payload
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .len(),
+            1400 * 1024
+        );
+    }
+}
+
+fn preload_config(host: &str) -> Config {
+    let mut config = Config::new("phc_test");
+    assert!(config.preload_feature_flags);
+    config.host = host.into();
+    config.persistence = Persistence::Memory;
+    config.bootstrap_anonymous_id = Some("device".into());
+    config.shutdown_timeout = Duration::from_secs(1);
+    config
+}
+
+fn preload_readiness(asynchronous: bool) {
+    let server = Server::new(vec![(
+        200,
+        json!({"featureFlags":{"ready":false},"featureFlagPayloads":{"ready":null}}),
+    )]);
+    let mut config = preload_config(&server.host);
+    config.opt_out = true;
+    config.person_profiles = crate::stateful::PersonProfiles::Never;
+    config.before_send(|_| panic!("preload must not emit analytics"));
+    let (tx, rx) = mpsc::channel();
+    let initializing = thread::spawn(move || {
+        #[cfg(feature = "async-client")]
+        if asynchronous {
+            tx.send(futures::executor::block_on(Client::init(config)))
+                .unwrap();
+            return;
+        }
+        assert!(!asynchronous);
+        tx.send(Client::init_blocking(config)).unwrap();
+    });
+    let request = server.request();
+    // The response remains gated while both constructors must return ready.
+    let ready = rx.recv_timeout(WAIT);
+    if let Ok(client) = &ready {
+        assert!(!client.is_disabled());
+        assert!(client
+            .state
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .flags
+            .cache
+            .is_none());
+        client.register(HashMap::from([("during-preload".into(), json!(true))]));
+        assert_eq!(
+            client.capture("out"),
+            crate::stateful::CaptureOutcome::OptedOut
+        );
+    }
+    server.respond();
+    initializing.join().unwrap();
+    let client = ready.expect("initialization must not wait for a flags response");
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    assert_eq!(
+        request,
+        json!({"api_key":"phc_test", "distinct_id":"device",
+        "$anon_distinct_id":"device", "$device_id":"device", "geoip_disable":false,
+        "person_properties":{}, "group_properties":{}, "groups":{},
+        "evaluation_runtime":"client"})
+    );
+    let snapshot = client.state.as_ref().unwrap().snapshot();
+    assert_eq!(snapshot.flag_load.request, 1);
+    let record = &snapshot.flags.cache.as_ref().unwrap().flags["ready"].record;
+    assert!(!record.enabled);
+    assert_eq!(record.payload, Some(Value::Null));
+    assert!(client.is_opt_out());
+    assert_eq!(client.peek_session_id(), None);
+}
+
+#[test]
+fn default_preload_does_not_delay_blocking_readiness_or_require_analytics_consent() {
+    preload_readiness(false);
+}
+
+#[cfg(feature = "async-client")]
+#[test]
+fn default_preload_does_not_delay_runtime_free_async_readiness() {
+    preload_readiness(true);
+}
+
+#[test]
+fn preload_uses_restored_targeting_after_identified_bootstrap_reconciliation() {
+    let server = Server::new(vec![(200, json!({"featureFlags":{"current":true}}))]);
+    let directory = std::env::temp_dir().join(format!("posthog-preload-{}", uuid::Uuid::now_v7()));
+    let mut initial = preload_config(&server.host);
+    initial.preload_feature_flags = false;
+    initial.persistence = Persistence::Directory(directory.clone());
+    let client = Client::init_blocking(initial);
+    client.set_person_properties_for_flags(
+        HashMap::from([("plan".into(), json!("pro"))]),
+        Some(false),
+    );
+    seed(&client);
+    assert_eq!(
+        client.shutdown_blocking(None).state,
+        crate::stateful::PersistenceOutcome::Persisted
+    );
+    drop(client);
+    let mut next = preload_config(&server.host);
+    next.persistence = Persistence::Directory(directory.clone());
+    next.bootstrap_anonymous_id = None;
+    next.bootstrap_identified_id = Some("person".into());
+    next.opt_out = true;
+    let client = Client::init_blocking(next);
+    let request = server.request();
+    let before = client.state.as_ref().unwrap().snapshot();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    assert_eq!(request["distinct_id"], "person");
+    assert_eq!(request["$anon_distinct_id"], "device");
+    assert_eq!(request["$device_id"], "device");
+    assert_eq!(request["person_properties"], json!({"plan":"pro"}));
+    // The restored flags stay until the identified user's response arrives.
+    assert!(before.flags.cache.is_some());
+    assert_eq!(before.flag_load.request, 1);
+    assert!(client
+        .state
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("current"));
+    client.shutdown_blocking(None);
+    drop(client);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn preload_failure_reports_without_disabling_the_ready_client() {
+    let server = Server::new(vec![(503, json!({}))]);
+    let mut config = preload_config(&server.host);
+    let (tx, rx) = mpsc::channel();
+    config.on_error(move |error| {
+        tx.send(matches!(error, crate::PostHogError::FeatureFlags(_)))
+            .unwrap();
+    });
+    let client = Client::init_blocking(config);
+    server.request();
+    assert!(!client.is_disabled());
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    assert!(rx.recv_timeout(WAIT).unwrap());
+    assert!(!client.is_disabled());
+    assert_eq!(
+        client
+            .state
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .flag_load
+            .completed
+            .as_ref()
+            .unwrap()
+            .error,
+        Some(flags::LoadError::Http(503))
+    );
+}
+
+#[test]
+fn targeting_change_in_flight_installs_the_completed_response_then_follows_up() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"first":true}})),
+        (200, json!({"featureFlags":{"second":true}})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    {
+        let seen = seen.clone();
+        client.on_feature_flags(move |update| {
+            let mut keys: Vec<_> = update
+                .flags
+                .as_ref()
+                .map(|f| f.keys().cloned().collect())
+                .unwrap_or_default();
+            keys.sort();
+            seen.lock().unwrap().push(keys);
+        });
+    }
+    client.reload_feature_flags();
+    server.request();
+    client
+        .set_person_properties_for_flags(HashMap::from([("level".into(), json!(1))]), Some(false));
+    server.respond();
+    let follow_up = server.request();
+    assert_eq!(follow_up["person_properties"]["level"], json!(1));
+    let first = client.state.as_ref().unwrap().snapshot();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    let after = client.state.as_ref().unwrap().snapshot();
+    assert!(after
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("second"));
+    let first_cache = first
+        .flags
+        .cache
+        .as_ref()
+        .expect("the completed /flags response was discarded");
+    assert!(first_cache.flags.contains_key("first"));
+    // The installed result names the targeting that produced it.
+    assert!(first_cache.flags["first"]
+        .context
+        .person_properties
+        .is_empty());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![vec!["first".to_string()], vec!["second".to_string()]]
+    );
+}
+
+#[test]
+fn reload_in_flight_installs_the_completed_response_before_the_pending_one() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"first":true}})),
+        (200, json!({"featureFlags":{"second":true}})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    client.reload_feature_flags();
+    server.request();
+    client.set_person_properties_for_flags(HashMap::from([("level".into(), json!(1))]), None);
+    server.respond();
+    let pending = server.request();
+    assert_eq!(pending["person_properties"]["level"], json!(1));
+    let first = client.state.as_ref().unwrap().snapshot();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    assert!(
+        first
+            .flags
+            .cache
+            .as_ref()
+            .is_some_and(|c| c.flags.contains_key("first")),
+        "the completed /flags response was discarded because a reload was queued"
+    );
+    let after = client.state.as_ref().unwrap().snapshot();
+    assert!(after
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("second"));
+    assert_eq!(after.flag_load.request, 2);
+}

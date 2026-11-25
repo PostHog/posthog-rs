@@ -108,7 +108,9 @@ impl DrainReport {
 /// Setup always returns this type. Invalid configuration or local delivery
 /// startup failure disables the client and reports through `on_error`.
 /// Storage failures instead allow enabled memory-backed operation. No network
-/// request is required to establish readiness.
+/// request is required to establish readiness. Feature flag requests run
+/// independently of event delivery, on a bounded request worker that does not
+/// own event storage.
 ///
 /// Persistent namespaces permit only one live owner. A second client with the
 /// same storage scope uses a generated or bootstrap identity in memory instead
@@ -127,6 +129,7 @@ pub struct Client {
     shutdown_timeout: Duration,
     shutdown: Option<shutdown::Shutdown>,
     pub(super) producer: Option<Producer>,
+    pub(super) flag_loader: Option<super::flags::FlagLoader>,
     pub(super) state: Option<StateWriter>,
     pub(super) transport: Option<TransportHandle>,
     pub(super) closed: AtomicBool,
@@ -280,6 +283,10 @@ impl Client {
             shutdown: Some(shutdown),
             shutdown_timeout: config.shutdown_timeout,
             producer: Some(producer),
+            flag_loader: Some(super::flags::FlagLoader::new(
+                config.transport_options(),
+                config.on_feature_flags.clone(),
+            )),
             state: Some(state),
             transport: Some(transport),
             closed: AtomicBool::new(false),
@@ -288,6 +295,16 @@ impl Client {
             if let Some(id) = &config.bootstrap_identified_id {
                 client.reconcile_identified_bootstrap(id);
             }
+        }
+        client.apply_flag_bootstrap(&config);
+        client
+            .flag_loader
+            .as_ref()
+            .unwrap()
+            .listeners
+            .notify_ready(&client.state.as_ref().unwrap().access());
+        if config.preload_feature_flags {
+            client.reload_feature_flags();
         }
         client
     }
@@ -308,6 +325,7 @@ impl Client {
             shutdown: None,
             shutdown_timeout: config.shutdown_timeout,
             producer: None,
+            flag_loader: None,
             state: None,
             transport: None,
             closed: AtomicBool::new(false),
@@ -407,14 +425,19 @@ impl Client {
         }
     }
 
-    /// A drain from a client worker or a capture hook only requests its work:
+    /// A drain from a client worker, a capture hook or a flag callback only
+    /// requests its work:
     /// waiting there would block the work it waits for.
     fn must_defer_drain(&self) -> bool {
-        self.on_worker_thread() || self.in_capture()
+        self.on_worker_thread() || self.in_capture() || self.in_flag_callback()
     }
 
+    /// Event delivery and the state writer have stopped. Shutdown does not wait
+    /// for the flag request worker: it discards a flags result, so an in-flight
+    /// request is abandoned, as `Drop`, posthog-ios and posthog-android do.
     fn workers_stopped(&self) -> bool {
-        self.transport.as_ref().unwrap().all_stopped() && self.state.as_ref().unwrap().is_stopped()
+        self.transport.as_ref().unwrap().delivery_stopped()
+            && self.state.as_ref().unwrap().is_stopped()
     }
 
     /// Report a shutdown once its wait ends, completing it if every worker stopped.
@@ -424,7 +447,7 @@ impl Client {
         }
         DrainReport {
             state: self.state.as_ref().unwrap().shutdown_outcome().into(),
-            delivery: if self.transport.as_ref().unwrap().all_stopped() {
+            delivery: if self.transport.as_ref().unwrap().delivery_stopped() {
                 DeliveryOutcome::Stopped
             } else {
                 DeliveryOutcome::TimedOut
@@ -446,6 +469,8 @@ impl Client {
                 .as_ref()
                 .unwrap()
                 .request_close_before(deadline);
+            let callbacks = self.flag_loader.as_ref().unwrap().listeners.close();
+            drop(callbacks);
         }
     }
 
@@ -453,6 +478,8 @@ impl Client {
     /// `None` uses Config::shutdown_timeout; `Some` overrides it (at most one day).
     /// Repeated calls share that deadline. Already-started work owns its resources
     /// through completion; return does not promise every event reached disk.
+    /// An in-flight feature flags request is not awaited or retried; its result
+    /// is discarded.
     /// Application callback-capture destructors may run synchronously and block
     /// outside the SDK-controlled waiting bound. Worker callbacks and synchronous
     /// capture hooks request closure but return Deferred instead of waiting.

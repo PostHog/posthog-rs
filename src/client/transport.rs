@@ -43,11 +43,17 @@ use crate::Event;
 #[path = "transport_delivery.rs"]
 mod delivery;
 #[cfg(feature = "stateful")]
+#[path = "transport_flags.rs"]
+pub(super) mod flags;
+#[cfg(feature = "stateful")]
 #[path = "transport_inbox.rs"]
 mod inbox;
 #[cfg(feature = "stateful")]
 #[path = "transport_queue.rs"]
 mod queue;
+#[cfg(feature = "stateful")]
+#[path = "transport_requests.rs"]
+mod requests;
 #[cfg(all(test, feature = "stateful"))]
 #[path = "transport_startup_tests.rs"]
 mod startup_tests;
@@ -97,6 +103,13 @@ pub(crate) enum Control {
     /// Stateful delivery: the executor finished a request.
     #[cfg(feature = "stateful")]
     Sent(Box<queue::Sent>),
+    /// Stateful feature flags: run the slot's pending request. Only the
+    /// request worker receives it.
+    #[cfg(feature = "stateful")]
+    Flags(Arc<flags::Slot>),
+    /// Test-only: signal once the request worker reaches this point.
+    #[cfg(all(test, feature = "stateful"))]
+    RequestBarrier(mpsc::Sender<()>),
 }
 
 /// Completion signal handed to the worker so the caller can wait for a flush or
@@ -149,8 +162,9 @@ pub(crate) struct TransportHandle {
     tx: mpsc::Sender<Control>,
     /// Pending `Capture` events not yet pulled by the worker. Gates the bounded queue.
     len: Arc<AtomicUsize>,
-    /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control sends.
-    closed: AtomicBool,
+    /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control
+    /// sends. Shared with the stateful request worker.
+    closed: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
     /// Latches the single "queue full" warning so a full queue doesn't spam logs.
     full_warned: AtomicBool,
@@ -295,7 +309,7 @@ impl TransportHandle {
         Self {
             tx,
             len,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(worker),
             full_warned: AtomicBool::new(false),
             max_queue_size,
@@ -434,7 +448,12 @@ impl TransportHandle {
     /// Mark closed. Returns `true` for the caller that won the transition (so
     /// shutdown is idempotent and only one caller drives teardown).
     pub(crate) fn begin_close(&self) -> bool {
-        !self.closed.swap(true, Ordering::AcqRel)
+        let first = !self.closed.swap(true, Ordering::AcqRel);
+        #[cfg(feature = "stateful")]
+        if let Some(delivery) = &self.delivery {
+            delivery.close_requests();
+        }
+        first
     }
 
     /// Synchronously close and join the worker for external callers. When called
@@ -505,6 +524,7 @@ impl TransportHandle {
         #[cfg(feature = "stateful")]
         if let Some(delivery) = &self.delivery {
             delivery.join_executor();
+            delivery.join_requests();
         }
     }
 
@@ -552,7 +572,7 @@ impl TransportHandle {
         if self
             .delivery
             .as_ref()
-            .is_some_and(|delivery| delivery.executor_id == current)
+            .is_some_and(|delivery| delivery.executor_id == current || delivery.on_request_worker())
         {
             return true;
         }
@@ -934,6 +954,10 @@ fn run_worker(
             Wake::Msg(Control::QueueFlush { completion, .. }) => completion.signal(),
             #[cfg(feature = "stateful")]
             Wake::Msg(Control::QueueWake | Control::Sent(_)) => {}
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::Flags(_)) => unreachable!("request-worker-only flags"),
+            #[cfg(all(test, feature = "stateful"))]
+            Wake::Msg(Control::RequestBarrier(_)) => unreachable!("request-worker-only barrier"),
             #[cfg(test)]
             Wake::Msg(Control::Tick(completion)) => {
                 // Defer the signal until after the shared servicing block below,
@@ -992,6 +1016,10 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             Control::QueueFlush { completion, .. } => completion.signal(),
             #[cfg(feature = "stateful")]
             Control::QueueWake | Control::Sent(_) => {}
+            #[cfg(feature = "stateful")]
+            Control::Flags(slot) => slot.close(),
+            #[cfg(all(test, feature = "stateful"))]
+            Control::RequestBarrier(_) => {}
         }
     }
 }

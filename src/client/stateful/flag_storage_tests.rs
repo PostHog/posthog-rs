@@ -1,0 +1,439 @@
+use super::*;
+use crate::client::stateful::flag_state::{CachedFlag, FlagCache, FlagContext};
+use crate::client::stateful::writer::{Backend, DrainOutcome, StateWriter, WriterOptions};
+use crate::client::transport::SystemClock;
+use crate::feature_flag_evaluations::EvaluatedFlagRecord;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+
+fn with_cache(payload: Option<Value>) -> Snapshot {
+    let mut snapshot = Snapshot::anonymous("device".into());
+    snapshot.distinct_id = "person".into();
+    snapshot.identified = true;
+    snapshot
+        .flags
+        .person_properties
+        .insert("plan".into(), json!("pro"));
+    snapshot.groups.insert("company".into(), "a".into());
+    snapshot
+        .flags
+        .group_properties
+        .insert("company".into(), HashMap::from([("tier".into(), json!(2))]));
+    snapshot.flags.cache = Some(Arc::new(FlagCache {
+        context: Arc::new(FlagContext::current(&snapshot, false)),
+        flags: HashMap::from([(
+            "checkout".into(),
+            CachedFlag {
+                context: Arc::new(FlagContext::current(&snapshot, false)),
+                partial: false,
+                record: EvaluatedFlagRecord {
+                    enabled: true,
+                    variant: Some("blue".into()),
+                    payload,
+                    id: Some(1),
+                    version: Some(3),
+                    reason: Some("Matched".into()),
+                    locally_evaluated: false,
+                    has_experiment: Some(false),
+                    minimal_flag_called_events: true,
+                },
+                request_id: Some("first-request".into()),
+                evaluated_at: Some(123),
+            },
+        )]),
+        failed: Default::default(),
+        errors_while_computing: false,
+    }));
+    snapshot
+}
+
+#[test]
+fn cloning_snapshot_shares_unchanged_flag_cache() {
+    let snapshot = with_cache(Some(json!({"nested": null})));
+    let cloned = snapshot.clone();
+    assert!(std::ptr::eq(
+        &snapshot.flags.cache.as_ref().unwrap().flags,
+        &cloned.flags.cache.as_ref().unwrap().flags,
+    ));
+    assert_eq!(snapshot, cloned);
+}
+
+#[test]
+fn writer_mutations_share_unchanged_flag_cache() {
+    let writer = StateWriter::new(
+        with_cache(Some(json!({"nested": null}))),
+        Backend::Memory,
+        WriterOptions::default(),
+        vec![],
+        Arc::new(SystemClock),
+    )
+    .unwrap();
+    let before = writer.snapshot();
+    writer.mutate(|state| state.generation += 1).unwrap();
+    let transient = writer.snapshot();
+    assert_eq!(transient.generation, before.generation + 1);
+    assert!(std::ptr::eq(
+        &before.flags.cache.as_ref().unwrap().flags,
+        &transient.flags.cache.as_ref().unwrap().flags,
+    ));
+    writer.mutate(|state| state.opt_out = Some(true)).unwrap();
+    let persisted = writer.snapshot();
+    assert_eq!(persisted.opt_out, Some(true));
+    assert_eq!(before.opt_out, None);
+    assert!(std::ptr::eq(
+        &before.flags.cache.as_ref().unwrap().flags,
+        &persisted.flags.cache.as_ref().unwrap().flags,
+    ));
+}
+
+#[test]
+fn cached_records_round_trip_payload_presence_and_per_record_metadata() {
+    for payload in [
+        None,
+        Some(Value::Null),
+        Some(json!(false)),
+        Some(json!(0)),
+        Some(json!("")),
+        Some(json!("123")),
+        Some(json!("true")),
+        Some(json!([1, null])),
+        Some(json!({"nested":null})),
+    ] {
+        let mut snapshot = with_cache(payload);
+        let cache = Arc::make_mut(snapshot.flags.cache.as_mut().unwrap());
+        let mut second = cache.flags["checkout"].clone();
+        second.request_id = Some("second-request".into());
+        second.record.minimal_flag_called_events = false;
+        second.record.enabled = false;
+        second.record.variant = None;
+        cache.flags.insert("other".into(), second);
+        let directory = TestDirectory::new();
+        let mut store = FileStateStore::open(directory.lease()).unwrap().store;
+        store.save(&snapshot).unwrap();
+        assert_eq!(store.load().unwrap(), Some(snapshot));
+    }
+}
+
+#[test]
+fn optional_cache_codec_failure_isolated_from_mandatory_codec_failure() {
+    let mut deep = json!(0);
+    for _ in 0..150 {
+        deep = json!({"nested":deep});
+    }
+    let mut snapshot = with_cache(Some(deep.clone()));
+    let bytes = encode_snapshot(&snapshot).unwrap();
+    let restored = FileStateStore::decode(&bytes).unwrap();
+    assert!(restored.flags.cache.is_none());
+    assert_eq!(restored.distinct_id, "person");
+    assert!(snapshot.flags.cache.is_some());
+    // Optional omission must not hide invalid mandatory targeting.
+    snapshot.flags.person_properties.insert("deep".into(), deep);
+    assert!(encode_snapshot(&snapshot).is_err());
+}
+
+#[test]
+fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
+    struct BlockedStore {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+        blocked: bool,
+    }
+    impl StateStore for BlockedStore {
+        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<()> {
+            if !self.blocked {
+                self.blocked = true;
+                self.entered.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+            Ok(())
+        }
+    }
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let writer = Arc::new(
+        StateWriter::new(
+            Snapshot::anonymous("device".into()),
+            Backend::Persistent {
+                store: Box::new(BlockedStore {
+                    entered: entered_tx,
+                    release: release_rx,
+                    blocked: false,
+                }),
+                restored: false,
+            },
+            WriterOptions::default(),
+            vec![],
+            Arc::new(SystemClock),
+        )
+        .unwrap(),
+    );
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let updating = writer.clone();
+    let thread = std::thread::spawn(move || {
+        updating
+            .mutate(|state| *state = with_cache(Some(json!("value"))))
+            .unwrap();
+        // Identity changes invalidate the old cache; installation is a separate
+        // operation guarded by the request's resulting evaluation revision.
+        updating
+            .mutate(|state| state.flags.cache = with_cache(Some(json!("value"))).flags.cache)
+            .unwrap();
+        let snapshot = updating.snapshot();
+        done_tx
+            .send((
+                snapshot.flags.person_properties["plan"].clone(),
+                snapshot.flags.cache.is_some(),
+            ))
+            .unwrap();
+    });
+    let completed = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    // Always release controlled I/O before an assertion can unwind and join.
+    release_tx.send(()).unwrap();
+    thread.join().unwrap();
+    assert_eq!(completed.unwrap(), (json!("pro"), true));
+    assert_eq!(
+        writer.wait_blocking(writer.checkpoint()),
+        DrainOutcome::Persisted
+    );
+}
+
+#[test]
+fn missing_flag_fields_restore_empty_and_optional_cache_is_repaired() {
+    let valid: Value = serde_json::from_slice(&record(&with_cache(Some(json!(false))))).unwrap();
+    // A record written before feature flags restores with an empty cache.
+    let mut older = valid.clone();
+    older["state"].as_object_mut().unwrap().remove("flags");
+    assert!(FileStateStore::decode(&serde_json::to_vec(&older).unwrap()).is_ok());
+    for field in ["person_properties", "group_properties", "cache"] {
+        let mut missing = valid.clone();
+        missing["state"]["flags"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        let decoded = FileStateStore::decode(&serde_json::to_vec(&missing).unwrap()).unwrap();
+        assert_eq!(decoded.distinct_id, "person", "missing {field}");
+    }
+    let mut additive = valid.clone();
+    additive["state"]["flags"]["unknown"] = json!(42);
+    assert!(FileStateStore::decode(&serde_json::to_vec(&additive).unwrap()).is_ok());
+    let mut invalid = valid;
+    invalid["state"]["flags"]["cache"] = json!(42);
+    let decoded = FileStateStore::decode_restored(&serde_json::to_vec(&invalid).unwrap()).unwrap();
+    assert!(decoded.rewrite_required);
+    assert!(decoded.snapshot.flags.cache.is_none());
+    assert_eq!(decoded.snapshot.flags.person_properties["plan"], "pro");
+}
+
+fn checkout_payload(snapshot: &Snapshot) -> Option<Value> {
+    snapshot
+        .flags
+        .cache
+        .as_ref()?
+        .flags
+        .get("checkout")?
+        .record
+        .payload
+        .clone()
+}
+
+fn seed_client_cache(directory: &TestDirectory, identified: bool) -> crate::stateful::Config {
+    let mut config = crate::stateful::Config::new("phc_test");
+    config.preload_feature_flags = false;
+    config.host = "http://127.0.0.1:1".into();
+    config.persistence = Persistence::Directory(directory.0.clone());
+    let scope = namespace(&config.project_token, &config.instance_name);
+    let mut restored =
+        RestoredStorage::open(&config.persistence, &scope, config.event_limits(), &[]);
+    let mut snapshot = with_cache(Some(json!("bootstrap-cache")));
+    snapshot.identified = identified;
+    if !identified {
+        snapshot.distinct_id = snapshot.anonymous_id.clone();
+    }
+    let context = FlagContext::current(&snapshot, config.disable_geoip);
+    let cache = Arc::make_mut(snapshot.flags.cache.as_mut().unwrap());
+    let context = Arc::new(context);
+    cache.context = context.clone();
+    for flag in cache.flags.values_mut() {
+        flag.context = context.clone();
+    }
+    restored
+        .state_store
+        .as_mut()
+        .unwrap()
+        .save(&snapshot)
+        .unwrap();
+    config
+}
+
+#[test]
+fn bootstrap_keeps_the_cache_through_identity_reconciliation() {
+    use crate::stateful::{Client, PersistenceOutcome, PersonProfiles};
+    for opted_out in [false, true] {
+        for (identified, bootstrap, policy, expected, same_identity) in [
+            // The cache stays until the new identity's response replaces it.
+            (
+                false,
+                "new-person",
+                PersonProfiles::IdentifiedOnly,
+                "new-person",
+                false,
+            ),
+            (
+                false,
+                "device",
+                PersonProfiles::IdentifiedOnly,
+                "device",
+                true,
+            ),
+            // Never keeps the anonymous user, as identify does nothing there.
+            (false, "new-person", PersonProfiles::Never, "device", true),
+            (
+                true,
+                "new-person",
+                PersonProfiles::IdentifiedOnly,
+                "person",
+                true,
+            ),
+        ] {
+            let directory = TestDirectory::new();
+            let mut config = seed_client_cache(&directory, identified);
+            config.bootstrap_identified_id = Some(bootstrap.into());
+            config.person_profiles = policy;
+            config.opt_out = opted_out;
+            config.before_send(|_| None);
+            let scope = namespace(&config.project_token, &config.instance_name);
+            let client = Client::init_blocking(config);
+            assert_eq!(client.get_distinct_id(), expected);
+            let snapshot = client.state.as_ref().unwrap().snapshot();
+            let cache = snapshot.flags.cache.as_ref().expect("the cache is kept");
+            assert_eq!(
+                *cache.context == FlagContext::current(&snapshot, false),
+                same_identity,
+                "out={opted_out}, bootstrap={bootstrap}, expected={expected}"
+            );
+            assert_eq!(checkout_payload(&snapshot), Some(json!("bootstrap-cache")));
+            assert_eq!(
+                client.shutdown_blocking(None).state,
+                PersistenceOutcome::Persisted
+            );
+            drop(client);
+            let disk = FileStateStore::decode(
+                &fs::read(directory.0.join(scope).join("state.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(disk.distinct_id, expected);
+            assert_eq!(checkout_payload(&disk), Some(json!("bootstrap-cache")));
+        }
+    }
+}
+
+#[test]
+fn identify_keeps_the_cache_until_the_new_identity_response() {
+    use crate::stateful::Client;
+    for (new_id, keep_cache) in [("new-person", true), ("device", true)] {
+        let directory = TestDirectory::new();
+        let mut config = seed_client_cache(&directory, false);
+        let holder = Arc::new(Mutex::new(std::sync::Weak::<Client>::new()));
+        let in_hook = holder.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        config.before_send(move |_| {
+            let client = in_hook.lock().unwrap().upgrade().unwrap();
+            let snapshot = client.state.as_ref().unwrap().snapshot();
+            tx.send((
+                snapshot.distinct_id.clone(),
+                snapshot.flags.cache.is_some(),
+                checkout_payload(&snapshot),
+            ))
+            .unwrap();
+            None
+        });
+        let client = Arc::new(Client::init_blocking(config));
+        *holder.lock().unwrap() = Arc::downgrade(&client);
+        client.identify(new_id);
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            (
+                new_id.to_string(),
+                keep_cache,
+                keep_cache.then(|| json!("bootstrap-cache"))
+            )
+        );
+        assert_eq!(
+            checkout_payload(&client.state.as_ref().unwrap().snapshot()),
+            keep_cache.then(|| json!("bootstrap-cache"))
+        );
+        assert_eq!(
+            client
+                .state
+                .as_ref()
+                .unwrap()
+                .snapshot()
+                .flags
+                .cache
+                .is_some(),
+            keep_cache
+        );
+    }
+}
+
+#[test]
+fn large_flag_sets_persist_each_context_once() {
+    let mut snapshot = Snapshot::anonymous("device".into());
+    snapshot
+        .flags
+        .person_properties
+        .insert("bio".into(), json!("x".repeat(4096)));
+    let context = Arc::new(FlagContext::current(&snapshot, false));
+    let records = (0..5_000)
+        .map(|i| {
+            (
+                format!("flag-{i}"),
+                EvaluatedFlagRecord {
+                    enabled: true,
+                    variant: None,
+                    payload: Some(json!({"index": i})),
+                    id: None,
+                    version: None,
+                    reason: None,
+                    locally_evaluated: false,
+                    has_experiment: None,
+                    minimal_flag_called_events: false,
+                },
+            )
+        })
+        .collect();
+    snapshot.flags.cache = Some(Arc::new(FlagCache::updated(
+        None,
+        context,
+        crate::client::transport::flags::LoadedFlags {
+            records,
+            request_id: None,
+            evaluated_at: None,
+            partial: false,
+            invalid_payloads: false,
+            failed: Default::default(),
+        },
+    )));
+    let bytes = encode_snapshot(&snapshot).unwrap();
+    let encoded: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        encoded["state"]["flags"]["cache"]["contexts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // Without sharing, the 4 KiB person property alone would add about 20 MiB.
+    assert!(bytes.len() < 4 * 1024 * 1024, "{}", bytes.len());
+    let restored = FileStateStore::decode(&bytes).unwrap();
+    let cache = restored.flags.cache.as_ref().unwrap();
+    assert_eq!(cache.flags.len(), 5_000);
+    assert!(Arc::ptr_eq(
+        &cache.flags["flag-0"].context,
+        &cache.flags["flag-4999"].context
+    ));
+    assert_eq!(restored, snapshot);
+}

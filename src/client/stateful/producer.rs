@@ -135,6 +135,12 @@ pub enum CaptureOutcome {
     Reentrant,
 }
 
+#[derive(Clone, Copy)]
+enum CapturePolicy {
+    Standard,
+    FlagCalled { minimal: bool },
+}
+
 pub(super) struct Producer {
     context: HashMap<String, Value>,
     sdk_name: String,
@@ -143,6 +149,7 @@ pub(super) struct Producer {
     hooks: Vec<BeforeSendHook>,
     pub(super) person_profiles: PersonProfiles,
     pub(super) default_opt_out: bool,
+    pub(super) send_feature_flag_event: bool,
     pub(super) session_clock: std::sync::Arc<dyn super::sessions::SessionClock>,
     /// The last screen name passed to `screen`, added to later events as
     /// `$screen_name`. Kept in memory only, as in posthog-ios and
@@ -169,6 +176,7 @@ impl Producer {
             hooks: config.before_send.clone(),
             person_profiles: config.person_profiles,
             default_opt_out: config.opt_out,
+            send_feature_flag_event: config.send_feature_flag_event,
             session_clock: std::sync::Arc::new(super::sessions::SystemSessionClock),
             last_screen: Mutex::new(None),
         }
@@ -190,12 +198,24 @@ impl Producer {
             .clone()
     }
 
+    #[cfg(test)]
     fn prepare(
         &self,
         input: Capture,
         snapshot: &Snapshot,
         now: DateTime<Utc>,
         session_id: Option<Uuid>,
+    ) -> Result<CaptureEvent, CaptureOutcome> {
+        self.prepare_with_policy(input, snapshot, now, session_id, CapturePolicy::Standard)
+    }
+
+    fn prepare_with_policy(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+        now: DateTime<Utc>,
+        session_id: Option<Uuid>,
+        policy: CapturePolicy,
     ) -> Result<CaptureEvent, CaptureOutcome> {
         if input.event.trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
@@ -233,6 +253,23 @@ impl Producer {
                 ),
             );
         }
+        if let Some(cache) = &snapshot.flags.cache {
+            let mut active_flags = Vec::new();
+            for (key, flag) in &cache.flags {
+                let value = match crate::feature_flag_evaluations::flag_value_for(&flag.record) {
+                    crate::FlagValue::Boolean(value) => Value::Bool(value),
+                    crate::FlagValue::String(value) => Value::String(value),
+                };
+                event.insert_prop_default(format!("$feature/{key}"), value);
+                if flag.served() {
+                    active_flags.push(Value::String(key.clone()));
+                }
+            }
+            if !active_flags.is_empty() {
+                active_flags.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                event.insert_prop_default("$active_feature_flags", Value::Array(active_flags));
+            }
+        }
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
         }
@@ -251,23 +288,38 @@ impl Producer {
             event.insert_prop_default("$geoip_disable", true.into());
         }
         event.merge_groups_into_properties();
-        let event = apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
+        let mut event =
+            apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
         if event.event_name().trim().is_empty() || event.distinct_id().trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
         }
+        if matches!(policy, CapturePolicy::FlagCalled { minimal: true }) {
+            event.mark_minimal_flag_called();
+            event.apply_minimal_flag_called_allowlist();
+        }
         let mut wire = CaptureEvent::from_event_at(&event, now);
-        normalize_custom_properties(&mut wire.properties);
+        normalize_custom_properties(
+            &mut wire.properties,
+            matches!(policy, CapturePolicy::FlagCalled { .. }),
+        );
         Ok(wire)
     }
 }
 
 // Person/group payloads have their own mutation/type semantics. Wire options and
 // session/window fields have already been lifted out of properties by conversion.
-fn normalize_custom_properties(properties: &mut Value) {
+fn normalize_custom_properties(properties: &mut Value, flag_called: bool) {
     let Some(properties) = properties.as_object_mut() else {
         return;
     };
-    let reserved = |key: &str| matches!(key, "$set" | "$set_once" | "$group_set" | "$groups");
+    let reserved = |key: &str| {
+        matches!(key, "$set" | "$set_once" | "$group_set" | "$groups")
+            || (flag_called
+                && matches!(
+                    key,
+                    "$feature_flag_payload" | "$feature_flag_bootstrapped_payload"
+                ))
+    };
     properties.retain(|key, value| reserved(key) || !value.is_null());
     let mut pending: Vec<_> = properties
         .iter_mut()
@@ -351,7 +403,13 @@ impl Client {
         let current = state.snapshot();
         if !self.snapshot_opted_out(&current) {
             if let Some(session) = current.sessions.live_admission(self.session_now()) {
-                return self.capture_with_session(input, &current, Some(session), true);
+                return self.capture_with_session(
+                    input,
+                    &current,
+                    Some(session),
+                    true,
+                    CapturePolicy::Standard,
+                );
             }
         }
         let snapshot = state.mutate(|snapshot| {
@@ -363,14 +421,14 @@ impl Client {
         let Ok((_, (snapshot, session))) = snapshot else {
             return CaptureOutcome::Closed;
         };
-        self.capture_with_session(input, &snapshot, session, true)
+        self.capture_with_session(input, &snapshot, session, true, CapturePolicy::Standard)
     }
 
     /// Passive identity/group events may create attribution, without touching idle time.
     /// The caller owns the recursion guard and the operation's identity snapshot.
     pub(super) fn capture_snapshot(&self, input: Capture, snapshot: &Snapshot) -> CaptureOutcome {
         let session = self.prepare_admission_session(snapshot.generation);
-        self.capture_with_session(input, snapshot, session, false)
+        self.capture_with_session(input, snapshot, session, false, CapturePolicy::Standard)
     }
 
     /// Select attribution for an event built from an earlier identity snapshot.
@@ -392,6 +450,21 @@ impl Client {
             .and_then(|(_, token)| token)
     }
 
+    pub(super) fn capture_flag_snapshot(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+        minimal: bool,
+    ) -> CaptureOutcome {
+        let session_id = snapshot.sessions.active_id(self.session_now());
+        let policy = CapturePolicy::FlagCalled { minimal };
+        let wire = match self.prepare_with_session(input, snapshot, session_id, policy) {
+            Ok(wire) => wire,
+            Err(outcome) => return outcome,
+        };
+        self.admit_wire(wire, None, false)
+    }
+
     /// Attribution was selected with the operation's snapshot. Do not recheck
     /// expiration here: crossing a boundary cannot erase the selected session.
     fn capture_with_session(
@@ -400,12 +473,17 @@ impl Client {
         snapshot: &Snapshot,
         session: Option<super::sessions::AdmissionSession>,
         activity: bool,
+        policy: CapturePolicy,
     ) -> CaptureOutcome {
-        let wire =
-            match self.prepare_with_session(input, snapshot, session.and_then(|token| token.id)) {
-                Ok(wire) => wire,
-                Err(outcome) => return outcome,
-            };
+        let wire = match self.prepare_with_session(
+            input,
+            snapshot,
+            session.and_then(|token| token.id),
+            policy,
+        ) {
+            Ok(wire) => wire,
+            Err(outcome) => return outcome,
+        };
         self.admit_wire(wire, session, activity)
     }
 
@@ -448,7 +526,12 @@ impl Client {
         snapshot: &Snapshot,
         session: Option<super::sessions::AdmissionSession>,
     ) -> Result<CaptureEvent, CaptureOutcome> {
-        self.prepare_with_session(input, snapshot, session.and_then(|token| token.id))
+        self.prepare_with_session(
+            input,
+            snapshot,
+            session.and_then(|token| token.id),
+            CapturePolicy::Standard,
+        )
     }
 
     fn prepare_with_session(
@@ -456,6 +539,7 @@ impl Client {
         input: Capture,
         snapshot: &Snapshot,
         session_id: Option<Uuid>,
+        policy: CapturePolicy,
     ) -> Result<CaptureEvent, CaptureOutcome> {
         if self.closed.load(Ordering::Acquire) {
             return Err(CaptureOutcome::Closed);
@@ -463,11 +547,13 @@ impl Client {
         if self.snapshot_opted_out(snapshot) {
             return Err(CaptureOutcome::OptedOut);
         }
-        let wire =
-            self.producer
-                .as_ref()
-                .unwrap()
-                .prepare(input, snapshot, Utc::now(), session_id)?;
+        let wire = self.producer.as_ref().unwrap().prepare_with_policy(
+            input,
+            snapshot,
+            Utc::now(),
+            session_id,
+            policy,
+        )?;
         if self.closed.load(Ordering::Acquire) {
             return Err(CaptureOutcome::Closed);
         }

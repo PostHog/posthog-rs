@@ -159,6 +159,18 @@ fn encode_record(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Encode for the state writer. A cache that cannot be read back (for example a
+/// payload nested beyond the JSON decoder's depth limit) is left out rather
+/// than making identity and consent unwritable.
+fn encode_snapshot(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
+    if let Ok(encoded) = encode_record(snapshot) {
+        return Ok(encoded);
+    }
+    let mut mandatory = snapshot.clone();
+    mandatory.flags.cache = None;
+    encode_record(&mandatory)
+}
+
 /// Blocking backend calls belong exclusively to the state-persistence worker.
 pub(super) trait StateStore: Send + 'static {
     fn save(&mut self, snapshot: &Snapshot) -> io::Result<()>;
@@ -265,9 +277,16 @@ impl FileStateStore {
         }
         let record: StateRecord<serde_json::Value> =
             serde_json::from_value(record).map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
-        // An invalid stored session is dropped, and the record is rewritten.
+        // An invalid stored session or flag cache is dropped, and the record
+        // is rewritten.
         let mut state = record.state;
         let mut rewrite_required = false;
+        if let Some(cache) = state
+            .get_mut("flags")
+            .and_then(|flags| flags.get_mut("cache"))
+        {
+            rewrite_required |= normalize_optional::<super::flag_state::FlagCache>(cache, |_| true);
+        }
         if let Some(session) = state.get_mut("session") {
             rewrite_required |=
                 normalize_optional::<super::sessions::StoredSession>(session, |session| {
@@ -305,7 +324,7 @@ impl FileStateStore {
     /// Only the state writer calls this. A completed replacement is not a
     /// multi-file transaction with event storage or a universal power-loss guarantee.
     pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
-        let encoded = encode_record(snapshot)?;
+        let encoded = encode_snapshot(snapshot)?;
         let temporary = self.directory.path().join("state.json.tmp");
         // The lease and single writer exclude live concurrent writes. A stale
         // temporary is an uncommitted write from a previous process/attempt.
@@ -327,8 +346,8 @@ impl FileStateStore {
     }
 }
 
-/// Recovery applies only to present optional values; missing required fields and
-/// invalid mandatory targeting still reject the core snapshot.
+/// Recovery applies only to present optional values; missing or invalid
+/// identity fields still reject the core snapshot.
 /// Replace an optional field that doesn't decode or isn't valid with `null`.
 /// Returns whether it was replaced.
 fn normalize_optional<T: serde::de::DeserializeOwned>(
