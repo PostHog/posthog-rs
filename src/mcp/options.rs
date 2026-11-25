@@ -17,6 +17,7 @@ use crate::Event;
 
 pub type IdentifyCallback = Arc<dyn Fn(&RequestInfo<'_>) -> Option<Identity> + Send + Sync>;
 pub type IntentFallback = Arc<dyn Fn(&RequestInfo<'_>) -> Option<String> + Send + Sync>;
+pub type SessionResolver = Arc<dyn Fn(&RequestInfo<'_>) -> Option<String> + Send + Sync>;
 pub type EventOptionsCallback =
     Arc<dyn Fn(&RequestInfo<'_>) -> Option<Map<String, Value>> + Send + Sync>;
 
@@ -60,7 +61,8 @@ pub struct McpOptions {
     /// Conversation anchoring: advertise an optional `conversation_id`
     /// argument, hand the agent a handle on its first call, and group the
     /// calls that echo it into one session (default: `true`). Without it,
-    /// every request of a stateless HTTP client is its own session.
+    /// every request of a stateless HTTP client is its own session, unless
+    /// its client names the conversation in `_meta`.
     pub(crate) conversation_id: bool,
     /// Resolves the person each request acts for. Nothing else does: a
     /// distinct id in the host's request context, such as `PostHogLayer`'s
@@ -81,6 +83,13 @@ pub struct McpOptions {
     /// ```
     #[builder(setter(custom))]
     pub(crate) identify: Option<IdentifyCallback>,
+    /// Returns each request's session, ahead of every other source, sent
+    /// with `$mcp_session_source: "host"`. The SDK hashes the value into
+    /// `$session_id`, so keep it ASCII for other SDKs to agree. `None`, an
+    /// empty string, or a panic falls through to the client's conversation
+    /// id, the conversation handle, and the transport's session.
+    #[builder(setter(custom))]
+    pub(crate) session_resolver: Option<SessionResolver>,
     /// Supplies the capture options of each request's events.
     #[builder(setter(custom))]
     pub(crate) event_options: Option<EventOptionsCallback>,
@@ -148,6 +157,7 @@ impl Default for McpOptions {
             intent_fallback: None,
             conversation_id: true,
             identify: None,
+            session_resolver: None,
             event_options: None,
             exception_autocapture: true,
             capture_parameters: true,
@@ -294,6 +304,14 @@ impl McpOptionsBuilder {
         F: Fn(&RequestInfo<'_>) -> Option<Identity> + Send + Sync + 'static,
     {
         self.identify = Some(Some(Arc::new(resolve)));
+        self
+    }
+
+    pub fn session_resolver<F>(&mut self, resolve: F) -> &mut Self
+    where
+        F: Fn(&RequestInfo<'_>) -> Option<String> + Send + Sync + 'static,
+    {
+        self.session_resolver = Some(Some(Arc::new(resolve)));
         self
     }
 

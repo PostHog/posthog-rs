@@ -73,6 +73,14 @@ impl<'a> RequestScope<'a> {
         }
     }
 
+    /// Whether this request's client names every conversation in `_meta`.
+    pub(crate) fn handle_free_client(&self) -> bool {
+        let token = self.transport.resolve().token_client;
+        self.client_identity(token.as_ref())
+            .recognized_row()
+            .is_some_and(|row| row.handle_free)
+    }
+
     /// The analytics context HTTP middleware, such as `PostHogLayer`, attached to the request.
     pub(crate) fn request_context(&self) -> Option<RequestContext> {
         self.http?.extensions.get::<RequestContext>().cloned()

@@ -14,7 +14,7 @@ use crate::mcp::analytics::Core;
 use crate::mcp::capture::EventContext;
 use crate::mcp::contract::arguments::{CONTEXT, CONVERSATION_ID};
 use crate::mcp::request_info::RequestInfo;
-use crate::mcp::session::{Conversation, TransportSession};
+use crate::mcp::session::{Conversation, SessionClaims, TransportSession};
 use crate::mcp::tools::catalog::ToolFacts;
 use crate::mcp::tools::ownership::{strip_owned_arguments, ArgumentFlags};
 
@@ -50,6 +50,9 @@ pub(crate) struct PreparedCall {
     pub(crate) parameters: Option<Value>,
     pub(crate) started: Instant,
     pub(crate) transport: TransportSession,
+    /// The client names its conversation in `_meta`, so its listing showed no
+    /// `conversation_id` and no `_mcp_instructions`.
+    pub(crate) handle_free: bool,
 }
 
 /// Which analytics arguments a call may strip, and which it may read.
@@ -74,11 +77,23 @@ pub(crate) fn prepare_call(
     let facts = merge_facts(registered, core.catalog.get(name));
     let access = argument_access(core, facts.as_ref());
 
-    let conversation = resolve_conversation(access.read, sent, scope.transport);
+    let transport = scope.transport.resolve_for_call();
+    let client = scope.client_identity(transport.token_client.as_ref());
+    let row = client.recognized_row();
+    let handle_free = row.is_some_and(|row| row.handle_free);
+    let client_conversation = row.and_then(|row| row.conversation(scope.meta));
+    let conversation = match client_conversation {
+        Some(_) => Conversation::default(),
+        None => resolve_conversation(access.read, sent, handle_free, scope.transport),
+    };
     let dispatch_arguments = dispatched_arguments(sent, access.strip);
     let info = scope.request_info(Some(name), sent);
-    let session = scope.transport.resolve_for_call();
-    let context = core.event_context(scope, session, conversation.id.clone(), &info);
+    let claims = SessionClaims {
+        client: client_conversation,
+        handle: conversation.id.clone(),
+        transport: transport.session,
+    };
+    let context = core.event_context(scope, client, claims, &info);
     let parameters = core
         .options
         .capture_parameters
@@ -97,6 +112,7 @@ pub(crate) fn prepare_call(
         parameters,
         started: scope.started,
         transport: scope.transport.clone(),
+        handle_free,
     }
 }
 
@@ -124,10 +140,12 @@ fn argument_access(core: &Core, facts: Option<&ToolFacts>) -> ArgumentAccess {
 }
 
 /// An echoed handle wins. Without one, a request with no transport session
-/// gets a new handle, the only way its later calls can join it.
+/// gets a new handle, the only way its later calls can join it, unless its
+/// client names every conversation itself.
 fn resolve_conversation(
     readable: ArgumentFlags,
     sent: Option<&Map<String, Value>>,
+    handle_free: bool,
     transport: &TransportSession,
 ) -> Conversation {
     if !readable.conversation_id {
@@ -137,7 +155,7 @@ fn resolve_conversation(
         .and_then(|arguments| arguments.get(CONVERSATION_ID))
         .and_then(Value::as_str);
     let conversation = Conversation::echoed(echoed);
-    if conversation.is_present() || transport.carries_session() {
+    if conversation.is_present() || transport.carries_session() || handle_free {
         conversation
     } else {
         Conversation::minted()

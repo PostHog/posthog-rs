@@ -35,6 +35,7 @@ pub(crate) const SERVER_BUILD: &str = "$mcp_server_build";
 pub(crate) const SERVER_NAME: &str = "$mcp_server_name";
 pub(crate) const SERVER_VERSION: &str = "$mcp_server_version";
 pub(crate) const SESSION_ID: &str = "$session_id";
+pub(crate) const SESSION_SOURCE: &str = "$mcp_session_source";
 pub(crate) const SET: &str = "$set";
 pub(crate) const SOURCE: &str = "$mcp_source";
 pub(crate) const TOOL_CATEGORY: &str = "$mcp_tool_category";

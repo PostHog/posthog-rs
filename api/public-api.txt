@@ -107,6 +107,7 @@ pub fn posthog::mcp::McpOptionsBuilder::identify<F>(&mut self, F) -> &mut Self w
 pub fn posthog::mcp::McpOptionsBuilder::intent_fallback<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync + 'static
 pub fn posthog::mcp::McpOptionsBuilder::on_feedback<F, Reply>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(posthog::mcp::FeedbackReport) -> Reply + core::marker::Send + core::marker::Sync + 'static, Reply: core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'static
 pub fn posthog::mcp::McpOptionsBuilder::required_feedback_field(&mut self, impl core::convert::Into<alloc::string::String>, serde_json::value::Value) -> &mut Self
+pub fn posthog::mcp::McpOptionsBuilder::session_resolver<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync + 'static
 impl posthog::mcp::McpOptionsBuilder
 pub fn posthog::mcp::McpOptionsBuilder::build(&self) -> core::result::Result<posthog::mcp::McpOptions, posthog::mcp::McpOptionsBuilderError>
 pub fn posthog::mcp::McpOptionsBuilder::capture_model(&mut self, bool) -> &mut Self
@@ -154,6 +155,7 @@ pub type posthog::mcp::EventOptionsCallback = alloc::sync::Arc<(dyn core::ops::f
 pub type posthog::mcp::FeedbackHandler = alloc::sync::Arc<(dyn core::ops::function::Fn(posthog::mcp::FeedbackReport) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send)>> + core::marker::Send + core::marker::Sync)>
 pub type posthog::mcp::IdentifyCallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<posthog::mcp::Identity> + core::marker::Send + core::marker::Sync)>
 pub type posthog::mcp::IntentFallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync)>
+pub type posthog::mcp::SessionResolver = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub mod posthog::tower
 pub struct posthog::tower::PostHogLayer
 impl posthog::tower::PostHogLayer

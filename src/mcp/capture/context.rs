@@ -10,6 +10,7 @@ use crate::mcp::contract::limits::MAX_NAME_LENGTH;
 use crate::mcp::contract::properties as key;
 use crate::mcp::identity::Identity;
 use crate::mcp::privacy::TextPass;
+use crate::mcp::session::{recognize, ClientRow, ClientSignals, Session};
 use crate::RequestContext;
 
 const MCP_PREFIX: &str = "$mcp_";
@@ -70,6 +71,16 @@ pub(crate) struct ClientIdentity {
     pub(crate) vendor: Option<String>,
 }
 
+impl ClientIdentity {
+    /// The row of the client conversation table this client matches.
+    pub(crate) fn recognized_row(&self) -> Option<&'static ClientRow> {
+        recognize(ClientSignals {
+            user_agent: self.user_agent.as_deref(),
+            client_name: self.name.as_deref(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ServerIdentity {
     pub(crate) name: Option<String>,
@@ -79,7 +90,7 @@ pub(crate) struct ServerIdentity {
 #[derive(Clone, Debug)]
 pub(crate) struct EventContext {
     pub(crate) timestamp: DateTime<Utc>,
-    pub(crate) session_id: String,
+    pub(crate) session: Session,
     pub(crate) conversation_id: Option<String>,
     pub(crate) identity: Option<Identity>,
     pub(crate) client: ClientIdentity,
@@ -96,7 +107,7 @@ impl EventContext {
     pub(crate) fn distinct_id(&self) -> &str {
         match &self.identity {
             Some(identity) => &identity.distinct_id,
-            None => &self.session_id,
+            None => &self.session.id,
         }
     }
 
@@ -104,7 +115,11 @@ impl EventContext {
         let mut properties = Map::new();
         properties.insert(
             key::SESSION_ID.to_string(),
-            Value::from(self.session_id.as_str()),
+            Value::from(self.session.id.as_str()),
+        );
+        properties.insert(
+            key::SESSION_SOURCE.to_string(),
+            Value::from(self.session.source.as_str()),
         );
         insert_text(
             &mut properties,

@@ -32,6 +32,19 @@ impl ArgumentInjection {
         }
     }
 
+    /// A handle-free client names its conversation in `_meta`, so it is
+    /// not offered a `conversation_id`.
+    pub(crate) fn for_client(&self, handle_free: bool) -> Self {
+        let enabled = ArgumentFlags {
+            conversation_id: self.enabled.conversation_id && !handle_free,
+            ..self.enabled
+        };
+        Self {
+            enabled,
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn inject(&self, tool: &Value) -> Value {
         let mut injected = tool.clone();
         if let Some(descriptor) = injected.as_object_mut() {

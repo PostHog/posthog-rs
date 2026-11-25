@@ -40,10 +40,10 @@ impl<H: ServerHandler> ServerHandler for Instrumented<H> {
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
         if let Some(tool) = self.inner.get_tool(name) {
-            return Some(self.injected_tool(&tool));
+            return Some(self.injected_tool(&tool, &self.analytics.core.injection));
         }
         if let Some(tool) = self.virtual_tool(name) {
-            return self.advertised_virtual_tool(tool);
+            return self.advertised_virtual_tool(tool, &self.analytics.core.injection);
         }
         None
     }
