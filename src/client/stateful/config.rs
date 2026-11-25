@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::Persistence;
+use super::{Persistence, PersonProfiles};
 use crate::client::event_store::StoreLimits;
 use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
 use crate::client::{ClientOptions, OnErrorHook, PostHogError};
@@ -36,8 +36,25 @@ pub struct Config {
     /// Each persistent namespace has one live owner; see [`Persistence`] for
     /// sharing a client or selecting independent identities.
     pub instance_name: String,
-    /// Seed a fresh scope's anonymous identity. Persisted identity takes precedence.
+    /// Anonymous setup seed. On a fresh install it becomes the anonymous ID and
+    /// the device ID (`$device_id`), and also the distinct ID unless
+    /// `bootstrap_identified_id` is set. Persisted identity takes precedence, so a
+    /// restored install ignores it. A blank value is ignored.
     pub bootstrap_anonymous_id: Option<String>,
+    /// Identified setup seed. On a fresh install it becomes the distinct ID and the
+    /// client starts identified without sending an event, also under
+    /// [`PersonProfiles::Never`]. The anonymous and device ID come from
+    /// `bootstrap_anonymous_id` when it is set, and are generated otherwise. On a
+    /// restored install it reconciles: a restored anonymous
+    /// user is identified (under `Never` the anonymous user is kept), a matching
+    /// anonymous ID is upgraded without an event, and a different identified user is
+    /// kept with a warning. A blank value is ignored. To link an anonymous ID to the
+    /// user with `$identify`, call `identify` after initialization instead.
+    pub bootstrap_identified_id: Option<String>,
+    /// Default person processing and identity-operation policy. Default: IdentifiedOnly.
+    /// An event's `process_person_profile` option, then its
+    /// `$process_person_profile` property, take precedence over this mode.
+    pub person_profiles: PersonProfiles,
     /// Events that trigger an automatic flush. Default: 20.
     pub flush_at: usize,
     /// Maximum events per batch. Default: 100.
@@ -99,6 +116,8 @@ impl Config {
             persistence: Persistence::Automatic,
             instance_name: "default".into(),
             bootstrap_anonymous_id: None,
+            bootstrap_identified_id: None,
+            person_profiles: PersonProfiles::IdentifiedOnly,
             flush_at: 20,
             max_batch_size: 100,
             flush_interval: Duration::from_secs(10),
@@ -179,12 +198,14 @@ impl Config {
             self.host = DEFAULT_HOST.into();
         }
         self.host = EndpointManager::determine_server_host(&self.host);
-        if self
-            .bootstrap_anonymous_id
-            .as_deref()
-            .is_some_and(|id| id.trim().is_empty())
-        {
-            self.bootstrap_anonymous_id = None;
+        // A blank bootstrap ID is ignored, as in the other PostHog SDKs.
+        for id in [
+            &mut self.bootstrap_anonymous_id,
+            &mut self.bootstrap_identified_id,
+        ] {
+            if id.as_deref().is_some_and(|id| id.trim().is_empty()) {
+                *id = None;
+            }
         }
         self.flush_at = self.flush_at.max(1);
         self.max_batch_size = self.max_batch_size.max(1);

@@ -156,6 +156,11 @@ fn out_of_range_settings_are_clamped_instead_of_disabling_the_client() {
     config.bootstrap_anonymous_id = Some(" ".into());
     config.sdk_name = " ".into();
     config.normalize();
+    assert_eq!(config.bootstrap_anonymous_id, None);
+    let mut identified = Config::new("phc_test");
+    identified.bootstrap_identified_id = Some(" ".into());
+    identified.normalize();
+    assert_eq!(identified.bootstrap_identified_id, None);
     assert!(config.invalid_reason().is_none());
     assert_eq!(
         (
@@ -171,7 +176,6 @@ fn out_of_range_settings_are_clamped_instead_of_disabling_the_client() {
         crate::client::transport::MAX_SHUTDOWN_TIMEOUT
     );
     assert_eq!(config.request_timeout, Duration::from_secs(10));
-    assert_eq!(config.bootstrap_anonymous_id, None);
     assert_eq!(config.sdk_name, crate::client::SDK_USERAGENT_NAME);
 }
 
@@ -295,6 +299,14 @@ fn host_changes_share_identity_queue_and_single_owner_scope() {
 fn corrupt_state_is_replaced_but_future_state_is_preserved() {
     for (original, recoverable) in [
         (b"not json".as_slice(), true),
+        (
+            br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":17,"identified":false,"person_processing":false}}"#.as_slice(),
+            true,
+        ),
+        (
+            br#"{"version":1,"state":{"anonymous_id":"","distinct_id":"private","identified":false,"person_processing":false}}"#.as_slice(),
+            true,
+        ),
         (b"{\"version\":99,\"state\":{}}".as_slice(), false),
     ] {
         let directory = Directory::new();
@@ -343,14 +355,35 @@ fn startup_tolerates_additive_state_fields() {
     let directory = Directory::new();
     fs::create_dir_all(directory.scope()).unwrap();
     let path = directory.scope().join("state.json");
-    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","device_id":"device","future_field":42}}"#).unwrap();
+    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","device_id":"device","identified":true,"person_processing":true,"future_field":42}}"#).unwrap();
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.get_anonymous_id(), "anonymous");
     assert_eq!(client.get_distinct_id(), "person");
+    assert!(client.is_identified());
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
     assert_eq!(
         client.shutdown_blocking(None).delivery,
         DeliveryOutcome::Stopped
     );
+}
+
+#[test]
+fn restores_a_v1_record_written_before_identity_fields() {
+    let directory = Directory::new();
+    fs::create_dir_all(directory.scope()).unwrap();
+    let path = directory.scope().join("state.json");
+    fs::write(&path, br#"{"version":1,"state":{"device_id":"device","anonymous_id":"anonymous","distinct_id":"anonymous"}}"#).unwrap();
+    let client = Client::init_blocking(directory.config());
+    assert_eq!(client.get_anonymous_id(), "anonymous");
+    assert_eq!(client.get_distinct_id(), "anonymous");
+    assert!(!client.is_identified());
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
+    assert_eq!(
+        client.shutdown_blocking(None).delivery,
+        DeliveryOutcome::Stopped
+    );
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(value["state"]["device_id"], "device");
 }
 
 #[test]

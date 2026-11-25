@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{Client, Config, Snapshot};
+use super::{Client, Config, PersonProfiles, Snapshot};
 use crate::capture_event::CaptureEvent;
 use crate::client::common::apply_before_send_hooks;
 use crate::client::transport::Admission;
@@ -137,6 +137,7 @@ pub(super) struct Producer {
     sdk_version: String,
     disable_geoip: bool,
     hooks: Vec<BeforeSendHook>,
+    pub(super) person_profiles: PersonProfiles,
     /// The last screen name passed to `screen`, added to later events as
     /// `$screen_name`. Kept in memory only, as in posthog-ios and
     /// posthog-android.
@@ -160,12 +161,18 @@ impl Producer {
             sdk_version: config.sdk_version.clone(),
             disable_geoip: config.disable_geoip,
             hooks: config.before_send.clone(),
+            person_profiles: config.person_profiles,
             last_screen: Mutex::new(None),
         }
     }
 
     fn set_last_screen(&self, name: Option<String>) {
         *self.last_screen.lock().unwrap_or_else(|p| p.into_inner()) = name;
+    }
+
+    /// Reset forgets the last screen, as in posthog-ios and posthog-android.
+    pub(super) fn clear_last_screen(&self) {
+        self.set_last_screen(None);
     }
 
     fn last_screen(&self) -> Option<String> {
@@ -203,9 +210,9 @@ impl Producer {
         if let Some(screen) = self.last_screen() {
             event.insert_prop_default("$screen_name", screen.into());
         }
-        event.insert_prop_default("$device_id", snapshot.anonymous_id.clone().into());
-        event.insert_prop_default("$is_identified", false.into());
-        fill_person_profile_option(&mut event, false);
+        event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
+        event.insert_prop_default("$is_identified", snapshot.identified.into());
+        fill_person_profile_option(&mut event, self.person_profiles.processes(snapshot));
         if self.disable_geoip {
             event.insert_prop_default("$geoip_disable", true.into());
         }
@@ -248,10 +255,10 @@ thread_local! {
     static CAPTURING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-struct CaptureGuard(usize);
+pub(super) struct CaptureGuard(usize);
 
 impl CaptureGuard {
-    fn enter(client: &Client) -> Result<Self, CaptureOutcome> {
+    pub(super) fn enter(client: &Client) -> Result<Self, CaptureOutcome> {
         let key = client as *const Client as usize;
         CAPTURING
             .try_with(|active| {
@@ -297,25 +304,41 @@ impl Client {
             Err(outcome) => return outcome,
         };
         let snapshot = self.state.as_ref().unwrap().snapshot();
-        let wire =
-            match self
-                .producer
-                .as_ref()
-                .unwrap()
-                .prepare(input.into(), &snapshot, Utc::now())
-            {
-                Ok(wire) => wire,
-                Err(outcome) => return outcome,
-            };
-        // A hook can close the client. Its outer capture must not be admitted.
-        if self.closed.load(Ordering::Acquire) {
-            return CaptureOutcome::Closed;
-        }
+        self.capture_snapshot(input.into(), &snapshot)
+    }
+
+    /// The caller owns the recursion guard and the operation's identity snapshot.
+    pub(super) fn capture_snapshot(&self, input: Capture, snapshot: &Snapshot) -> CaptureOutcome {
+        let wire = match self.prepare_snapshot(input, snapshot) {
+            Ok(wire) => wire,
+            Err(outcome) => return outcome,
+        };
         let uuid = wire.uuid;
         match self.transport.as_ref().unwrap().enqueue_prepared(wire) {
             Admission::Accepted => CaptureOutcome::Accepted { uuid },
             Admission::Closed => CaptureOutcome::Closed,
         }
+    }
+
+    /// Prepare outside SDK locks; hooks can inspect, reset, or close the client.
+    pub(super) fn prepare_snapshot(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+    ) -> Result<CaptureEvent, CaptureOutcome> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CaptureOutcome::Closed);
+        }
+        let wire = self
+            .producer
+            .as_ref()
+            .unwrap()
+            .prepare(input, snapshot, Utc::now())?;
+        // A hook can close the client. Its outer capture must not be admitted.
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CaptureOutcome::Closed);
+        }
+        Ok(wire)
     }
 
     /// Capture `$screen` through the ordinary event pipeline. The explicit name
