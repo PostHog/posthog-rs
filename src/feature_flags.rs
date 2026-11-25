@@ -589,12 +589,13 @@ struct PropertyMatchContext<'a> {
 /// Flag dependency work shared by one top-level flag evaluation.
 #[derive(Default)]
 struct DependencyResults {
-    /// Conclusive results, keyed by flag key. Within one top-level evaluation a
-    /// flag's result depends only on the shared inputs, so a flag referenced
-    /// many times is evaluated once.
+    /// Results keyed by flag key. Within one top-level evaluation a flag's
+    /// result depends only on the shared inputs, so a flag referenced many
+    /// times is evaluated once. Results that depend on where the flag was
+    /// reached aren't stored.
     values: HashMap<String, CachedDependency>,
-    /// Dependencies evaluated so far. Inconclusive results aren't reused, so
-    /// this bounds the work when shared dependencies can't be resolved.
+    /// Dependencies evaluated so far. Results that depend on where the flag was
+    /// reached aren't reused, so this bounds the work they can repeat.
     evaluations: usize,
     /// The deepest dependency reached by the flag being evaluated.
     deepest_dependency: usize,
@@ -603,10 +604,10 @@ struct DependencyResults {
     is_path_dependent: bool,
 }
 
-/// A conclusive flag dependency result and how much deeper than the flag its
-/// dependencies reach, so reusing it is limited by depth like evaluating it.
+/// A flag dependency result, the inconclusive message if it had none, and how
+/// much deeper than the flag its dependencies reach.
 struct CachedDependency {
-    value: FlagValue,
+    result: Result<FlagValue, String>,
     height: usize,
 }
 
@@ -1713,23 +1714,25 @@ fn evaluate_flag_dependency(
         )));
     }
 
-    let cached = results
-        .borrow()
-        .values
-        .get(&flag.key)
-        .map(|cached| (cached.value.clone(), cached.height));
-    let deepest = depth + cached.as_ref().map_or(0, |(_, height)| *height);
-    if deepest >= MAX_FLAG_DEPENDENCY_DEPTH {
+    if depth >= MAX_FLAG_DEPENDENCY_DEPTH {
         results.borrow_mut().is_path_dependent = true;
         return Err(InconclusiveMatchError::new(&format!(
             "Flag dependency chain is deeper than the limit of {}",
             MAX_FLAG_DEPENDENCY_DEPTH
         )));
     }
-    if let Some((value, _)) = cached {
+
+    // A cached result whose dependencies don't fit under the limit from here
+    // is evaluated again, so it hits the limit exactly where a fresh
+    // evaluation would.
+    let cached = results.borrow().values.get(&flag.key).and_then(|cached| {
+        (depth + cached.height < MAX_FLAG_DEPENDENCY_DEPTH)
+            .then(|| (cached.result.clone(), depth + cached.height))
+    });
+    if let Some((result, deepest)) = cached {
         let mut results = results.borrow_mut();
         results.deepest_dependency = results.deepest_dependency.max(deepest);
-        return Ok(value);
+        return result.map_err(|message| InconclusiveMatchError::new(&message));
     }
 
     let (outer_deepest, outer_is_path_dependent) = {
@@ -1761,11 +1764,14 @@ fn evaluate_flag_dependency(
     let mut results = results.borrow_mut();
     let inner_deepest = results.deepest_dependency;
     let inner_is_path_dependent = results.is_path_dependent;
-    if let (Ok(value), false) = (&result, inner_is_path_dependent) {
+    if !inner_is_path_dependent {
         results.values.insert(
             flag.key.clone(),
             CachedDependency {
-                value: value.clone(),
+                result: result
+                    .as_ref()
+                    .map(FlagValue::clone)
+                    .map_err(|error| error.message.clone()),
                 height: inner_deepest - depth,
             },
         );
@@ -6819,6 +6825,104 @@ mod flag_dependency_context_tests {
                 filters
             );
         }
+    }
+
+    #[test]
+    fn cached_dependency_too_deep_to_reuse_is_evaluated_again() {
+        // `checked` is false at any depth: its `plan` filter rules out its only
+        // condition, whatever its dependency gives. It's cached at the top, then
+        // reached again one flag short of the limit, where reusing its cached
+        // depth would exceed the limit but evaluating it again doesn't need to.
+        let deep = flag(
+            "deep",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        let checked = flag(
+            "checked",
+            None,
+            json!({"properties": [
+                {"key": "$feature/deep", "value": true, "operator": "exact", "type": "flag"},
+                {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+            ], "rollout_percentage": 100}),
+        );
+        let not_checked =
+            json!({"key": "$feature/checked", "value": false, "operator": "exact", "type": "flag"});
+        let length = MAX_FLAG_DEPENDENCY_DEPTH - 2;
+        let mut chain = vec![flag(
+            "chain-1",
+            None,
+            json!({"properties": [not_checked], "rollout_percentage": 100}),
+        )];
+        for i in 2..=length {
+            chain.push(depends_on(
+                &format!("chain-{i}"),
+                None,
+                &format!("chain-{}", i - 1),
+            ));
+        }
+        let top = flag(
+            "top",
+            None,
+            json!({"properties": [
+                not_checked,
+                {"key": format!("$feature/chain-{length}"), "value": true, "operator": "exact", "type": "flag"}
+            ], "rollout_percentage": 100}),
+        );
+        let mut refs: Vec<&FeatureFlag> = chain.iter().collect();
+        refs.extend([&deep, &checked]);
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("free"))]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&top, &refs, &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn inconclusive_dependency_is_evaluated_once() {
+        // Every condition but the last references the same inconclusive
+        // dependency and is then ruled out, more times than the evaluation
+        // budget. The last condition's dependency still resolves.
+        let unknown = flag(
+            "unknown",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}),
+        );
+        let known = flag(
+            "known",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        let mut conditions: Vec<serde_json::Value> = (0..MAX_FLAG_DEPENDENCY_EVALUATIONS + 10)
+            .map(|_| {
+                json!({"properties": [
+                    {"key": "$feature/unknown", "value": true, "operator": "exact", "type": "flag"},
+                    {"key": "region", "value": "us", "operator": "exact", "type": "person"}
+                ], "rollout_percentage": 100})
+            })
+            .collect();
+        conditions.push(json!({"properties": [
+            {"key": "$feature/known", "value": true, "operator": "exact", "type": "flag"}
+        ], "rollout_percentage": 100}));
+        let top: FeatureFlag = serde_json::from_value(json!({
+            "key": "top",
+            "active": true,
+            "filters": {"groups": conditions}
+        }))
+        .unwrap();
+        let inputs = Inputs {
+            person_properties: props(&[("region", json!("eu"))]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&top, &[&unknown, &known], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
     }
 
     /// A flag whose only filter is a cohort nested `depth` groups deep, with a
