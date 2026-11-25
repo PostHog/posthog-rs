@@ -21,9 +21,9 @@ mod tests;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PersonProfiles {
-    /// Do not process profiles by default; ignore identify/alias/profile operations.
+    /// Do not process profiles by default; ignore identity/profile/group operations.
     Never,
-    /// Process after identification or explicit alias/profile creation/property updates.
+    /// Process after identification or explicit alias/profile/group operations.
     #[default]
     IdentifiedOnly,
     /// Process all events by default, including anonymous events.
@@ -147,7 +147,7 @@ impl Client {
             .is_some_and(|state| state.snapshot().identified)
     }
 
-    fn identity_guard(&self, operation: &str) -> Option<CaptureGuard> {
+    pub(super) fn identity_guard(&self, operation: &str) -> Option<CaptureGuard> {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return None;
         }
@@ -343,8 +343,9 @@ impl Client {
     /// Start a fresh anonymous identity, preserving the device ID. Clears the
     /// identified and person-processing state, and the last screen name, so
     /// `$screen_name` is no longer added until the next `screen`. Emits no event
-    /// and preserves queued events. Clears explicit consent and restores Config::opt_out;
-    /// with the normal default, reset re-enables collection. Setup bootstrap is not
+    /// and preserves queued events. Clears registered properties, groups and explicit
+    /// consent, restoring Config::opt_out; with the normal default, reset re-enables
+    /// collection. Setup bootstrap is not
     /// reapplied. A hook may reset:
     /// its already-snapshotted outer event retains the old identity.
     pub fn reset(&self) {

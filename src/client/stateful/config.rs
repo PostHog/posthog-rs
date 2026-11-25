@@ -56,7 +56,7 @@ pub struct Config {
     /// kept with a warning. A blank value is ignored. To link an anonymous ID to the
     /// user with `$identify`, call `identify` after initialization instead.
     pub bootstrap_identified_id: Option<String>,
-    /// Default person processing and identity-operation policy. Default: IdentifiedOnly.
+    /// Default person processing and identity/group-operation policy. Default: IdentifiedOnly.
     /// An event's `process_person_profile` option, then its
     /// `$process_person_profile` property, take precedence over this mode.
     pub person_profiles: PersonProfiles,
@@ -94,7 +94,7 @@ pub struct Config {
     pub capture_compression: Option<CaptureCompression>,
     /// Disable server-side GeoIP enrichment. Default: false.
     pub disable_geoip: bool,
-    /// Platform properties cached at initialization. Per-event properties win.
+    /// Platform properties cached at initialization. Per-event and registered properties win.
     /// Missing $os/$os_version are discovered once during initialization.
     pub platform_context: HashMap<String, serde_json::Value>,
     /// SDK name for events' `$lib` and for the `PostHog-Sdk-Info` and

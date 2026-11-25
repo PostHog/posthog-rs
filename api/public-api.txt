@@ -232,6 +232,12 @@ pub fn posthog::stateful::Client::is_disabled(&self) -> bool
 pub async fn posthog::stateful::Client::shutdown(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::shutdown_blocking(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
 impl posthog::stateful::Client
+pub fn posthog::stateful::Client::group(&self, impl core::convert::Into<posthog::stateful::Group>)
+pub fn posthog::stateful::Client::group_identify(&self, impl core::convert::Into<posthog::stateful::Group>)
+pub fn posthog::stateful::Client::register(&self, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>)
+pub fn posthog::stateful::Client::remove_group(&self, &str)
+pub fn posthog::stateful::Client::unregister(&self, &str)
+impl posthog::stateful::Client
 pub fn posthog::stateful::Client::is_opt_out(&self) -> bool
 pub fn posthog::stateful::Client::opt_in(&self)
 pub fn posthog::stateful::Client::opt_out(&self)
@@ -265,6 +271,15 @@ pub fn posthog::stateful::Config::on_error<F>(&mut self, F) -> &mut Self where F
 #[non_exhaustive] pub struct posthog::stateful::DrainReport
 pub posthog::stateful::DrainReport::delivery: posthog::stateful::DeliveryOutcome
 pub posthog::stateful::DrainReport::state: posthog::stateful::PersistenceOutcome
+#[non_exhaustive] pub struct posthog::stateful::Group
+pub posthog::stateful::Group::group_key: alloc::string::String
+pub posthog::stateful::Group::group_type: alloc::string::String
+pub posthog::stateful::Group::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::Group::properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+impl posthog::stateful::Group
+pub fn posthog::stateful::Group::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+impl<T: core::convert::Into<alloc::string::String>, K: core::convert::Into<alloc::string::String>> core::convert::From<(T, K)> for posthog::stateful::Group
+pub fn posthog::stateful::Group::from((T, K)) -> Self
 #[non_exhaustive] pub struct posthog::stateful::Identify
 pub posthog::stateful::Identify::distinct_id: alloc::string::String
 pub posthog::stateful::Identify::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>

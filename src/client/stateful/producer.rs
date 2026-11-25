@@ -12,6 +12,7 @@ use crate::capture_event::CaptureEvent;
 use crate::client::common::apply_before_send_hooks;
 use crate::client::transport::Admission;
 use crate::constants::PROCESS_PERSON_PROFILE_OPT;
+use crate::event::IDENTIFY_STYLE_EVENTS;
 use crate::{BeforeSendHook, Event};
 
 #[cfg(test)]
@@ -25,7 +26,8 @@ mod tests;
 pub struct Capture {
     /// Nonblank event name.
     pub event: String,
-    /// Per-event properties. These take precedence over platform and SDK defaults.
+    /// Per-event properties. These take precedence over registered context,
+    /// remembered groups, platform context and SDK defaults using Rust's fill rules.
     pub properties: HashMap<String, Value>,
     /// Explicit wire options, with the same precedence as the server Event API.
     /// With the default configuration, a fresh anonymous client sends
@@ -206,6 +208,28 @@ impl Producer {
         );
         event.ensure_timestamp(now);
         event.ensure_uuid();
+        let identity_event = IDENTIFY_STYLE_EVENTS.contains(&event.event_name());
+        for (key, value) in &snapshot.registered {
+            // A registered false would make PostHog drop or ignore an identity
+            // event, so it never reaches one (capture spec), as in posthog-ios
+            // and posthog-android.
+            if identity_event && key == "$process_person_profile" {
+                continue;
+            }
+            event.insert_prop_default(key.clone(), value.clone());
+        }
+        if !snapshot.groups.is_empty() {
+            event.insert_prop_default(
+                "$groups",
+                Value::Object(
+                    snapshot
+                        .groups
+                        .iter()
+                        .map(|(kind, key)| (kind.clone(), key.clone().into()))
+                        .collect(),
+                ),
+            );
+        }
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
         }
