@@ -567,6 +567,7 @@ impl KnownAbsentKeys<'_> {
 
 /// [`EvaluationContext`] plus the caller's known-absent keys, kept separate so
 /// `EvaluationContext` stays constructible with a struct literal.
+#[derive(Clone, Copy)]
 struct PropertyMatchContext<'a> {
     evaluation: &'a EvaluationContext<'a>,
     /// The caller's person properties. A group condition matches group
@@ -580,6 +581,9 @@ struct PropertyMatchContext<'a> {
     dependency_path: Option<&'a DependencyPath<'a>>,
     /// Flag dependency work for this top-level evaluation.
     dependency_results: &'a RefCell<DependencyResults>,
+    /// How many flag dependencies and cohort levels enclose the property being
+    /// matched. The top-level flag's properties are at depth 0.
+    nesting_depth: usize,
 }
 
 /// Flag dependency work shared by one top-level flag evaluation.
@@ -588,10 +592,22 @@ struct DependencyResults {
     /// Conclusive results, keyed by flag key. Within one top-level evaluation a
     /// flag's result depends only on the shared inputs, so a flag referenced
     /// many times is evaluated once.
-    values: HashMap<String, FlagValue>,
+    values: HashMap<String, CachedDependency>,
     /// Dependencies evaluated so far. Inconclusive results aren't reused, so
     /// this bounds the work when shared dependencies can't be resolved.
     evaluations: usize,
+    /// The deepest dependency reached by the flag being evaluated.
+    deepest_dependency: usize,
+    /// Whether the flag being evaluated hit the depth limit, the evaluation
+    /// budget or a cycle, so its result depends on where it was reached.
+    is_path_dependent: bool,
+}
+
+/// A conclusive flag dependency result and how much deeper than the flag its
+/// dependencies reach, so reusing it is limited by depth like evaluating it.
+struct CachedDependency {
+    value: FlagValue,
+    height: usize,
 }
 
 /// One flag on the chain of flag dependencies being evaluated, so a flag that
@@ -599,8 +615,6 @@ struct DependencyResults {
 struct DependencyPath<'a> {
     flag_key: &'a str,
     parent: Option<&'a DependencyPath<'a>>,
-    /// The number of flags on the path, including this one.
-    depth: usize,
 }
 
 impl DependencyPath<'_> {
@@ -1095,11 +1109,14 @@ pub(crate) fn match_feature_flag_with_known_absent(
         known_absent,
         None,
         &RefCell::default(),
+        0,
     )
 }
 
 /// Evaluates a top-level flag, or a flag dependency with the same top-level
-/// inputs. `dependency_path` holds the flags already being evaluated.
+/// inputs. `dependency_path` holds the flags already being evaluated, and
+/// `nesting_depth` is the depth of the flag's properties.
+#[allow(clippy::too_many_arguments)]
 fn match_feature_flag_in_context(
     flag: &FeatureFlag,
     person_properties: &HashMap<String, serde_json::Value>,
@@ -1107,11 +1124,11 @@ fn match_feature_flag_in_context(
     known_absent: &KnownAbsentProperties,
     dependency_path: Option<&DependencyPath>,
     dependency_results: &RefCell<DependencyResults>,
+    nesting_depth: usize,
 ) -> Result<FlagValue, InconclusiveMatchError> {
     let dependency_path = DependencyPath {
         flag_key: &flag.key,
         parent: dependency_path,
-        depth: dependency_path.map_or(1, |path| path.depth + 1),
     };
     evaluate_feature_flag(
         flag,
@@ -1132,6 +1149,7 @@ fn match_feature_flag_in_context(
                     known_absent_keys,
                     dependency_path: Some(&dependency_path),
                     dependency_results,
+                    nesting_depth,
                 },
             )
         },
@@ -1284,6 +1302,7 @@ pub fn match_property_with_context(
             known_absent_keys: None,
             dependency_path: None,
             dependency_results: &RefCell::default(),
+            nesting_depth: 0,
         },
     )
 }
@@ -1332,6 +1351,7 @@ fn match_cohort_property(
             .filter(|keys| keys.filter_type == "person"),
         dependency_path: ctx.dependency_path,
         dependency_results: ctx.dependency_results,
+        nesting_depth: ctx.nesting_depth,
     };
     let mut active_cohorts = HashSet::new();
     let is_in_cohort =
@@ -1392,7 +1412,9 @@ impl CohortMatchError {
 /// Real cohort nesting is a handful of levels at most.
 const MAX_COHORT_RESOLUTION_DEPTH: usize = 100;
 
-/// How many flags deep local evaluation follows flag dependencies.
+/// How many flags deep local evaluation follows flag dependencies. Cohort levels
+/// a dependency is reached through count too, so alternating cohorts and flags
+/// can't nest past either limit.
 const MAX_FLAG_DEPENDENCY_DEPTH: usize = 100;
 
 /// How many flag dependencies one top-level flag evaluation evaluates at most.
@@ -1547,9 +1569,16 @@ fn match_property_group_values(
         } else {
             // Leaf property filter.
             match serde_json::from_value::<CohortProperty>(value.clone()) {
-                Ok(prop) => match_property_in_context(&prop.property, properties, ctx)
-                    .map(|matches| matches != prop.negation)
-                    .map_err(CohortMatchError::Inconclusive),
+                Ok(prop) => match_property_in_context(
+                    &prop.property,
+                    properties,
+                    &PropertyMatchContext {
+                        nesting_depth: ctx.nesting_depth + resolution_depth + 1,
+                        ..*ctx
+                    },
+                )
+                .map(|matches| matches != prop.negation)
+                .map_err(CohortMatchError::Inconclusive),
                 Err(e) => Err(CohortMatchError::InvalidDefinition(
                     InconclusiveMatchError::new(&format!("Unable to parse cohort property: {}", e)),
                 )),
@@ -1627,59 +1656,7 @@ fn match_flag_dependency_property(
         InconclusiveMatchError::new(&format!("Flag '{}' not found in local cache", flag_key))
     })?;
 
-    if ctx
-        .dependency_path
-        .is_some_and(|path| path.contains(flag_key))
-    {
-        return Err(InconclusiveMatchError::new(&format!(
-            "Flag '{}' is part of a dependency cycle",
-            flag_key
-        )));
-    }
-
-    let cached_value = ctx
-        .dependency_results
-        .borrow()
-        .values
-        .get(flag_key)
-        .cloned();
-    let flag_value = match cached_value {
-        Some(value) => value,
-        None => {
-            if ctx
-                .dependency_path
-                .is_some_and(|path| path.depth >= MAX_FLAG_DEPENDENCY_DEPTH)
-            {
-                return Err(InconclusiveMatchError::new(&format!(
-                    "Flag dependency chain is deeper than the limit of {}",
-                    MAX_FLAG_DEPENDENCY_DEPTH
-                )));
-            }
-            {
-                let mut results = ctx.dependency_results.borrow_mut();
-                if results.evaluations >= MAX_FLAG_DEPENDENCY_EVALUATIONS {
-                    return Err(InconclusiveMatchError::new(&format!(
-                        "Too many flag dependency evaluations, over the limit of {}",
-                        MAX_FLAG_DEPENDENCY_EVALUATIONS
-                    )));
-                }
-                results.evaluations += 1;
-            }
-            let value = match_feature_flag_in_context(
-                flag,
-                ctx.person_properties,
-                ctx.evaluation,
-                ctx.known_absent,
-                ctx.dependency_path,
-                ctx.dependency_results,
-            )?;
-            ctx.dependency_results
-                .borrow_mut()
-                .values
-                .insert(flag_key.to_string(), value.clone());
-            value
-        }
-    };
+    let flag_value = evaluate_flag_dependency(flag, ctx)?;
 
     // Compare the flag value with the expected value
     let expected = &property.value;
@@ -1714,6 +1691,88 @@ fn match_flag_dependency_property(
             )));
         }
     })
+}
+
+/// Evaluate the flag a dependency filter references, or reuse its result from
+/// earlier in the same top-level evaluation.
+fn evaluate_flag_dependency(
+    flag: &FeatureFlag,
+    ctx: &PropertyMatchContext,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    let results = ctx.dependency_results;
+    let depth = ctx.nesting_depth + 1;
+
+    if ctx
+        .dependency_path
+        .is_some_and(|path| path.contains(&flag.key))
+    {
+        results.borrow_mut().is_path_dependent = true;
+        return Err(InconclusiveMatchError::new(&format!(
+            "Flag '{}' is part of a dependency cycle",
+            flag.key
+        )));
+    }
+
+    let cached = results
+        .borrow()
+        .values
+        .get(&flag.key)
+        .map(|cached| (cached.value.clone(), cached.height));
+    let deepest = depth + cached.as_ref().map_or(0, |(_, height)| *height);
+    if deepest >= MAX_FLAG_DEPENDENCY_DEPTH {
+        results.borrow_mut().is_path_dependent = true;
+        return Err(InconclusiveMatchError::new(&format!(
+            "Flag dependency chain is deeper than the limit of {}",
+            MAX_FLAG_DEPENDENCY_DEPTH
+        )));
+    }
+    if let Some((value, _)) = cached {
+        let mut results = results.borrow_mut();
+        results.deepest_dependency = results.deepest_dependency.max(deepest);
+        return Ok(value);
+    }
+
+    let (outer_deepest, outer_is_path_dependent) = {
+        let mut results = results.borrow_mut();
+        if results.evaluations >= MAX_FLAG_DEPENDENCY_EVALUATIONS {
+            results.is_path_dependent = true;
+            return Err(InconclusiveMatchError::new(&format!(
+                "Too many flag dependency evaluations, over the limit of {}",
+                MAX_FLAG_DEPENDENCY_EVALUATIONS
+            )));
+        }
+        results.evaluations += 1;
+        let outer = (results.deepest_dependency, results.is_path_dependent);
+        results.deepest_dependency = depth;
+        results.is_path_dependent = false;
+        outer
+    };
+
+    let result = match_feature_flag_in_context(
+        flag,
+        ctx.person_properties,
+        ctx.evaluation,
+        ctx.known_absent,
+        ctx.dependency_path,
+        results,
+        depth,
+    );
+
+    let mut results = results.borrow_mut();
+    let inner_deepest = results.deepest_dependency;
+    let inner_is_path_dependent = results.is_path_dependent;
+    if let (Ok(value), false) = (&result, inner_is_path_dependent) {
+        results.values.insert(
+            flag.key.clone(),
+            CachedDependency {
+                value: value.clone(),
+                height: inner_deepest - depth,
+            },
+        );
+    }
+    results.deepest_dependency = outer_deepest.max(inner_deepest);
+    results.is_path_dependent = outer_is_path_dependent || inner_is_path_dependent;
+    result
 }
 
 /// Parse a relative date string like "-7d", "7d", "-24h", "-2w", "-3m" or "-1y".
@@ -6719,6 +6778,131 @@ mod flag_dependency_context_tests {
 
         assert!(heavy.is_err());
         assert_eq!(light.unwrap(), FlagValue::Boolean(true));
+    }
+
+    #[test]
+    fn cached_dependency_respects_the_depth_limit_in_either_filter_order() {
+        // `leaf` is reached directly and as the end of a chain that puts it one
+        // flag past the depth limit. The filter order mustn't change the result.
+        let leaf = flag(
+            "leaf",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        let mut chain = vec![depends_on("chain-1", None, "leaf")];
+        let length = MAX_FLAG_DEPENDENCY_DEPTH - 1;
+        for i in 2..=length {
+            chain.push(depends_on(
+                &format!("chain-{i}"),
+                None,
+                &format!("chain-{}", i - 1),
+            ));
+        }
+        let leaf_filter =
+            json!({"key": "$feature/leaf", "value": true, "operator": "exact", "type": "flag"});
+        let chain_filter = json!({"key": format!("$feature/chain-{length}"), "value": true, "operator": "exact", "type": "flag"});
+        let mut refs: Vec<&FeatureFlag> = chain.iter().collect();
+        refs.push(&leaf);
+
+        for filters in [
+            json!([leaf_filter, chain_filter]),
+            json!([chain_filter, leaf_filter]),
+        ] {
+            let top = flag(
+                "top",
+                None,
+                json!({"properties": filters, "rollout_percentage": 100}),
+            );
+            assert!(
+                evaluate(&top, &refs, &Inputs::default()).is_err(),
+                "{}",
+                filters
+            );
+        }
+    }
+
+    /// A flag whose only filter is a cohort nested `depth` groups deep, with a
+    /// leaf that depends on `next`.
+    fn flag_through_nested_cohort(
+        index: usize,
+        depth: usize,
+        next: &str,
+    ) -> (FeatureFlag, CohortDefinition) {
+        let mut group = json!({"type": "AND", "values": [
+            {"key": format!("$feature/{next}"), "value": true, "operator": "exact", "type": "flag"}
+        ]});
+        for _ in 0..depth {
+            group = json!({"type": "AND", "values": [group]});
+        }
+        (
+            flag(
+                &format!("flag-{index}"),
+                None,
+                json!({"properties": [{"key": "id", "value": index, "operator": "in", "type": "cohort"}], "rollout_percentage": 100}),
+            ),
+            CohortDefinition {
+                id: index.to_string(),
+                properties: group,
+            },
+        )
+    }
+
+    fn alternating_chain(
+        length: usize,
+        cohort_depth: usize,
+    ) -> (Vec<FeatureFlag>, HashMap<String, CohortDefinition>) {
+        let mut flags = vec![flag(
+            &format!("flag-{length}"),
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        )];
+        let mut cohorts = HashMap::new();
+        for i in 0..length {
+            let (flag, cohort) =
+                flag_through_nested_cohort(i, cohort_depth, &format!("flag-{}", i + 1));
+            flags.push(flag);
+            cohorts.insert(i.to_string(), cohort);
+        }
+        (flags, cohorts)
+    }
+
+    #[test]
+    fn alternating_cohort_and_flag_chain_is_inconclusive() {
+        // Each flag goes through a cohort nested just under the cohort limit,
+        // so neither limit alone stops the chain.
+        let is_inconclusive = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let (flags, cohorts) = alternating_chain(
+                    MAX_FLAG_DEPENDENCY_DEPTH - 1,
+                    MAX_COHORT_RESOLUTION_DEPTH - 5,
+                );
+                let refs: Vec<&FeatureFlag> = flags.iter().collect();
+                let inputs = Inputs {
+                    cohorts,
+                    ..Inputs::default()
+                };
+                evaluate(&flags[1], &refs, &inputs).is_err()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(is_inconclusive);
+    }
+
+    #[test]
+    fn short_alternating_cohort_and_flag_chain_resolves() {
+        let (flags, cohorts) = alternating_chain(3, 5);
+        let refs: Vec<&FeatureFlag> = flags.iter().collect();
+        let inputs = Inputs {
+            cohorts,
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&flags[1], &refs, &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
     }
 
     #[test]
