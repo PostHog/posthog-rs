@@ -18,13 +18,20 @@ impl ToolScope {
     /// its tool's events wait too, and take the session only once it is known.
     pub(crate) fn new(host: Option<RequestContext>, call: &EventContext, pending: bool) -> Self {
         let mut context = host.unwrap_or_default();
-        if let Some(identity) = &call.identity {
-            context.properties.remove(key::GROUPS);
-            context.distinct_id = Some(identity.distinct_id.clone());
-            if !identity.groups.is_empty() {
-                let groups = serde_json::to_value(&identity.groups).unwrap_or_default();
-                context.properties.insert(key::GROUPS.to_string(), groups);
-            }
+        // Only `identify` names a call's person, as for its MCP events: an
+        // anonymous call keeps neither a host header's nor a parent call's.
+        context.distinct_id = call
+            .identity
+            .as_ref()
+            .map(|identity| identity.distinct_id.clone());
+        context.properties.remove(key::GROUPS);
+        if let Some(identity) = call
+            .identity
+            .as_ref()
+            .filter(|identity| !identity.groups.is_empty())
+        {
+            let groups = serde_json::to_value(&identity.groups).unwrap_or_default();
+            context.properties.insert(key::GROUPS.to_string(), groups);
         }
         context.held = pending.then(HeldEvents::new);
         if pending {
@@ -91,28 +98,32 @@ mod tests {
     }
 
     #[test]
-    fn a_call_keeps_only_its_own_identitys_groups() {
+    fn a_call_takes_only_its_own_identity() {
         let identity = |groups: &[(&str, &str)]| {
             groups
                 .iter()
-                .fold(Identity::new("user"), |identity, (kind, key)| {
+                .fold(Identity::new("nested-user"), |identity, (kind, key)| {
                     identity.with_group(*kind, *key)
                 })
         };
         let mut parent = call("ses_parent");
-        parent.identity = Some(identity(&[("company", "acme")]));
+        parent.identity = Some(Identity::new("parent-user").with_group("company", "acme"));
         let host = ToolScope::new(None, &parent, false).context.clone();
+        let initech = serde_json::json!({ "company": "initech" });
         let cases = [
-            (identity(&[]), None),
+            (None, None, None),
+            (Some(identity(&[])), Some("nested-user"), None),
             (
-                identity(&[("company", "initech")]),
-                Some(serde_json::json!({ "company": "initech" })),
+                Some(identity(&[("company", "initech")])),
+                Some("nested-user"),
+                Some(initech),
             ),
         ];
-        for (nested_identity, groups) in cases {
+        for (nested_identity, distinct_id, groups) in cases {
             let mut nested = call("ses_nested");
-            nested.identity = Some(nested_identity);
+            nested.identity = nested_identity;
             let scope = ToolScope::new(Some(host.clone()), &nested, false);
+            assert_eq!(scope.context.get_distinct_id(), distinct_id);
             assert_eq!(scope.context.properties.get(key::GROUPS).cloned(), groups);
         }
     }

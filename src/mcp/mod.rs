@@ -51,7 +51,7 @@
 //! carry its call's `$session_id` and `$mcp_session_source`: the handler runs
 //! in a [`RequestContext`](crate::RequestContext) that holds them, and, when
 //! [`McpOptionsBuilder::identify`] resolves a person, their distinct ID and
-//! `$groups`. Build such an event with `RequestContext::current()` and
+//! `$groups`; an anonymous call's context has neither, as its MCP events do. Build such an event with `RequestContext::current()` and
 //! [`RequestContext::event`](crate::RequestContext::event) to take that
 //! distinct ID. Work the handler spawns onto another task takes the context
 //! only when scoped with [`RequestContext::scope`](crate::RequestContext::scope).
