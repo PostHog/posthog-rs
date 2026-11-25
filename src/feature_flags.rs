@@ -597,7 +597,8 @@ struct DependencyResults {
     /// Dependencies evaluated so far. Results that depend on where the flag was
     /// reached aren't reused, so this bounds the work they can repeat.
     evaluations: usize,
-    /// The deepest dependency reached by the flag being evaluated.
+    /// The deepest dependency or cohort level reached by the flag being
+    /// evaluated.
     deepest_dependency: usize,
     /// Whether the flag being evaluated hit the depth limit, the evaluation
     /// budget or a cycle, so its result depends on where it was reached.
@@ -1354,10 +1355,17 @@ fn match_cohort_property(
         dependency_results: ctx.dependency_results,
         nesting_depth: ctx.nesting_depth,
     };
+    // Cohort levels count on from the enclosing flag dependency depth, so
+    // flags and cohorts share one depth limit.
     let mut active_cohorts = HashSet::new();
-    let is_in_cohort =
-        match_cohort_by_id(&cohort_id, properties, &cohort_ctx, &mut active_cohorts, 0)
-            .map_err(CohortMatchError::into_inconclusive)?;
+    let is_in_cohort = match_cohort_by_id(
+        &cohort_id,
+        properties,
+        &cohort_ctx,
+        &mut active_cohorts,
+        ctx.nesting_depth,
+    )
+    .map_err(CohortMatchError::into_inconclusive)?;
 
     // Cohort references omit the operator in API payloads, so "exact" means membership.
     Ok(match property.operator.as_str() {
@@ -1405,13 +1413,16 @@ impl CohortMatchError {
 }
 
 /// How deeply local cohort evaluation will recurse through cohort references
-/// and nested property groups combined.
+/// and nested property groups combined, counting on from the flag dependency
+/// depth the cohort is reached at.
 ///
 /// A cycle check alone bounds repeats, not depth: a chain of distinct cohorts is
 /// acyclic and still recurses once per link. Counting only cohort references is
 /// also insufficient because each cohort can contain nested property groups.
-/// Real cohort nesting is a handful of levels at most.
-const MAX_COHORT_RESOLUTION_DEPTH: usize = 100;
+/// Real cohort nesting is a handful of levels at most. Cached flag dependency
+/// results are reused only where their cohort levels fit under the flag
+/// dependency limit, so the two limits are the same.
+const MAX_COHORT_RESOLUTION_DEPTH: usize = MAX_FLAG_DEPENDENCY_DEPTH;
 
 /// How many flags deep local evaluation follows flag dependencies. Cohort levels
 /// a dependency is reached through count too, so alternating cohorts and flags
@@ -1443,6 +1454,7 @@ fn match_cohort_by_id(
     })?;
 
     if resolution_depth >= MAX_COHORT_RESOLUTION_DEPTH {
+        ctx.dependency_results.borrow_mut().is_path_dependent = true;
         return Err(CohortMatchError::InvalidDefinition(
             InconclusiveMatchError::new(&format!(
                 "Cohort '{}' is nested deeper than the limit of {}",
@@ -1489,12 +1501,17 @@ fn match_property_group(
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
     if resolution_depth >= MAX_COHORT_RESOLUTION_DEPTH {
+        ctx.dependency_results.borrow_mut().is_path_dependent = true;
         return Err(CohortMatchError::InvalidDefinition(
             InconclusiveMatchError::new(&format!(
                 "Cohort property groups are nested deeper than the limit of {}",
                 MAX_COHORT_RESOLUTION_DEPTH
             )),
         ));
+    }
+    {
+        let mut results = ctx.dependency_results.borrow_mut();
+        results.deepest_dependency = results.deepest_dependency.max(resolution_depth);
     }
 
     if let Some(arr) = group.as_array() {
@@ -1574,7 +1591,7 @@ fn match_property_group_values(
                     &prop.property,
                     properties,
                     &PropertyMatchContext {
-                        nesting_depth: ctx.nesting_depth + resolution_depth + 1,
+                        nesting_depth: resolution_depth + 1,
                         ..*ctx
                     },
                 )
@@ -7007,6 +7024,91 @@ mod flag_dependency_context_tests {
             evaluate(&flags[1], &refs, &inputs).unwrap(),
             FlagValue::Boolean(true)
         );
+    }
+
+    /// A chain of flags whose deepest flag, at the depth limit's last level,
+    /// matches a cohort nested `cohort_depth` groups deep.
+    fn chain_ending_in_a_nested_cohort(
+        cohort_depth: usize,
+    ) -> (Vec<FeatureFlag>, HashMap<String, CohortDefinition>) {
+        let mut group = json!({"type": "AND", "values": [
+            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+        ]});
+        for _ in 0..cohort_depth {
+            group = json!({"type": "AND", "values": [group]});
+        }
+        let mut flags = chain(MAX_FLAG_DEPENDENCY_DEPTH);
+        flags[0] = flag(
+            "flag-0",
+            None,
+            json!({"properties": [{"key": "id", "value": 0, "operator": "in", "type": "cohort"}], "rollout_percentage": 100}),
+        );
+        let cohorts = HashMap::from([(
+            "0".to_string(),
+            CohortDefinition {
+                id: "0".to_string(),
+                properties: group,
+            },
+        )]);
+        (flags, cohorts)
+    }
+
+    #[test]
+    fn cohort_nesting_counts_from_the_enclosing_dependency_depth() {
+        for (cohort_depth, is_resolved) in [(0, true), (50, false)] {
+            let (flags, cohorts) = chain_ending_in_a_nested_cohort(cohort_depth);
+            let refs: Vec<&FeatureFlag> = flags.iter().collect();
+            let inputs = Inputs {
+                person_properties: props(&[("plan", json!("pro"))]),
+                cohorts,
+                ..Inputs::default()
+            };
+
+            let result = evaluate(flags.last().unwrap(), &refs, &inputs);
+            assert_eq!(result.is_ok(), is_resolved, "{cohort_depth}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn cached_dependency_respects_cohort_nesting_in_either_filter_order() {
+        // `nested` matches a cohort 50 groups deep. It's reached directly and
+        // at the end of a chain that puts it at the last flag dependency level,
+        // where its cohort is past the depth limit. The filter order mustn't
+        // change the result.
+        let (flags, cohorts) = chain_ending_in_a_nested_cohort(50);
+        let mut nested = flags[0].clone();
+        nested.key = "nested".to_string();
+        let mut chain = vec![depends_on("chain-1", None, "nested")];
+        let length = MAX_FLAG_DEPENDENCY_DEPTH - 2;
+        for i in 2..=length {
+            chain.push(depends_on(
+                &format!("chain-{i}"),
+                None,
+                &format!("chain-{}", i - 1),
+            ));
+        }
+        let nested_filter =
+            json!({"key": "$feature/nested", "value": true, "operator": "exact", "type": "flag"});
+        let chain_filter = json!({"key": format!("$feature/chain-{length}"), "value": true, "operator": "exact", "type": "flag"});
+        let mut refs: Vec<&FeatureFlag> = chain.iter().collect();
+        refs.push(&nested);
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("pro"))]),
+            cohorts,
+            ..Inputs::default()
+        };
+
+        for filters in [
+            json!([nested_filter, chain_filter]),
+            json!([chain_filter, nested_filter]),
+        ] {
+            let top = flag(
+                "top",
+                None,
+                json!({"properties": filters, "rollout_percentage": 100}),
+            );
+            assert!(evaluate(&top, &refs, &inputs).is_err(), "{}", filters);
+        }
     }
 
     #[test]
