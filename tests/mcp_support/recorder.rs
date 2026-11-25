@@ -27,8 +27,16 @@ impl Recorder {
         let endpoint = MockServer::start();
         let wire = Arc::new(Mutex::new(HashMap::new()));
         let sent = wire.clone();
+        let api_key = format!("test-token-{}", uuid::Uuid::now_v7());
+        let expected_authorization = format!("Bearer {api_key}");
         endpoint.mock(move |when, then| {
             when.is_true(move |request| {
+                // Pooled endpoints can receive late requests from a previous client.
+                if !request.headers_vec().iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization") && value == &expected_authorization
+                }) {
+                    return false;
+                }
                 let body: Value = serde_json::from_slice(request.body_ref()).unwrap_or_default();
                 let mut sent = sent.lock().unwrap();
                 for event in body["batch"].as_array().cloned().unwrap_or_default() {
@@ -43,7 +51,7 @@ impl Recorder {
         let events = Arc::new(Mutex::new(Vec::new()));
         let recorded = events.clone();
         let options = ClientOptionsBuilder::default()
-            .api_key("test-token".to_string())
+            .api_key(api_key)
             .host(endpoint.base_url())
             .before_send(move |event| {
                 recorded.lock().unwrap().push(event.clone());
@@ -108,6 +116,29 @@ impl Recorder {
         );
         events.remove(0)
     }
+}
+
+#[tokio::test]
+async fn recorder_ignores_late_requests_from_another_client() {
+    let recorder = Recorder::new().await;
+    reqwest::Client::new()
+        .post(format!(
+            "{}/i/v1/analytics/events",
+            recorder._endpoint.base_url()
+        ))
+        .bearer_auth("another-recorder")
+        .json(&serde_json::json!({
+            "batch": [{"event": "recorded-event", "uuid": "foreign", "properties": {}}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    recorder
+        .client
+        .capture(Event::new("recorded-event", "this-client"));
+    let sent = recorder.sent("recorded-event").await;
+    assert_eq!(sent["distinct_id"], "this-client");
+    recorder.client.shutdown().await;
 }
 
 pub fn property<'a>(event: &'a Event, key: &str) -> &'a Value {

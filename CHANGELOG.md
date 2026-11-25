@@ -1,5 +1,17 @@
 # posthog-rs
 
+## 1.5.0 — 2026-11-25
+
+### Minor changes
+
+- [eaead37](https://github.com/posthog/posthog-rs/commit/eaead370109b7ac832b4ab8291380c34cb8414c4) Local flag evaluation supports early-access feature enrollment. For a flag with `feature_enrollment`, the person property `$feature_enrollment/<flag key>` decides the flag before its release conditions: `true` or `"true"` is enrolled, any other value is opted out, and without it the flag is inconclusive and falls back to the server. Flags with experience continuity are also inconclusive locally, since only the server knows their persisted value. — Thanks @srednoff888-art for your first contribution 🎉!
+
+## 1.4.0 — 2026-11-24
+
+### Minor changes
+
+- [5f0633b](https://github.com/posthog/posthog-rs/commit/5f0633b6536df22cf92df0c687c90d0eebbfcae1) Add persistent event delivery for stateful clients and report storage failures through `on_error`. — Thanks @dustinbyrne!
+
 ## 1.3.0 — 2026-11-20
 
 ### Minor changes
