@@ -51,6 +51,43 @@ fn record(snapshot: &Snapshot) -> Vec<u8> {
 }
 
 #[test]
+fn consent_choices_round_trip_and_an_unreadable_choice_keeps_the_identity() {
+    let mut snapshot = Snapshot::anonymous("anonymous".into());
+    for choice in [None, Some(true), Some(false)] {
+        snapshot.opt_out = choice;
+        let directory = TestDirectory::new();
+        let mut store = FileStateStore::open(directory.lease()).unwrap().store;
+        store.save(&snapshot).unwrap();
+        assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
+    }
+    snapshot.opt_out = None;
+    for consent in [
+        None,
+        Some(serde_json::json!("true")),
+        Some(serde_json::json!(0)),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_slice(&record(&snapshot)).unwrap();
+        match consent {
+            Some(consent) => value["state"]["opt_out"] = consent,
+            None => {
+                value["state"].as_object_mut().unwrap().remove("opt_out");
+            }
+        }
+        let directory = TestDirectory::new();
+        let lease = directory.lease();
+        fs::write(
+            directory.path().join("state.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let opened = FileStateStore::open(lease).unwrap();
+        // The configured default applies, as when no choice was made.
+        assert_eq!(opened.snapshot, Some(snapshot.clone()));
+        assert!(opened.read_error.is_none());
+    }
+}
+
+#[test]
 fn namespace_has_stable_byte_encoding_and_zero_padded_hex() {
     for (token, instance, expected) in [
         (

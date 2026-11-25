@@ -175,6 +175,8 @@ impl Client {
     /// A different already-identified ID is ignored: call reset before switching users.
     /// Dropped/full events do not roll back local state or schedule linking-event replay.
     /// Persistence and delivery are asynchronous; this is not an ingestion acknowledgment.
+    /// While opted out, the identity still changes, but no `$identify` or `$set`
+    /// event is sent, now or after opt-in.
     pub fn identify(&self, input: impl Into<Identify>) {
         let Some(_guard) = self.identity_guard("identify") else {
             return;
@@ -244,7 +246,8 @@ impl Client {
 
     /// Link an alias to the current identity without changing either local ID.
     /// A blank alias, or one equal to the current distinct ID, is ignored with a
-    /// warning.
+    /// warning. While opted out, alias does nothing and does not enable person
+    /// processing (as in posthog-ios and the alias spec).
     pub fn alias(&self, input: impl Into<Alias>) {
         let Some(_guard) = self.identity_guard("alias") else {
             return;
@@ -254,27 +257,30 @@ impl Client {
             tracing::warn!("posthog-rs: alias requires a nonblank alias");
             return;
         }
+        let mut aliases_self = false;
         let result = self.state.as_ref().unwrap().mutate(|state| {
+            if self.snapshot_opted_out(state) {
+                return None;
+            }
             if state.distinct_id == alias {
+                aliases_self = true;
                 return None;
             }
             state.person_processing = true;
             Some(state.clone())
         });
-        match result {
-            Ok((_, None)) => {
-                tracing::warn!("posthog-rs: alias equals the current distinct ID; nothing to link");
-            }
-            Ok((_, Some(snapshot))) => {
-                let mut event = Capture::new("$create_alias");
-                event.options = options;
-                event.properties.insert("alias".into(), alias.into());
-                event
-                    .properties
-                    .insert("distinct_id".into(), snapshot.distinct_id.clone().into());
-                self.capture_person(event, &snapshot, None, false);
-            }
-            Err(_) => {}
+        if aliases_self {
+            tracing::warn!("posthog-rs: alias equals the current distinct ID; nothing to link");
+            return;
+        }
+        if let Ok((_, Some(snapshot))) = result {
+            let mut event = Capture::new("$create_alias");
+            event.options = options;
+            event.properties.insert("alias".into(), alias.into());
+            event
+                .properties
+                .insert("distinct_id".into(), snapshot.distinct_id.clone().into());
+            self.capture_person(event, &snapshot, None, false);
         }
     }
 
@@ -310,6 +316,8 @@ impl Client {
 
     /// Enable person processing without identifying, attempting an empty `$set` once.
     /// Already-enabled processing is a no-op, even if its original event was dropped.
+    /// While opted out, processing is still enabled but no event is sent, as in
+    /// posthog-js.
     pub fn create_person_profile(&self) {
         let Some(_guard) = self.identity_guard("create_person_profile") else {
             return;
@@ -335,7 +343,9 @@ impl Client {
     /// Start a fresh anonymous identity, preserving the device ID. Clears the
     /// identified and person-processing state, and the last screen name, so
     /// `$screen_name` is no longer added until the next `screen`. Emits no event
-    /// and preserves queued events. Setup bootstrap is not reapplied. A hook may reset:
+    /// and preserves queued events. Clears explicit consent and restores Config::opt_out;
+    /// with the normal default, reset re-enables collection. Setup bootstrap is not
+    /// reapplied. A hook may reset:
     /// its already-snapshotted outer event retains the old identity.
     pub fn reset(&self) {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {

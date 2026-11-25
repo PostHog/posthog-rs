@@ -28,6 +28,11 @@ pub struct Config {
     pub host: String,
     /// Explicitly disable this client. Defaults to false.
     pub disabled: bool,
+    /// Default collection choice when no explicit consent can be restored,
+    /// including after reset or state-storage open/read failure. False by default.
+    /// Set true when unavailable consent must require opt-in. A successfully
+    /// restored explicit opt-in/out choice takes precedence.
+    pub opt_out: bool,
     /// Storage selection. Defaults to the OS local application-data directory.
     pub persistence: Persistence,
     /// Separates the storage of clients that use the same project token. The
@@ -113,6 +118,7 @@ impl Config {
             project_token: project_token.into(),
             host: DEFAULT_HOST.into(),
             disabled: false,
+            opt_out: false,
             persistence: Persistence::Automatic,
             instance_name: "default".into(),
             bootstrap_anonymous_id: None,

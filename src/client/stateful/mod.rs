@@ -13,6 +13,10 @@
 //! Dropping the client also shuts it down: it does not wait for delivery, but
 //! waits up to about 1 s to write pending state and captured events to disk.
 //!
+//! [`Client::opt_out`] stops new events and [`Client::opt_in`] resumes them;
+//! the choice is saved with the identity. [`Config::opt_out`] sets the default
+//! when no choice is saved, including after [`Client::reset`].
+//!
 //! [`Config::persistence`] selects where state and events are kept: the OS
 //! local application-data directory by default, a directory you choose, or
 //! memory only. See [`Persistence`].
@@ -20,6 +24,7 @@
 //! A complete program is in `examples/stateful.rs`.
 
 mod config;
+mod consent;
 mod identity;
 #[cfg(feature = "async-client")]
 mod initialization;
@@ -48,11 +53,22 @@ struct Snapshot {
     identified: bool,
     #[serde(default)]
     person_processing: bool,
+    // None follows the configured default, including after reset. A missing
+    // or unreadable value is None, so it never discards the identity.
+    #[serde(default, deserialize_with = "lenient_bool")]
+    opt_out: Option<bool>,
     // Process-local bookkeeping shares the same lock as identity, but is not persisted.
     #[serde(skip)]
     generation: u64,
     #[serde(skip)]
     person_properties: Option<[u8; 20]>,
+}
+
+/// A boolean, or None for any other value, as the other SDKs read consent.
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_bool())
 }
 
 impl Snapshot {
@@ -72,6 +88,7 @@ impl Snapshot {
             distinct_id: id,
             identified: false,
             person_processing: false,
+            opt_out: None,
             generation: 0,
             person_properties: None,
         }
@@ -86,6 +103,7 @@ impl Snapshot {
             distinct_id,
             identified,
             person_processing,
+            opt_out,
             generation: _,
             person_properties: _,
         } = self;
@@ -94,6 +112,7 @@ impl Snapshot {
             && *distinct_id == other.distinct_id
             && *identified == other.identified
             && *person_processing == other.person_processing
+            && *opt_out == other.opt_out
     }
 
     fn is_valid(&self) -> bool {
