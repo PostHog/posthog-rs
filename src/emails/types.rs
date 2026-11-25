@@ -286,8 +286,11 @@ impl CodeEmail {
     /// A send that PostHog sends at once returns `Queued` when the rounded
     /// time is at most a minute ahead. Every retry sends that same time. Work out a
     /// relative time, such as an hour from now, once, and send the same time
-    /// when you send again with the same idempotency key: a time in another
-    /// millisecond with that key is `idempotency_key_reused`.
+    /// when you send again with the same idempotency key: a new time never
+    /// moves the email. A time in another millisecond with that key is
+    /// `idempotency_key_reused`, or, when PostHog can't look the key up in
+    /// time, an answer with the new time while the email keeps the first
+    /// send's time.
     ///
     /// Only PostHog Cloud schedules emails. With any other app host, such as a
     /// self-hosted PostHog, a reverse proxy or a custom domain, the send fails
