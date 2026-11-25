@@ -141,7 +141,9 @@ enum CapturePolicy {
     FlagCalled { minimal: bool },
 }
 
-pub(super) struct Producer {
+#[derive(Clone)]
+pub(crate) struct Producer {
+    capture_key: std::sync::Arc<()>,
     context: HashMap<String, Value>,
     sdk_name: String,
     sdk_version: String,
@@ -151,10 +153,14 @@ pub(super) struct Producer {
     pub(super) default_opt_out: bool,
     pub(super) send_feature_flag_event: bool,
     pub(super) session_clock: std::sync::Arc<dyn super::sessions::SessionClock>,
+    /// The replay controller, once it starts; None when the encoder could not
+    /// start, and in the encoder's own copy, which only assembles `$snapshot`.
+    #[cfg(feature = "session-replay")]
+    pub(super) replay: Option<std::sync::Weak<super::replay::Controller>>,
     /// The last screen name passed to `screen`, added to later events as
     /// `$screen_name`. Kept in memory only, as in posthog-ios and
     /// posthog-android.
-    last_screen: Mutex<Option<String>>,
+    last_screen: std::sync::Arc<Mutex<Option<String>>>,
 }
 
 impl Producer {
@@ -169,6 +175,7 @@ impl Producer {
             .entry("$os_version".into())
             .or_insert_with(|| info.version().to_string().into());
         Self {
+            capture_key: std::sync::Arc::new(()),
             context,
             sdk_name: config.sdk_name.clone(),
             sdk_version: config.sdk_version.clone(),
@@ -178,7 +185,9 @@ impl Producer {
             default_opt_out: config.opt_out,
             send_feature_flag_event: config.send_feature_flag_event,
             session_clock: std::sync::Arc::new(super::sessions::SystemSessionClock),
-            last_screen: Mutex::new(None),
+            #[cfg(feature = "session-replay")]
+            replay: None,
+            last_screen: std::sync::Arc::new(Mutex::new(None)),
         }
     }
 
@@ -217,6 +226,31 @@ impl Producer {
         session_id: Option<Uuid>,
         policy: CapturePolicy,
     ) -> Result<CaptureEvent, CaptureOutcome> {
+        let mut event = self.assemble(input, snapshot, now, session_id)?;
+        if matches!(policy, CapturePolicy::FlagCalled { minimal: true }) {
+            event.mark_minimal_flag_called();
+            event.apply_minimal_flag_called_allowlist();
+        }
+        let mut wire = CaptureEvent::from_event_at(&event, now);
+        normalize_custom_properties(
+            &mut wire.properties,
+            matches!(policy, CapturePolicy::FlagCalled { .. }),
+        );
+        Ok(wire)
+    }
+
+    pub(super) fn capture_key(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.capture_key) as usize
+    }
+
+    /// Assemble a native event before selecting its wire protocol.
+    pub(super) fn assemble(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+        now: DateTime<Utc>,
+        session_id: Option<Uuid>,
+    ) -> Result<Event, CaptureOutcome> {
         if input.event.trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
         }
@@ -231,6 +265,42 @@ impl Producer {
         );
         event.ensure_timestamp(now);
         event.ensure_uuid();
+        // A screenshot carries only its own properties, its session and the
+        // SDK's name, as in posthog-ios and posthog-android: no registered
+        // properties, groups, device context or person state.
+        let shared = event.event_name() != "$snapshot";
+        if shared {
+            self.fill_shared_context(&mut event, snapshot);
+        }
+        if let Some(id) = session_id {
+            event.insert_prop_default("$session_id", id.to_string().into());
+        }
+        // Paired as the server client pairs them.
+        crate::client::common::fill_sdk_identity(&mut event, &self.sdk_name, &self.sdk_version);
+        if shared {
+            if let Some(screen) = self.last_screen() {
+                event.insert_prop_default("$screen_name", screen.into());
+            }
+            #[cfg(feature = "session-replay")]
+            self.fill_replay_debug_properties(&mut event, snapshot, session_id);
+            event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
+            event.insert_prop_default("$is_identified", snapshot.identified.into());
+            if self.disable_geoip {
+                event.insert_prop_default("$geoip_disable", true.into());
+            }
+        }
+        fill_person_profile_option(&mut event, self.person_profiles.processes(snapshot));
+        event.merge_groups_into_properties();
+        let event = apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
+        if event.event_name().trim().is_empty() || event.distinct_id().trim().is_empty() {
+            return Err(CaptureOutcome::Invalid);
+        }
+        Ok(event)
+    }
+
+    /// Registered properties, groups and device context, which every event
+    /// but `$snapshot` carries.
+    fn fill_shared_context(&self, event: &mut Event, snapshot: &Snapshot) {
         let identity_event = IDENTIFY_STYLE_EVENTS.contains(&event.event_name());
         for (key, value) in &snapshot.registered {
             // A registered false would make PostHog drop or ignore an identity
@@ -273,36 +343,27 @@ impl Producer {
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
         }
-        if let Some(id) = session_id {
-            event.insert_prop_default("$session_id", id.to_string().into());
+    }
+}
+
+#[cfg(feature = "session-replay")]
+impl Producer {
+    /// The replay debug keys for every event but `$snapshot`, which is replay
+    /// data, not a report about replay. A caller or registered value wins.
+    fn fill_replay_debug_properties(
+        &self,
+        event: &mut Event,
+        snapshot: &Snapshot,
+        session_id: Option<Uuid>,
+    ) {
+        match self.replay.as_ref().and_then(std::sync::Weak::upgrade) {
+            Some(replay) => {
+                for (key, value) in replay.debug_properties(snapshot, session_id) {
+                    event.insert_prop_default(key, value);
+                }
+            }
+            None => event.insert_prop_default("$recording_status", "disabled".into()),
         }
-        // Paired as the server client pairs them.
-        crate::client::common::fill_sdk_identity(&mut event, &self.sdk_name, &self.sdk_version);
-        if let Some(screen) = self.last_screen() {
-            event.insert_prop_default("$screen_name", screen.into());
-        }
-        event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
-        event.insert_prop_default("$is_identified", snapshot.identified.into());
-        fill_person_profile_option(&mut event, self.person_profiles.processes(snapshot));
-        if self.disable_geoip {
-            event.insert_prop_default("$geoip_disable", true.into());
-        }
-        event.merge_groups_into_properties();
-        let mut event =
-            apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
-        if event.event_name().trim().is_empty() || event.distinct_id().trim().is_empty() {
-            return Err(CaptureOutcome::Invalid);
-        }
-        if matches!(policy, CapturePolicy::FlagCalled { minimal: true }) {
-            event.mark_minimal_flag_called();
-            event.apply_minimal_flag_called_allowlist();
-        }
-        let mut wire = CaptureEvent::from_event_at(&event, now);
-        normalize_custom_properties(
-            &mut wire.properties,
-            matches!(policy, CapturePolicy::FlagCalled { .. }),
-        );
-        Ok(wire)
     }
 }
 
@@ -344,8 +405,18 @@ thread_local! {
 pub(super) struct CaptureGuard(usize);
 
 impl CaptureGuard {
+    #[cfg(feature = "session-replay")]
+    pub(super) fn active(key: usize) -> bool {
+        CAPTURING
+            .try_with(|active| active.borrow().contains(&key))
+            .unwrap_or(true)
+    }
+
     pub(super) fn enter(client: &Client) -> Result<Self, CaptureOutcome> {
-        let key = client as *const Client as usize;
+        Self::enter_key(client.producer.as_ref().unwrap().capture_key())
+    }
+
+    pub(super) fn enter_key(key: usize) -> Result<Self, CaptureOutcome> {
         CAPTURING
             .try_with(|active| {
                 let mut active = active.borrow_mut();
@@ -367,7 +438,10 @@ impl Drop for CaptureGuard {
 
 impl Client {
     pub(super) fn in_capture(&self) -> bool {
-        let key = self as *const Client as usize;
+        let Some(producer) = &self.producer else {
+            return false;
+        };
+        let key = producer.capture_key();
         CAPTURING
             .try_with(|active| active.borrow().contains(&key))
             .unwrap_or(false)

@@ -54,6 +54,9 @@ mod queue;
 #[cfg(feature = "stateful")]
 #[path = "transport_remote_config.rs"]
 pub(super) mod remote_config;
+#[cfg(feature = "session-replay")]
+#[path = "transport_replay.rs"]
+pub(super) mod replay;
 #[cfg(feature = "stateful")]
 #[path = "transport_requests.rs"]
 mod requests;
@@ -117,6 +120,24 @@ pub(crate) enum Control {
     /// receives it.
     #[cfg(feature = "stateful")]
     RemoteConfig(remote_config::Task),
+    /// Session replay: an encoded screenshot. Only the replay lane receives
+    /// these three.
+    #[cfg(feature = "session-replay")]
+    ReplayFrame(Box<super::stateful::replay::EncodedFrame>),
+    #[cfg(feature = "session-replay")]
+    ReplayFailure(&'static str),
+    #[cfg(feature = "session-replay")]
+    ReplayShutdownAbandoned,
+}
+
+/// Whether the thread held in `handle` has finished, or was already joined.
+#[cfg(feature = "stateful")]
+pub(crate) fn finished(handle: &Mutex<Option<JoinHandle<()>>>) -> bool {
+    handle
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map_or(true, JoinHandle::is_finished)
 }
 
 /// Completion signal handed to the worker so the caller can wait for a flush or
@@ -126,11 +147,47 @@ pub(crate) enum Completion {
     Blocking(mpsc::Sender<()>),
     #[cfg(feature = "async-client")]
     Async(tokio::sync::oneshot::Sender<()>),
+    /// One of several workers that must all finish, such as event delivery
+    /// and session replay for one flush.
+    #[cfg(feature = "session-replay")]
+    Shared(Arc<SharedCompletion>),
+}
+
+/// Signals its completion once every part has signalled. A part dropped
+/// without signalling drops the completion with the last part, which the
+/// caller sees as delivery being unavailable rather than a hang.
+#[cfg(feature = "session-replay")]
+pub(crate) struct SharedCompletion {
+    remaining: AtomicUsize,
+    completion: Mutex<Option<Completion>>,
+}
+
+#[cfg(feature = "session-replay")]
+impl SharedCompletion {
+    pub(crate) fn split(completion: Completion, parts: usize) -> Arc<Self> {
+        Arc::new(Self {
+            remaining: AtomicUsize::new(parts),
+            completion: Mutex::new(Some(completion)),
+        })
+    }
 }
 
 impl Completion {
     fn signal(self) {
         match self {
+            #[cfg(feature = "session-replay")]
+            Completion::Shared(shared) => {
+                if shared.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    let completion = shared
+                        .completion
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .take();
+                    if let Some(completion) = completion {
+                        completion.signal();
+                    }
+                }
+            }
             Completion::Blocking(tx) => {
                 let _ = tx.send(());
             }
@@ -431,7 +488,7 @@ impl TransportHandle {
         let control = match (control, &self.delivery) {
             (Control::Flush(completion) | Control::FlushCaptures(completion), Some(delivery)) => {
                 Control::QueueFlush {
-                    completion,
+                    completion: delivery.split_flush(completion, Control::Flush),
                     through: delivery.inbox.last_seq(),
                 }
             }
@@ -537,9 +594,15 @@ impl TransportHandle {
 
     /// Test helper: drive one worker cycle against the current (virtual) clock.
     #[cfg(test)]
-    fn tick(&self) {
+    pub(crate) fn tick(&self) {
         let (tx, rx) = mpsc::channel();
-        if self.send_control(Control::Tick(Completion::Blocking(tx))) {
+        let completion = Completion::Blocking(tx);
+        #[cfg(feature = "stateful")]
+        let completion = match &self.delivery {
+            Some(delivery) => delivery.split_flush(completion, Control::Tick),
+            None => completion,
+        };
+        if self.send_control(Control::Tick(completion)) {
             let _ = rx.recv();
         }
     }
@@ -967,6 +1030,12 @@ fn run_worker(
             Wake::Msg(Control::RequestBarrier(_)) => unreachable!("request-worker-only barrier"),
             #[cfg(feature = "stateful")]
             Wake::Msg(Control::RemoteConfig(_)) => unreachable!("request-worker-only config"),
+            #[cfg(feature = "session-replay")]
+            Wake::Msg(
+                Control::ReplayFrame(_)
+                | Control::ReplayFailure(_)
+                | Control::ReplayShutdownAbandoned,
+            ) => unreachable!("replay-lane-only control"),
             #[cfg(test)]
             Wake::Msg(Control::Tick(completion)) => {
                 // Defer the signal until after the shared servicing block below,
@@ -1031,6 +1100,10 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             Control::RequestBarrier(_) => {}
             #[cfg(feature = "stateful")]
             Control::RemoteConfig(_) => {}
+            #[cfg(feature = "session-replay")]
+            Control::ReplayFrame(_)
+            | Control::ReplayFailure(_)
+            | Control::ReplayShutdownAbandoned => {}
         }
     }
 }

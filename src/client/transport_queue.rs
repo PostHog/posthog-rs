@@ -290,6 +290,12 @@ impl Coordinator {
             Control::Capture { .. } | Control::HistoricalBatch { .. } => {}
             Control::Flags(_) => unreachable!("request-worker-only flags"),
             Control::RemoteConfig(_) => unreachable!("request-worker-only config"),
+            #[cfg(feature = "session-replay")]
+            Control::ReplayFrame(_)
+            | Control::ReplayFailure(_)
+            | Control::ReplayShutdownAbandoned => {
+                unreachable!("replay-lane-only control")
+            }
             #[cfg(test)]
             Control::RequestBarrier(_) => unreachable!("request-worker-only barrier"),
         }

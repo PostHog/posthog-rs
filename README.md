@@ -56,7 +56,7 @@ later calls cannot extend it. Dropping the client does not wait for delivery: it
 waits up to about 1 s for pending local state writes, then ends the deadline at
 once. `DeliveryOutcome::Stopped` means actual
 delivery-worker completion, while `TimedOut` means unfinished work at expiry.
-State persistence has its own outcome. Already-started storage, HTTP or
+State persistence has its own outcome. Already-started storage, HTTP, encoding or
 callback work owns its resources until completion, potentially indefinitely if it
 never returns. Storage work retains its namespace lease while access is possible;
 request-only work does not. Arbitrary destructors of application objects captured
@@ -69,6 +69,13 @@ responses replace the cache with successful records; partial responses merge
 successes and retain prior records. Accepted exposure reports deduplicate by key
 and typed value until an identity change, reset or shutdown, including across
 reloads and targeting updates.
+
+## Screenshot replay
+
+The optional `session-replay` feature adds manual screenshot recording to the
+stateful client. Hosts supply already-masked, downscaled BGRA pixels; Rust owns
+encoding, attribution, bounded admission and memory-only delivery.
+See [manual screenshot replay](docs/session-replay.md).
 
 ## Request context
 

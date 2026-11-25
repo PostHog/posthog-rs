@@ -74,6 +74,9 @@ pub struct Config {
     /// Report completed single-flag lookups through `$feature_flag_called` by
     /// default. Individual lookups can override this; consent still applies.
     pub send_feature_flag_event: bool,
+    /// Manual screenshot encoding and capacity, with the session-replay feature.
+    #[cfg(feature = "session-replay")]
+    pub session_replay: super::ReplayConfig,
     /// Optional initial flags snapshot, replacing restored values before preload.
     /// Only true and nonempty variants are served. None preserves restored values;
     /// Some(empty) installs an empty snapshot. Reset does not reapply this seed.
@@ -150,6 +153,8 @@ impl Config {
             person_profiles: PersonProfiles::IdentifiedOnly,
             preload_feature_flags: true,
             send_feature_flag_event: true,
+            #[cfg(feature = "session-replay")]
+            session_replay: super::ReplayConfig::default(),
             bootstrap_feature_flags: None,
             bootstrap_feature_flag_payloads: None,
             flush_at: 20,
@@ -200,6 +205,10 @@ impl Config {
     /// registration order, after enrichment and outside client-state locks.
     /// Returning None or panicking drops the event. Each mutable hook is
     /// serialized across captures; do not wait for another capture from a hook.
+    /// Screenshots run this chain after JPEG encoding on the encoder worker,
+    /// before replay delivery. Submission acceptance precedes that filtering.
+    /// A flush waits for those hooks, so don't flush while holding a lock a
+    /// hook takes.
     ///
     /// A hook that returns a new [`Event`] instead of the one it received should
     /// copy that event's options, such as `process_person_profile`; the new
@@ -265,6 +274,12 @@ impl Config {
             self.request_timeout = DEFAULT_REQUEST_TIMEOUT;
         }
         self.request_timeout = self.request_timeout.min(MAX_SHUTDOWN_TIMEOUT);
+        #[cfg(feature = "session-replay")]
+        {
+            let replay = &mut self.session_replay;
+            replay.jpeg_quality = replay.jpeg_quality.clamp(1, 100);
+            replay.max_frames_in_flight = replay.max_frames_in_flight.max(1);
+        }
     }
 
     pub(super) fn invalid_reason(&self) -> Option<&'static str> {

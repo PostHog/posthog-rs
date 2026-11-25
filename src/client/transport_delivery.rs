@@ -13,7 +13,8 @@ use super::table::Limits;
 #[cfg(test)]
 use super::SystemClock;
 use super::{
-    build_http, Clock, Completion, Control, LaneConfig, TransportHandle, MAX_SHUTDOWN_TIMEOUT,
+    build_http, finished, Clock, Completion, Control, LaneConfig, TransportHandle,
+    MAX_SHUTDOWN_TIMEOUT,
 };
 use crate::capture_event::CaptureEvent;
 use crate::client::event_store::EventStore;
@@ -52,10 +53,60 @@ pub(super) struct Delivery {
     flags: Arc<super::flags::Slot>,
     /// Sends feature flag requests, independent of event delivery.
     requests: Option<super::requests::Worker>,
+    /// Session replay's encoder and delivery lane, once installed.
+    #[cfg(feature = "session-replay")]
+    replay: Mutex<Option<Replay>>,
+}
+
+#[cfg(feature = "session-replay")]
+struct Replay {
+    encoder: Arc<crate::client::stateful::replay::encoder::Worker>,
+    lane: Arc<super::replay::Lane>,
 }
 
 impl Delivery {
+    #[cfg(feature = "session-replay")]
+    fn replay<T>(&self, read: impl FnOnce(&Replay) -> T) -> Option<T> {
+        self.replay
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(read)
+    }
+
+    /// Route a flush, or a test tick, to both lanes: `control` builds the
+    /// replay lane's copy. The returned completion fires once both finish.
+    pub(super) fn split_flush(
+        &self,
+        completion: Completion,
+        #[allow(unused_variables)] control: fn(Completion) -> Control,
+    ) -> Completion {
+        #[cfg(feature = "session-replay")]
+        if let Some(gate) = self.replay(|replay| replay.encoder.gate.clone()) {
+            let shared = super::SharedCompletion::split(completion, 2);
+            match gate.control(control(Completion::Shared(shared.clone()))) {
+                Err(Control::Flush(part)) => part.signal(),
+                #[cfg(test)]
+                Err(Control::Tick(part)) => part.signal(),
+                _ => {}
+            }
+            return Completion::Shared(shared);
+        }
+        completion
+    }
+
+    /// Stop session replay with the selected deadline, after the frames
+    /// already submitted.
+    fn close_replay(&self) {
+        #[cfg(feature = "session-replay")]
+        if let Some(gate) = self.replay(|replay| replay.encoder.gate.clone()) {
+            let (tx, _) = mpsc::channel();
+            let _ = gate.control(Control::Shutdown(Completion::Blocking(tx)));
+        }
+    }
+
     pub(super) fn close_requests(&self) {
+        self.close_replay();
         self.flags.close();
         if let Some(requests) = &self.requests {
             requests.request_close();
@@ -66,12 +117,34 @@ impl Delivery {
         if let Some(requests) = &self.requests {
             requests.join();
         }
+        // The encoder stops first: the lane stops at its shutdown barrier.
+        // Join outside the lock, which client calls from their hooks take.
+        #[cfg(feature = "session-replay")]
+        if let Some((encoder, lane)) =
+            self.replay(|replay| (replay.encoder.clone(), replay.lane.clone()))
+        {
+            encoder.join();
+            lane.join();
+        }
     }
 
     pub(super) fn on_request_worker(&self) -> bool {
+        #[cfg(feature = "session-replay")]
+        if self
+            .replay(|replay| replay.encoder.on_worker_thread() || replay.lane.on_thread())
+            .unwrap_or(false)
+        {
+            return true;
+        }
         self.requests
             .as_ref()
             .is_some_and(super::requests::Worker::on_worker_thread)
+    }
+
+    #[cfg(feature = "session-replay")]
+    fn replay_stopped(&self) -> bool {
+        self.replay(|replay| replay.encoder.is_stopped() && replay.lane.is_stopped())
+            .unwrap_or(true)
     }
 
     pub(super) fn select_deadline(&self, at: Instant) {
@@ -98,15 +171,6 @@ impl Delivery {
     fn executor_stopped(&self) -> bool {
         finished(&self.executor)
     }
-}
-
-/// Whether the thread held in `handle` has finished, or was already joined.
-fn finished(handle: &Mutex<Option<JoinHandle<()>>>) -> bool {
-    handle
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
-        .map_or(true, JoinHandle::is_finished)
 }
 
 /// The name of the thread that sends stateful delivery requests.
@@ -227,6 +291,8 @@ impl TransportHandle {
                 executor_id,
                 flags: flags.clone(),
                 requests: None,
+                #[cfg(feature = "session-replay")]
+                replay: Mutex::new(None),
             }),
         };
         match super::requests::Worker::spawn(options, flags, handle.closed.clone(), deadline) {
@@ -370,10 +436,51 @@ impl TransportHandle {
     /// Event delivery has stopped.
     pub(crate) fn delivery_stopped(&self) -> bool {
         finished(&self.worker)
-            && self
-                .delivery
-                .as_ref()
-                .map_or(true, Delivery::executor_stopped)
+            && self.delivery.as_ref().map_or(true, |delivery| {
+                #[cfg(feature = "session-replay")]
+                if !delivery.replay_stopped() {
+                    return false;
+                }
+                delivery.executor_stopped()
+            })
+    }
+
+    /// Start session replay: a delivery lane for screenshots and the encoder
+    /// that feeds it. Returns the encoder's gate.
+    #[cfg(feature = "session-replay")]
+    pub(crate) fn install_replay(
+        &self,
+        producer: crate::client::stateful::producer::Producer,
+        config: &crate::client::stateful::ReplayConfig,
+        options: ClientOptions,
+        token: String,
+        shutdown_timeout: Duration,
+    ) -> std::io::Result<Arc<crate::client::stateful::replay::encoder::Gate>> {
+        let delivery = self
+            .delivery
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Replay needs stateful delivery"))?;
+        let (lane, sender) =
+            super::replay::Lane::spawn(options, self.clock.clone(), delivery.deadline.clone())?;
+        let lane = Arc::new(lane);
+        let encoder = Arc::new(crate::client::stateful::replay::encoder::Worker::spawn(
+            producer,
+            config,
+            token,
+            sender,
+            shutdown_timeout,
+            delivery.deadline.clone(),
+        )?);
+        let gate = encoder.gate.clone();
+        *delivery.replay.lock().unwrap_or_else(|p| p.into_inner()) = Some(Replay { encoder, lane });
+        Ok(gate)
+    }
+
+    /// The monotonic clock the replay lane schedules frames with, so frame
+    /// acquisition can be throttled on the same time source.
+    #[cfg(feature = "session-replay")]
+    pub(crate) fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
     }
 }
 

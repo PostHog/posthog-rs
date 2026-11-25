@@ -630,3 +630,201 @@ fn started_session_is_used_by_the_next_capture_after_a_filtered_first_capture() 
     let seen = events.lock().unwrap();
     assert_eq!(seen[0].properties()["$session_id"], started.to_string());
 }
+
+// Screenshot acquisition after a session expires or ends.
+#[cfg(feature = "session-replay")]
+mod replay_sessions {
+    use super::super::super::{
+        Config, FrameLayout, FrameUnavailable, Persistence, PixelFormat, SessionMode,
+    };
+    use super::*;
+    use httpmock::prelude::*;
+    use std::time::Instant;
+
+    fn recording_client(mode: SessionMode, opt_out: bool) -> (MockServer, Client) {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/array/phc_test/config");
+            then.status(200)
+                .json_body(serde_json::json!({"hasFeatureFlags":false,"sessionRecording":true}));
+        });
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200).json_body(serde_json::json!({}));
+        });
+        let mut config = Config::new("phc_test");
+        config.host = server.base_url();
+        config.persistence = Persistence::Memory;
+        config.preload_feature_flags = false;
+        config.session_mode = mode;
+        config.opt_out = opt_out;
+        config.session_replay.throttle_delay = Duration::ZERO;
+        let client = Client::init_blocking(config);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = client.state.as_ref().unwrap().snapshot();
+            if !snapshot.remote_config_loading && snapshot.remote_config.is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "remote config did not load");
+            std::thread::yield_now();
+        }
+        (server, client)
+    }
+
+    fn layout() -> FrameLayout {
+        FrameLayout::new(4, 4, 16, PixelFormat::Bgra8888)
+    }
+
+    /// Stand-in for 31 minutes without captures or `session_activity()`.
+    fn idle_31_minutes(client: &Client) {
+        client
+            .state
+            .as_ref()
+            .unwrap()
+            .mutate(|snapshot| {
+                let live = snapshot.sessions.live.as_mut().unwrap();
+                live.started_ms -= 31 * 60 * 1000;
+                live.activity_ms -= 31 * 60 * 1000;
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn foreground_idle_expiry_rotates_the_session_for_the_next_frame() {
+        let (_server, client) = recording_client(SessionMode::Automatic, false);
+        let replay = client.session_replay();
+        replay.start();
+        let first = client.peek_session_id().unwrap();
+        drop(replay.begin_frame(layout()).unwrap());
+        idle_31_minutes(&client);
+        assert!(replay.is_active());
+        let frame = replay.begin_frame(layout()).unwrap();
+        let second = client.peek_session_id().unwrap();
+        assert_ne!(first, second);
+        // The new session is not extended by later frames.
+        let started = client
+            .state
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .sessions
+            .live
+            .clone()
+            .unwrap();
+        drop(frame);
+        drop(replay.begin_frame(layout()).unwrap());
+        assert_eq!(
+            client
+                .state
+                .as_ref()
+                .unwrap()
+                .snapshot()
+                .sessions
+                .live
+                .clone()
+                .unwrap(),
+            started
+        );
+        client.shutdown_blocking(Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn reset_in_automatic_mode_starts_a_session_for_the_next_frame() {
+        let (_server, client) = recording_client(SessionMode::Automatic, false);
+        let replay = client.session_replay();
+        replay.start();
+        let first = client.peek_session_id().unwrap();
+        client.reset();
+        assert!(replay.is_active());
+        assert!(replay.begin_frame(layout()).is_ok());
+        assert_ne!(client.peek_session_id(), Some(first));
+        client.shutdown_blocking(Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn frames_do_not_start_sessions_in_manual_mode_the_background_or_before_start() {
+        let (_server, client) = recording_client(SessionMode::Manual, false);
+        let replay = client.session_replay();
+        replay.start();
+        client.end_session();
+        assert!(!replay.is_active());
+        assert_eq!(
+            replay.begin_frame(layout()).err(),
+            Some(FrameUnavailable::NoSession)
+        );
+        assert_eq!(client.peek_session_id(), None);
+
+        let (_server, client) = recording_client(SessionMode::Automatic, false);
+        let replay = client.session_replay();
+        assert_eq!(
+            replay.begin_frame(layout()).err(),
+            Some(FrameUnavailable::NotRecording)
+        );
+        assert_eq!(client.peek_session_id(), None);
+        replay.start();
+        idle_31_minutes(&client);
+        client.set_app_in_background(true);
+        assert!(!replay.is_active());
+        assert_eq!(
+            replay.begin_frame(layout()).err(),
+            Some(FrameUnavailable::NoSession)
+        );
+        client.shutdown_blocking(Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn start_while_opted_out_is_ignored() {
+        let (_server, client) = recording_client(SessionMode::Automatic, true);
+        let replay = client.session_replay();
+        replay.start();
+        assert!(!replay.is_active());
+        assert_eq!(
+            replay.begin_frame(layout()).err(),
+            Some(FrameUnavailable::OptedOut)
+        );
+        client.opt_in();
+        // As in posthog-ios and posthog-android, opting in doesn't revive a
+        // start made while opted out; the app starts recording again.
+        assert!(!replay.is_active());
+        assert_eq!(
+            replay.begin_frame(layout()).err(),
+            Some(FrameUnavailable::NotRecording)
+        );
+        replay.start();
+        assert!(replay.is_active());
+        assert!(replay.begin_frame(layout()).is_ok());
+        client.shutdown_blocking(Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn frames_after_stop_and_expiry_report_not_recording() {
+        let (_server, client) = recording_client(SessionMode::Automatic, false);
+        let replay = client.session_replay();
+        replay.start();
+        replay.stop();
+        idle_31_minutes(&client);
+        let expired = client.peek_session_id();
+        assert_eq!(
+            replay.begin_frame(layout()).err(),
+            Some(FrameUnavailable::NotRecording)
+        );
+        // A frame that isn't recording doesn't rotate the session either.
+        assert_eq!(client.peek_session_id(), expired);
+        client.shutdown_blocking(Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn start_after_expiry_creates_a_new_session_and_records() {
+        let (_server, client) = recording_client(SessionMode::Automatic, false);
+        let replay = client.session_replay();
+        replay.start();
+        let first = client.peek_session_id().unwrap();
+        idle_31_minutes(&client);
+        replay.start();
+        let second = client.peek_session_id().unwrap();
+        assert_ne!(first, second);
+        assert!(replay.begin_frame(layout()).is_ok());
+        client.shutdown_blocking(Some(Duration::ZERO));
+    }
+}

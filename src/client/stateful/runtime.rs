@@ -7,7 +7,9 @@ use super::storage::{namespace, RestoredStorage};
 use super::writer::{Backend, DrainOutcome, StateWriter, WriterOptions};
 use super::{Config, InitializationFailure, Persistence, Snapshot};
 use crate::client::common::apply_on_error_hooks;
-use crate::client::transport::{Completion, Control, StartupFailure, SystemClock, TransportHandle};
+use crate::client::transport::{
+    Clock, Completion, Control, StartupFailure, SystemClock, TransportHandle,
+};
 use crate::client::PostHogError;
 
 #[path = "shutdown.rs"]
@@ -133,6 +135,8 @@ pub struct Client {
     pub(super) state: Option<StateWriter>,
     pub(super) transport: Option<TransportHandle>,
     pub(super) closed: AtomicBool,
+    #[cfg(feature = "session-replay")]
+    pub(super) replay: Option<Arc<super::replay::Controller>>,
 }
 
 impl Client {
@@ -185,7 +189,17 @@ impl Client {
         }
     }
 
+    #[cfg(all(test, feature = "session-replay"))]
+    pub(super) fn init_with_transport_clock(mut config: Config, clock: Arc<dyn Clock>) -> Self {
+        config.normalize();
+        Self::initialize_with_clock(Arc::new(config), clock)
+    }
+
     fn initialize(config: Arc<Config>) -> Self {
+        Self::initialize_with_clock(config, Arc::new(SystemClock))
+    }
+
+    fn initialize_with_clock(config: Arc<Config>, transport_clock: Arc<dyn Clock>) -> Self {
         if config.disabled {
             return Self::disabled(&config, None);
         }
@@ -241,7 +255,7 @@ impl Client {
                 .map(|store| Box::new(store) as Box<dyn crate::client::event_store::EventStore>),
             config.max_queue_bytes,
             shutdown.deadline_handle(),
-            Arc::new(SystemClock),
+            transport_clock,
         ) {
             Ok(transport) => transport,
             Err(failure) => {
@@ -278,7 +292,22 @@ impl Client {
                 return Self::disabled(&config, Some("Invalid mandatory state configuration"));
             }
         };
+        #[cfg(feature = "session-replay")]
+        let mut producer = producer;
+        #[cfg(feature = "session-replay")]
+        let replay = super::replay::Controller::new(&state, &transport, &producer, &config);
+        #[cfg(feature = "session-replay")]
+        match &replay {
+            Some(replay) => producer.replay = Some(Arc::downgrade(replay)),
+            None => crate::client::transport::replay::report(
+                &config.transport_options(),
+                "Screenshot encoder could not start; analytics remains enabled",
+                None,
+            ),
+        }
         let client = Self {
+            #[cfg(feature = "session-replay")]
+            replay,
             disabled: false,
             shutdown: Some(shutdown),
             shutdown_timeout: config.shutdown_timeout,
@@ -323,6 +352,8 @@ impl Client {
             shutdown: None,
             shutdown_timeout: config.shutdown_timeout,
             producer: None,
+            #[cfg(feature = "session-replay")]
+            replay: None,
             flag_loader: None,
             state: None,
             transport: None,
@@ -368,7 +399,9 @@ impl Client {
     /// Request persistence through the current state revision and attempt
     /// delivery of earlier queued events. Does not acknowledge ingestion.
     /// Failed writes/retry cooldowns may leave work pending. An in-flight I/O
-    /// operation or user callback can delay the wait.
+    /// operation or user callback can delay the wait. With session replay, it
+    /// also waits for submitted screenshots and their `before_send` hooks on
+    /// the encoder thread; don't call it while holding a lock a hook takes.
     pub fn flush_blocking(&self) -> DrainReport {
         if self.disabled {
             return DrainReport::disabled();
@@ -467,6 +500,10 @@ impl Client {
                 .as_ref()
                 .unwrap()
                 .request_close_before(deadline);
+            #[cfg(feature = "session-replay")]
+            if let Some(replay) = &self.replay {
+                replay.close();
+            }
             let callbacks = self.flag_loader.as_ref().unwrap().listeners.close();
             drop(callbacks);
         }
