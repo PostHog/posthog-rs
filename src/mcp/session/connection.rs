@@ -1,7 +1,8 @@
 //! A one-client connection, such as stdio, carries no session id, so the SDK
 //! generates one when the connection opens. A desktop app can keep one stdio
 //! process alive across many separate chats, so the first tool call 30 minutes
-//! or more after the previous one ended starts a new session.
+//! or more after the previous one ended starts a new session. A call still
+//! running has not ended, so the session holds while any call is in flight.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -18,6 +19,20 @@ pub struct Connection(Arc<Mutex<ConnectionState>>);
 struct ConnectionState {
     session_id: String,
     last_call_ended: Option<Instant>,
+    calls_in_flight: usize,
+}
+
+/// A tool call on a connection, which ends when this is dropped, however the
+/// call ended, cancelled included.
+#[derive(Debug)]
+pub(crate) struct CallOnConnection(Connection);
+
+impl Drop for CallOnConnection {
+    fn drop(&mut self) {
+        let mut state = self.0.state();
+        state.calls_in_flight = state.calls_in_flight.saturating_sub(1);
+        state.last_call_ended = Some(Instant::now());
+    }
 }
 
 impl Connection {
@@ -25,6 +40,7 @@ impl Connection {
         let state = ConnectionState {
             session_id: new_session_id(),
             last_call_ended: None,
+            calls_in_flight: 0,
         };
         Self(Arc::new(Mutex::new(state)))
     }
@@ -33,24 +49,24 @@ impl Connection {
         self.state().session_id.clone()
     }
 
-    pub(crate) fn session_for_call(&self) -> String {
-        self.session_for_call_at(Instant::now())
+    /// The session of a call arriving now, and the call, which ends when
+    /// dropped.
+    pub(crate) fn begin_call(&self) -> (String, CallOnConnection) {
+        self.begin_call_at(Instant::now())
     }
 
-    pub(crate) fn call_ended(&self) {
-        self.state().last_call_ended = Some(Instant::now());
-    }
-
-    fn session_for_call_at(&self, now: Instant) -> String {
+    fn begin_call_at(&self, now: Instant) -> (String, CallOnConnection) {
         let mut state = self.state();
-        let idle = state
-            .last_call_ended
-            .is_some_and(|ended| now.saturating_duration_since(ended) >= SESSION_INACTIVITY);
+        let idle = state.calls_in_flight == 0
+            && state
+                .last_call_ended
+                .is_some_and(|ended| now.saturating_duration_since(ended) >= SESSION_INACTIVITY);
         if idle {
             state.session_id = new_session_id();
             state.last_call_ended = None;
         }
-        state.session_id.clone()
+        state.calls_in_flight += 1;
+        (state.session_id.clone(), CallOnConnection(self.clone()))
     }
 
     fn state(&self) -> MutexGuard<'_, ConnectionState> {
@@ -73,13 +89,30 @@ mod tests {
     #[test]
     fn calls_share_the_session_until_the_connection_idles() {
         let connection = Connection::new();
-        let first = connection.session_for_call();
-        connection.call_ended();
-        assert_eq!(connection.session_for_call(), first);
+        let (first, call) = connection.begin_call();
+        drop(call);
+        let (second, call) = connection.begin_call();
+        assert_eq!(second, first);
 
-        connection.call_ended();
+        drop(call);
         let later = Instant::now() + SESSION_INACTIVITY;
-        assert_ne!(connection.session_for_call_at(later), first);
+        assert_ne!(connection.begin_call_at(later).0, first);
+    }
+
+    #[test]
+    fn a_call_in_flight_keeps_the_session_until_every_call_ends() {
+        let connection = Connection::new();
+        let (first, ended) = connection.begin_call_at(Instant::now());
+        drop(ended);
+        let (_, in_flight) = connection.begin_call_at(Instant::now());
+
+        let later = Instant::now() + SESSION_INACTIVITY;
+        let (during, overlapping) = connection.begin_call_at(later);
+        assert_eq!(during, first, "the previous call has not ended");
+
+        drop((in_flight, overlapping));
+        let (after, _) = connection.begin_call_at(Instant::now() + 2 * SESSION_INACTIVITY);
+        assert_ne!(after, first, "every call ended 30 minutes before");
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod token;
 mod transport;
 
 pub(crate) use client::{recognize, ClientRow, ClientSignals};
+pub(crate) use connection::CallOnConnection;
 pub use connection::Connection;
 pub(crate) use conversation::Conversation;
 pub(crate) use source::{Session, SessionClaims, SessionSource};

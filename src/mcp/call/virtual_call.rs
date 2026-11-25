@@ -32,7 +32,7 @@ pub(crate) async fn answer_virtual_call(
     tool: VirtualTool,
     mut call: PreparedCall,
 ) -> CallToolResult {
-    call.transport.call_ended();
+    call.on_connection.take();
     let arguments = call.sent_arguments.take().unwrap_or_default();
     let reply = match tool {
         VirtualTool::MissingCapability => {
