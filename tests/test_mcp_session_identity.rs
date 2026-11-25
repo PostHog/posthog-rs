@@ -338,3 +338,39 @@ async fn every_event_names_the_source_of_its_session() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_handle_is_mirrored_only_for_clients_shown_the_declaration() {
+    let tool = mcp_support::server::tool(json!({
+        "name": "get_user",
+        "inputSchema": { "type": "object", "properties": {} },
+        "outputSchema": {
+            "type": "object",
+            "properties": { "user": { "type": "string" }, "password": { "type": "string" } },
+            "additionalProperties": false,
+        },
+    }));
+    for (user_agent, mirrored) in [(CHATGPT, false), ("example-client/1.0", true)] {
+        let recorder = Recorder::new().await;
+        let http = stateless(
+            &recorder,
+            TestServer::with_tools(vec![tool.clone()]),
+            McpOptions::default(),
+        );
+        let headers = [("user-agent", user_agent)];
+
+        http.request("tools/list", json!({}), &headers).await;
+        let arguments = json!({ "conversation_id": HANDLE });
+        let response = http
+            .request("tools/call", call_params("get_user", arguments), &headers)
+            .await;
+
+        let structured = &response.body["result"]["structuredContent"];
+        assert_eq!(
+            structured.get("_mcp_instructions").is_some(),
+            mirrored,
+            "{}",
+            user_agent
+        );
+    }
+}

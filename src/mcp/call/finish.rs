@@ -50,10 +50,11 @@ pub(crate) fn complete_call(
         .flatten();
     let failure = (result.is_error == Some(true)).then(|| reported_failure(&result));
     let mut delivered = result;
-    let mirror = call
-        .facts
-        .as_ref()
-        .is_some_and(|facts| facts.mirrors_instructions);
+    let mirror = !call.handle_free
+        && call
+            .facts
+            .as_ref()
+            .is_some_and(|facts| facts.mirrors_instructions);
     if !deliver_handle(&mut delivered, &call.conversation, mirror) {
         forget_undelivered_handle(&mut call);
     }
