@@ -1315,13 +1315,15 @@ fn match_property_in_scope(
 
 /// A `flag` leaf inside a cohort. The flags service doesn't resolve dependencies
 /// there: it matches the leaf's key against person properties, and
-/// `flag_evaluates_to`, which the property matcher rejects, never matches.
+/// `flag_evaluates_to`, which the property matcher rejects, never matches. Like
+/// the server, a leaf without a value only matches a presence operator.
 fn match_cohort_flag_leaf(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
     scope: EvaluationScope,
 ) -> Result<bool, InconclusiveMatchError> {
-    if property.operator == "flag_evaluates_to" {
+    let presence = matches!(property.operator.as_str(), "is_set" | "is_not_set");
+    if property.operator == "flag_evaluates_to" || (property.value.is_null() && !presence) {
         return Ok(false);
     }
     let person_property = Property {
