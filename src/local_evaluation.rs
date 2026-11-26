@@ -1533,6 +1533,34 @@ mod condition_filter_source_tests {
     }
 
     #[test]
+    fn group_filter_without_a_usable_key_still_evaluates_a_flag_dependency() {
+        let flag = json!({
+            "key": "project-dependent",
+            "active": true,
+            "filters": {
+                "aggregation_group_type_index": 0,
+                "groups": [{
+                    "properties": [{"key": "$feature/parent", "value": true, "operator": "exact", "type": "group", "group_type_index": 1}],
+                    "rollout_percentage": 100
+                }]
+            }
+        });
+        let parent = json!({
+            "key": "parent",
+            "active": true,
+            "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+        });
+        let evaluator = evaluator(vec![flag, parent], company_and_project());
+        let mut inputs = company_and_project_inputs();
+        inputs.groups.remove("project");
+
+        assert_eq!(
+            evaluate(&evaluator, "project-dependent", &inputs),
+            Some(FlagValue::Boolean(true))
+        );
+    }
+
+    #[test]
     fn group_filter_with_an_unmapped_index_needs_no_group_context() {
         let flag = json!({
             "key": "unmapped",

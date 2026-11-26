@@ -1438,7 +1438,12 @@ where
                 known_absent_keys,
                 missing_is_absent,
             } => {
-                if missing_is_absent && !properties.contains_key(&prop.key) {
+                // A flag dependency is resolved by evaluating the flag, never
+                // by property absence.
+                if missing_is_absent
+                    && !prop.key.starts_with("$feature/")
+                    && !properties.contains_key(&prop.key)
+                {
                     match_known_absent_property(prop)
                 } else {
                     property_matcher(prop, properties, known_absent_keys)
