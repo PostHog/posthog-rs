@@ -308,6 +308,9 @@ impl std::error::Error for InconclusiveMatchError {}
 pub(crate) struct MatchError {
     pub(crate) message: String,
     pub(crate) reason: UnresolvedFlagReason,
+    /// Set when the failure comes from context a dependency check evaluates
+    /// the dependency without, so passing more context can't fix it.
+    dropped_context: bool,
 }
 
 impl MatchError {
@@ -319,6 +322,7 @@ impl MatchError {
         Self {
             message: message.to_string(),
             reason,
+            dropped_context: false,
         }
     }
 
@@ -1224,6 +1228,7 @@ where
     let flag_aggregation = flag.filters.aggregation_group_type_index;
 
     let mut inconclusive_reason: Option<UnresolvedFlagReason> = None;
+    let mut dropped_context = false;
 
     for condition in &flag.filters.groups {
         let (effective_bucketing, effective_properties) = match resolve_condition_target(
@@ -1245,13 +1250,13 @@ where
                 // a cause that outranks that, such as an unsupported operator
                 // or an unresolved dependency.
                 let no_properties = HashMap::new();
-                let reason = condition
-                    .properties
-                    .iter()
-                    .filter_map(|property| property_matcher(property, &no_properties).err())
-                    .fold(UnresolvedFlagReason::MissingContext, |reason, error| {
-                        UnresolvedFlagReason::pick(Some(reason), error.reason)
-                    });
+                let mut reason = UnresolvedFlagReason::MissingContext;
+                for property in &condition.properties {
+                    if let Err(error) = property_matcher(property, &no_properties) {
+                        reason = UnresolvedFlagReason::pick(Some(reason), error.reason);
+                        dropped_context |= error.dropped_context;
+                    }
+                }
                 inconclusive_reason = Some(UnresolvedFlagReason::pick(inconclusive_reason, reason));
                 continue;
             }
@@ -1296,30 +1301,37 @@ where
             Ok(ConditionMatch::NoMatch) => continue,
             Err(err) => {
                 inconclusive_reason =
-                    Some(UnresolvedFlagReason::pick(inconclusive_reason, err.reason))
+                    Some(UnresolvedFlagReason::pick(inconclusive_reason, err.reason));
+                dropped_context |= err.dropped_context;
             }
         }
     }
 
     if let Some(reason) = inconclusive_reason {
-        return Err(MatchError::with_reason(
+        let mut error = MatchError::with_reason(
             "Can't determine if feature flag is enabled or not with given properties",
             reason,
-        ));
+        );
+        error.dropped_context = dropped_context;
+        return Err(error);
     }
 
     Ok(FlagValue::Boolean(false))
 }
 
 fn keep_higher_precedence(current: Option<MatchError>, new: MatchError) -> MatchError {
-    match current {
-        Some(current)
-            if UnresolvedFlagReason::pick(Some(current.reason), new.reason) == current.reason =>
-        {
-            current
-        }
-        _ => new,
-    }
+    let Some(current) = current else {
+        return new;
+    };
+    let dropped_context = current.dropped_context || new.dropped_context;
+    let mut kept = if UnresolvedFlagReason::pick(Some(current.reason), new.reason) == current.reason
+    {
+        current
+    } else {
+        new
+    };
+    kept.dropped_context = dropped_context;
+    kept
 }
 
 /// Match a property with additional context for cohorts and flag dependencies.
@@ -1684,11 +1696,10 @@ fn match_flag_dependency_property(
         .get(flag_key)
         .ok_or_else(|| MatchError::new(&format!("Flag '{}' not found in local cache", flag_key)))?;
 
-    // The dependency's own cause belongs to the dependency's entry. The
-    // dependency is matched here without person properties, cohorts or its own
-    // dependencies, so if it reads any of them, passing more context can't help.
-    let unresolved_dependency = |error: MatchError, filters_read: bool| {
-        let reason = if filters_read && dependency_needs_dropped_context(flag) {
+    // The dependency's own cause belongs to the dependency's entry, except when
+    // it stayed unresolved only for context this check leaves out.
+    let unresolved_dependency = |error: MatchError| {
+        let reason = if error.dropped_context {
             UnresolvedFlagReason::UnsupportedDefinition
         } else {
             UnresolvedFlagReason::UnresolvedDependency
@@ -1705,17 +1716,33 @@ fn match_flag_dependency_property(
     // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
     // Group context flows through from the outer ctx so dependent group/mixed flags can resolve.
     let flag_value = match metadata_result(flag, scope.person_properties, scope.metadata) {
-        Some(result) => result.map_err(|error| unresolved_dependency(error, false))?,
-        None => match_feature_flag_with_version(
-            flag,
-            ctx.distinct_id,
-            &HashMap::new(),
-            ctx.groups,
-            ctx.group_properties,
-            ctx.group_type_mapping,
-            ctx.property_matching_version,
-        )
-        .map_err(|error| unresolved_dependency(error, true))?,
+        Some(result) => result.map_err(unresolved_dependency)?,
+        None => {
+            // Matched without person properties, cohorts or its own
+            // dependencies. A failure caused by one of them is marked so it
+            // isn't reported as the dependency's own cause.
+            let no_person_properties = HashMap::new();
+            evaluate_feature_flag(
+                flag,
+                ctx.distinct_id,
+                &no_person_properties,
+                ctx.groups,
+                ctx.group_properties,
+                ctx.group_type_mapping,
+                |property, properties| {
+                    match_property_with_version(property, properties, ctx.property_matching_version)
+                        .map_err(|mut error| {
+                            error.dropped_context |= property.property_type.as_deref()
+                                == Some("cohort")
+                                || property.key.starts_with("$feature/")
+                                || (std::ptr::eq(properties, &no_person_properties)
+                                    && error.reason == UnresolvedFlagReason::MissingContext);
+                            error
+                        })
+                },
+            )
+            .map_err(unresolved_dependency)?
+        }
     };
 
     // Compare the flag value with the expected value
@@ -1993,22 +2020,6 @@ fn check_property_filter_type(property: &Property) -> Result<(), MatchError> {
             property.key
         ))),
     }
-}
-
-/// Whether a dependency reads person properties, cohorts or other flags, none of
-/// which [`match_flag_dependency_property`] passes when it evaluates it.
-fn dependency_needs_dropped_context(flag: &FeatureFlag) -> bool {
-    flag.filters.groups.iter().any(|condition| {
-        let person_condition = condition
-            .aggregation_group_type_index
-            .or(flag.filters.aggregation_group_type_index)
-            .is_none();
-        condition.properties.iter().any(|property| {
-            person_condition
-                || property.property_type.as_deref() == Some("cohort")
-                || property.key.starts_with("$feature/")
-        })
-    })
 }
 
 /// Definition errors that passing the property can't fix.
@@ -6385,6 +6396,54 @@ mod tests {
             reason(&group_flag("checkout")),
             UnresolvedFlagReason::UnresolvedDependency
         );
+    }
+
+    #[test]
+    fn a_ruled_out_condition_does_not_decide_the_dependency_reason() {
+        let checkout: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "aggregation_group_type_index": 0,
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "tier", "type": "group", "operator": "exact", "value": "gold"},
+                            {"key": "id", "type": "cohort", "value": 7}
+                        ],
+                        "rollout_percentage": 100
+                    },
+                    {
+                        "properties": [{"key": "plan", "type": "group", "operator": "exact", "value": "pro"}],
+                        "rollout_percentage": 100
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+        let flags = HashMap::from([("checkout".to_string(), checkout)]);
+        let dependent = flag_with_groups(json!([{
+            "properties": [{"key": "$feature/checkout", "type": "flag", "operator": "exact", "value": true}],
+            "rollout_percentage": 100
+        }]));
+        let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
+        let group_properties = HashMap::from([(
+            "company".to_string(),
+            HashMap::from([("tier".to_string(), json!("silver"))]),
+        )]);
+        let group_type_mapping = HashMap::from([("0".to_string(), "company".to_string())]);
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &HashMap::new(),
+            flags: &flags,
+            distinct_id: "user-123",
+            groups: &groups,
+            group_properties: &group_properties,
+            group_type_mapping: &group_type_mapping,
+        };
+        let error =
+            match_flag_definition(&dependent, &HashMap::new(), &ctx, &HashMap::new()).unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::UnresolvedDependency);
     }
 
     #[test]
