@@ -569,6 +569,8 @@ fn scheduling_off_posthog_cloud_makes_no_request() {
         .unwrap_err();
 
     assert_eq!(error.code(), "scheduling_requires_cloud");
+    assert_eq!(error.kind(), EmailErrorKind::ApplicationError);
+    assert_eq!(error.field(), Some("scheduled_at"));
     assert!(server.requests().is_empty());
 }
 
