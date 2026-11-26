@@ -2936,58 +2936,150 @@ mod tests {
     }
 
     #[test]
-    fn person_filter_on_created_at_still_matches() {
-        assert!(match_property(&first_seen_filter("person"), &created_in_2026()).unwrap());
+    fn untyped_and_person_filters_on_created_at_still_match() {
+        for property_type in [json!("person"), json!(null), json!("")] {
+            let filter: Property = serde_json::from_value(json!({
+                "key": "created_at",
+                "type": property_type,
+                "operator": "is_date_after",
+                "value": "2025-01-01"
+            }))
+            .unwrap();
+            assert!(match_property(&filter, &created_in_2026()).unwrap());
+        }
+        let mut untyped = first_seen_filter("person");
+        untyped.property_type = None;
+        assert!(match_property(&untyped, &created_in_2026()).unwrap());
     }
 
-    #[test]
-    fn person_metadata_filter_in_a_cohort_is_inconclusive() {
-        let cohorts = HashMap::from([(
-            "7".to_string(),
-            CohortDefinition::new("7".to_string(), vec![first_seen_filter("person_metadata")]),
-        )]);
+    fn first_seen_cohort_flag(
+        cohorts: &HashMap<String, CohortDefinition>,
+        operator: &str,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "first-seen-flag",
+            "active": true,
+            "filters": {
+                "groups": [{
+                    "properties": [{"key": "id", "type": "cohort", "operator": operator, "value": 7}],
+                    "rollout_percentage": 100
+                }]
+            }
+        }))
+        .unwrap();
         let ctx = EvaluationContext {
             property_matching_version: 1,
-            cohorts: &cohorts,
+            cohorts,
             flags: &HashMap::new(),
             distinct_id: "user-123",
             groups: &HashMap::new(),
             group_properties: &HashMap::new(),
             group_type_mapping: &HashMap::new(),
         };
-        let in_cohort = Property {
-            key: "id".to_string(),
-            value: json!(7),
-            operator: "in".to_string(),
-            property_type: Some("cohort".to_string()),
-        };
+        let mut person_properties = created_in_2026();
+        person_properties.insert("plan".to_string(), json!("free"));
+        match_feature_flag_with_context(&flag, &person_properties, &ctx)
+    }
 
-        assert!(match_property_with_context(&in_cohort, &created_in_2026(), &ctx).is_err());
+    fn cohort_7(values: serde_json::Value) -> HashMap<String, CohortDefinition> {
+        HashMap::from([(
+            "7".to_string(),
+            CohortDefinition {
+                id: "7".to_string(),
+                properties: json!({"type": "AND", "values": values}),
+            },
+        )])
     }
 
     #[test]
-    fn person_metadata_filter_makes_the_flag_inconclusive() {
-        let flag: FeatureFlag = serde_json::from_value(json!({
+    fn person_metadata_filter_in_a_cohort_is_inconclusive() {
+        let leaf = json!({"key": "created_at", "type": "person_metadata", "operator": "is_date_after", "value": "2025-01-01"});
+        let negated = json!({"key": "created_at", "type": "person_metadata", "operator": "is_date_after", "value": "2025-01-01", "negation": true});
+
+        assert!(first_seen_cohort_flag(&cohort_7(json!([leaf.clone()])), "in").is_err());
+        assert!(first_seen_cohort_flag(&cohort_7(json!([leaf])), "not_in").is_err());
+        assert!(first_seen_cohort_flag(&cohort_7(json!([negated])), "in").is_err());
+    }
+
+    #[test]
+    fn another_cohort_leaf_decides_the_group() {
+        let cohorts = cohort_7(json!([
+            {"key": "created_at", "type": "person_metadata", "operator": "is_date_after", "value": "2025-01-01"},
+            {"key": "plan", "type": "person", "operator": "exact", "value": "pro"}
+        ]));
+
+        assert_eq!(
+            first_seen_cohort_flag(&cohorts, "in").unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    fn flag_with_groups(groups: serde_json::Value) -> FeatureFlag {
+        serde_json::from_value(json!({
             "key": "first-seen-flag",
             "active": true,
-            "filters": {
-                "groups": [{
-                    "properties": [{"key": "created_at", "type": "person_metadata", "operator": "is_date_after", "value": "2025-01-01"}],
-                    "rollout_percentage": 100
-                }]
-            }
+            "filters": {"groups": groups}
         }))
-        .unwrap();
+        .unwrap()
+    }
 
-        let result = match_feature_flag(
-            &flag,
+    fn evaluate(
+        flag: &FeatureFlag,
+        person_properties: &HashMap<String, serde_json::Value>,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        match_feature_flag(
+            flag,
             "user-123",
-            &created_in_2026(),
+            person_properties,
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn unsupported_filter_types_make_the_flag_inconclusive() {
+        for property_type in ["person_metadata", "future_type"] {
+            let flag = flag_with_groups(json!([{
+                "properties": [{"key": "created_at", "type": property_type, "operator": "is_date_after", "value": "2025-01-01"}],
+                "rollout_percentage": 100
+            }]));
+            assert!(
+                evaluate(&flag, &created_in_2026()).is_err(),
+                "{}",
+                property_type
+            );
+        }
+    }
+
+    #[test]
+    fn a_false_filter_decides_a_condition_with_an_unsupported_filter() {
+        let flag = flag_with_groups(json!([{
+            "properties": [
+                {"key": "region", "type": "future_type", "operator": "exact", "value": "eu"},
+                {"key": "plan", "type": "person", "operator": "exact", "value": "pro"}
+            ],
+            "rollout_percentage": 100
+        }]));
+        let free = HashMap::from([("plan".to_string(), json!("free"))]);
+
+        assert_eq!(evaluate(&flag, &free).unwrap(), FlagValue::Boolean(false));
+    }
+
+    #[test]
+    fn a_later_condition_can_match_after_an_unsupported_filter() {
+        let flag = flag_with_groups(json!([
+            {
+                "properties": [{"key": "created_at", "type": "person_metadata", "operator": "is_date_after", "value": "2025-01-01"}],
+                "rollout_percentage": 100
+            },
+            {"properties": [], "rollout_percentage": 100}
+        ]));
+
+        assert_eq!(
+            evaluate(&flag, &created_in_2026()).unwrap(),
+            FlagValue::Boolean(true)
         );
-        assert!(result.is_err());
     }
 
     // ==================== Tests for cohort membership ====================
