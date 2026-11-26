@@ -370,3 +370,15 @@ fn a_cycle_behind_branching_conditions_is_inconclusive_quickly() {
         .is_err());
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
+
+#[test]
+fn only_a_flag_filter_may_omit_its_value() {
+    let parse = |filter: Value| serde_json::from_value::<posthog::Property>(filter).is_ok();
+    assert!(parse(
+        json!({"key": "parent", "type": "flag", "operator": "flag_evaluates_to"})
+    ));
+    assert!(!parse(
+        json!({"key": "plan", "type": "person", "operator": "flag_evaluates_to"})
+    ));
+    assert!(!parse(json!({"key": "plan", "operator": "exact"})));
+}

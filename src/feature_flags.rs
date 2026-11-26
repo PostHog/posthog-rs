@@ -467,14 +467,11 @@ impl std::convert::TryFrom<RawProperty> for Property {
     fn try_from(raw: RawProperty) -> Result<Self, Self::Error> {
         let value = match raw.value {
             Some(value) => value,
-            // A flag dependency without a value never matches, as on the server.
-            None if matches!(
-                raw.operator.as_str(),
-                "is_set" | "is_not_set" | "flag_evaluates_to"
-            ) =>
-            {
+            None if matches!(raw.operator.as_str(), "is_set" | "is_not_set") => {
                 serde_json::Value::Null
             }
+            // A flag dependency without a value never matches, as on the server.
+            None if raw.property_type.as_deref() == Some("flag") => serde_json::Value::Null,
             // Any other operator compares against the value, so a filter
             // without one must not be read as a comparison against null.
             None => return Err("missing field `value`"),
