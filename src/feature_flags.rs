@@ -2,6 +2,7 @@ use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
@@ -1053,12 +1054,15 @@ pub(crate) fn match_flag_definition(
     let path = DependencyPath {
         flag_key: &flag.key,
         parent: None,
+        depth: 0,
     };
+    let dependency_results = RefCell::new(HashMap::new());
     let scope = EvaluationScope {
         ctx,
         person_properties,
         metadata,
         dependency_path: Some(&path),
+        dependency_results: &dependency_results,
     };
     evaluate_flag_in_scope(flag, scope)
 }
@@ -1134,13 +1138,20 @@ struct EvaluationScope<'a> {
     metadata: &'a DefinitionMetadataMap,
     /// The flag dependencies being resolved above this evaluation.
     dependency_path: Option<&'a DependencyPath<'a>>,
+    /// Referenced flags already evaluated with this context, so a flag several
+    /// filters depend on is evaluated once, as on the server.
+    dependency_results: &'a RefCell<HashMap<String, Result<FlagValue, String>>>,
 }
+
+/// Deeper chains are inconclusive, so a long chain can't exhaust the stack.
+const MAX_FLAG_DEPENDENCY_DEPTH: usize = 100;
 
 /// One flag on the path of dependencies being resolved, linked to the flag
 /// that depends on it.
 struct DependencyPath<'a> {
     flag_key: &'a str,
     parent: Option<&'a DependencyPath<'a>>,
+    depth: usize,
 }
 
 impl DependencyPath<'_> {
@@ -1271,6 +1282,7 @@ pub fn match_property_with_context(
         person_properties: properties,
         metadata: &HashMap::new(),
         dependency_path: None,
+        dependency_results: &RefCell::new(HashMap::new()),
     };
     match_property_in_scope(property, properties, scope)
 }
@@ -1614,11 +1626,37 @@ fn match_flag_dependency_property(
     property: &Property,
     scope: EvaluationScope,
 ) -> Result<bool, InconclusiveMatchError> {
-    // The server rejects any other operator for every flag value.
-    if property.operator != "flag_evaluates_to" {
+    // The server rejects any other operator or expected value for every flag
+    // value, so neither needs the referenced flag.
+    if property.operator != "flag_evaluates_to"
+        || !matches!(
+            property.value,
+            serde_json::Value::Bool(_) | serde_json::Value::String(_)
+        )
+    {
         return Ok(false);
     }
     let flag_key = property.key.as_str();
+    let cached = scope.dependency_results.borrow().get(flag_key).cloned();
+    let flag_value = match cached {
+        Some(result) => result,
+        None => {
+            let result = evaluate_dependency(flag_key, scope).map_err(|e| e.message);
+            scope
+                .dependency_results
+                .borrow_mut()
+                .insert(flag_key.to_string(), result.clone());
+            result
+        }
+    }
+    .map_err(|message| InconclusiveMatchError::new(&message))?;
+    Ok(flag_value_matches(&flag_value, &property.value))
+}
+
+fn evaluate_dependency(
+    flag_key: &str,
+    scope: EvaluationScope,
+) -> Result<FlagValue, InconclusiveMatchError> {
     let flag = scope.ctx.flags.get(flag_key).ok_or_else(|| {
         InconclusiveMatchError::new(&format!("Flag '{flag_key}' not found in local cache"))
     })?;
@@ -1630,18 +1668,24 @@ fn match_flag_dependency_property(
             "Circular dependency detected for flag '{flag_key}'"
         )));
     }
+    let depth = scope.dependency_path.map_or(0, |path| path.depth + 1);
+    if depth > MAX_FLAG_DEPENDENCY_DEPTH {
+        return Err(InconclusiveMatchError::new(&format!(
+            "Flag dependency chain is deeper than {MAX_FLAG_DEPENDENCY_DEPTH}"
+        )));
+    }
     let path = DependencyPath {
         flag_key,
         parent: scope.dependency_path,
+        depth,
     };
-    let flag_value = evaluate_flag_in_scope(
+    evaluate_flag_in_scope(
         flag,
         EvaluationScope {
             dependency_path: Some(&path),
             ..scope
         },
-    )?;
-    Ok(flag_value_matches(&flag_value, &property.value))
+    )
 }
 
 /// The flags service's `match_flag_value_to_flag_filter`: `true` matches any

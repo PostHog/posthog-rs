@@ -250,3 +250,64 @@ fn dependency_uses_its_own_aggregation() {
         Some(F)
     );
 }
+
+// A filter that can't match is decided without evaluating the referenced flag,
+// which here would be inconclusive without the "plan" property.
+#[test]
+fn a_filter_that_cannot_match_skips_the_referenced_flag() {
+    let mut no_value = wire("parent", json!(true), json!(["parent"]));
+    no_value.as_object_mut().unwrap().remove("value");
+    for filter in [no_value, wire("parent", json!(1), json!(["parent"]))] {
+        assert_eq!(
+            child(&evaluator(plan_parent(), filter.clone()), json!({})),
+            Ok(F),
+            "{filter}"
+        );
+    }
+}
+
+fn chain(len: usize, filters_per_flag: usize) -> LocalEvaluator {
+    let mut flags = vec![
+        json!({"key": "flag-0", "active": true, "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}}),
+    ];
+    for i in 1..=len {
+        let previous = format!("flag-{}", i - 1);
+        let filters: Vec<Value> = (0..filters_per_flag)
+            .map(|_| wire(&previous, json!(true), json!([previous])))
+            .collect();
+        flags.push(
+            json!({"key": format!("flag-{i}"), "active": true, "filters": {"groups": [
+                {"properties": filters, "rollout_percentage": 100}
+            ]}}),
+        );
+    }
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(json!({"flags": flags})).unwrap();
+    let cache = FlagCache::new();
+    cache.update(response);
+    LocalEvaluator::new(cache)
+}
+
+fn evaluate_last(e: &LocalEvaluator, len: usize) -> Result<Option<FlagValue>, String> {
+    e.evaluate_flag(
+        &format!("flag-{len}"),
+        "user",
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[test]
+fn a_long_dependency_chain_is_inconclusive_instead_of_overflowing() {
+    assert_eq!(evaluate_last(&chain(100, 1), 100), Ok(T));
+    assert!(evaluate_last(&chain(5000, 1), 5000).is_err());
+}
+
+// Each flag is evaluated once per call, so filters sharing a prerequisite don't
+// multiply the work at every level.
+#[test]
+fn a_shared_prerequisite_is_evaluated_once() {
+    assert_eq!(evaluate_last(&chain(60, 4), 60), Ok(T));
+}
