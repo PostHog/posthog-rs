@@ -1241,10 +1241,12 @@ where
             } => (bucketing, properties),
             ConditionTarget::Skip => continue,
             ConditionTarget::Inconclusive => {
-                inconclusive_reason = Some(UnresolvedFlagReason::pick(
-                    inconclusive_reason,
-                    UnresolvedFlagReason::MissingContext,
-                ));
+                let reason = if condition.properties.iter().any(has_definition_error) {
+                    UnresolvedFlagReason::UnsupportedDefinition
+                } else {
+                    UnresolvedFlagReason::MissingContext
+                };
+                inconclusive_reason = Some(UnresolvedFlagReason::pick(inconclusive_reason, reason));
                 continue;
             }
         };
@@ -1366,18 +1368,17 @@ fn match_cohort_property(
     let cohort_id = cohort_id_to_string(&property.value)
         .ok_or_else(|| MatchError::new("Cohort ID must be a string or number"))?;
 
+    // Cohort references omit the operator in API payloads, so "exact" means membership.
+    let negated = match property.operator.as_str() {
+        "exact" | "in" => false,
+        "not_in" => true,
+        op => return Err(MatchError::new(&format!("Unknown cohort operator: {}", op))),
+    };
+
     let mut active_cohorts = HashSet::new();
     let is_in_cohort = match_cohort_by_id(&cohort_id, properties, scope, &mut active_cohorts, 0)
         .map_err(CohortMatchError::into_inconclusive)?;
-
-    // Cohort references omit the operator in API payloads, so "exact" means membership.
-    Ok(match property.operator.as_str() {
-        "exact" | "in" => is_in_cohort,
-        "not_in" => !is_in_cohort,
-        op => {
-            return Err(MatchError::new(&format!("Unknown cohort operator: {}", op)));
-        }
-    })
+    Ok(is_in_cohort != negated)
 }
 
 /// Cohort IDs arrive as either a JSON string or a number depending on where the
@@ -1661,19 +1662,37 @@ fn match_flag_dependency_property(
         .strip_prefix("$feature/")
         .ok_or_else(|| MatchError::new("Invalid flag dependency format"))?;
 
+    let negated = match property.operator.as_str() {
+        "exact" => false,
+        "is_not" => true,
+        op => {
+            return Err(MatchError::new(&format!(
+                "Unknown flag dependency operator: {}",
+                op
+            )))
+        }
+    };
+
     let flag = ctx
         .flags
         .get(flag_key)
         .ok_or_else(|| MatchError::new(&format!("Flag '{}' not found in local cache", flag_key)))?;
 
-    // The dependency's own cause belongs to the dependency's entry.
+    // The dependency's own cause belongs to the dependency's entry. The
+    // dependency is matched here without person properties, cohorts or its own
+    // dependencies, so if it reads any of them, passing more context can't help.
     let unresolved_dependency = |error: MatchError| {
+        let reason = if dependency_needs_dropped_context(flag) {
+            UnresolvedFlagReason::UnsupportedDefinition
+        } else {
+            UnresolvedFlagReason::UnresolvedDependency
+        };
         MatchError::with_reason(
             &format!(
-                "Flag dependency '{flag_key}' is unresolved: {}",
+                "Flag dependency '{flag_key}' can't be evaluated: {}",
                 error.message
             ),
-            UnresolvedFlagReason::UnresolvedDependency,
+            reason,
         )
     };
 
@@ -1715,17 +1734,7 @@ fn match_flag_dependency_property(
         _ => false,
     };
 
-    // Handle different operators
-    Ok(match property.operator.as_str() {
-        "exact" => matches,
-        "is_not" => !matches,
-        op => {
-            return Err(MatchError::new(&format!(
-                "Unknown flag dependency operator: {}",
-                op
-            )));
-        }
-    })
+    Ok(matches != negated)
 }
 
 /// Parse a relative date string like "-7d", "7d", "-24h", "-2w", "-3m" or "-1y".
@@ -1978,6 +1987,34 @@ fn check_property_filter_type(property: &Property) -> Result<(), MatchError> {
             property.key
         ))),
     }
+}
+
+/// Whether a dependency reads person properties, cohorts or other flags, none of
+/// which [`match_flag_dependency_property`] passes when it evaluates it.
+fn dependency_needs_dropped_context(flag: &FeatureFlag) -> bool {
+    flag.filters.groups.iter().any(|condition| {
+        let person_condition = condition
+            .aggregation_group_type_index
+            .or(flag.filters.aggregation_group_type_index)
+            .is_none();
+        condition.properties.iter().any(|property| {
+            person_condition
+                || property.property_type.as_deref() == Some("cohort")
+                || property.key.starts_with("$feature/")
+        })
+    })
+}
+
+/// Whether a filter is unsupported whatever context the call passes. Cohort
+/// contents and dependency values aren't inspected.
+fn has_definition_error(property: &Property) -> bool {
+    if property.property_type.as_deref() == Some("cohort") {
+        return !matches!(property.operator.as_str(), "exact" | "in" | "not_in");
+    }
+    if property.key.starts_with("$feature/") {
+        return !matches!(property.operator.as_str(), "exact" | "is_not");
+    }
+    check_property_filter_type(property).is_err() || check_filter_definition(property).is_err()
 }
 
 /// Definition errors that passing the property can't fix, so they outrank the
@@ -6102,6 +6139,166 @@ mod tests {
             checkout_error.reason,
             UnresolvedFlagReason::ExperienceContinuity
         );
+    }
+
+    #[test]
+    fn unknown_cohort_and_dependency_operators_outrank_other_causes() {
+        let cohorts = cohort_7(json!([
+            {"key": "plan", "type": "person", "operator": "exact", "value": "pro"}
+        ]));
+        let flag = flag_with_groups(json!([{
+            "properties": [{"key": "id", "type": "cohort", "operator": "future_op", "value": 7}],
+            "rollout_percentage": 100
+        }]));
+        let error = context_flag(
+            &flag,
+            &HashMap::new(),
+            &cohorts,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.reason,
+            UnresolvedFlagReason::UnsupportedDefinition,
+            "cohort"
+        );
+
+        let checkout: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+        }))
+        .unwrap();
+        let flags = HashMap::from([("checkout".to_string(), checkout)]);
+        let metadata = HashMap::from([(
+            "checkout".to_string(),
+            DefinitionMetadata {
+                feature_enrollment: false,
+                ensure_experience_continuity: true,
+            },
+        )]);
+        let dependent = flag_with_groups(json!([{
+            "properties": [{"key": "$feature/checkout", "type": "flag", "operator": "future_op", "value": true}],
+            "rollout_percentage": 100
+        }]));
+        let error = context_flag(
+            &dependent,
+            &HashMap::new(),
+            &HashMap::new(),
+            &flags,
+            &metadata,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.reason,
+            UnresolvedFlagReason::UnsupportedDefinition,
+            "dependency"
+        );
+    }
+
+    #[test]
+    fn a_group_condition_without_group_properties_still_reports_definition_errors() {
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "company-flag",
+            "active": true,
+            "filters": {
+                "aggregation_group_type_index": 0,
+                "groups": [{
+                    "properties": [{"key": "plan", "type": "group", "operator": "future_op", "value": "pro"}],
+                    "rollout_percentage": 100
+                }]
+            }
+        }))
+        .unwrap();
+        let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
+        let group_type_mapping = HashMap::from([("0".to_string(), "company".to_string())]);
+        let error = match_feature_flag_with_version(
+            &flag,
+            "user-123",
+            &HashMap::new(),
+            &groups,
+            &HashMap::new(),
+            &group_type_mapping,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::UnsupportedDefinition);
+
+        let mut flag = flag;
+        flag.filters.groups[0].properties[0].operator = "exact".to_string();
+        let error = match_feature_flag_with_version(
+            &flag,
+            "user-123",
+            &HashMap::new(),
+            &groups,
+            &HashMap::new(),
+            &group_type_mapping,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::MissingContext);
+    }
+
+    #[test]
+    fn a_dependency_this_evaluator_cannot_match_is_an_unsupported_definition() {
+        let pro_plan: FeatureFlag = serde_json::from_value(json!({
+            "key": "pro-plan",
+            "active": true,
+            "filters": {"groups": [{
+                "properties": [{"key": "plan", "type": "person", "operator": "exact", "value": "pro"}],
+                "rollout_percentage": 100
+            }]}
+        }))
+        .unwrap();
+        let flags = HashMap::from([("pro-plan".to_string(), pro_plan)]);
+        let dependent = flag_with_groups(json!([{
+            "properties": [{"key": "$feature/pro-plan", "type": "flag", "operator": "exact", "value": true}],
+            "rollout_percentage": 100
+        }]));
+        let pro = HashMap::from([("plan".to_string(), json!("pro"))]);
+
+        assert_eq!(
+            context_flag(
+                &flags["pro-plan"],
+                &pro,
+                &HashMap::new(),
+                &flags,
+                &HashMap::new()
+            )
+            .unwrap(),
+            FlagValue::Boolean(true)
+        );
+        let error =
+            context_flag(&dependent, &pro, &HashMap::new(), &flags, &HashMap::new()).unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::UnsupportedDefinition);
+
+        let error = context_flag(
+            &dependent,
+            &HashMap::new(),
+            &HashMap::new(),
+            &flags,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::UnsupportedDefinition);
+
+        let cyclic = |key: &str, dependency: &str| -> FeatureFlag {
+            serde_json::from_value(json!({
+                "key": key,
+                "active": true,
+                "filters": {"groups": [{
+                    "properties": [{"key": format!("$feature/{dependency}"), "type": "flag", "operator": "exact", "value": true}],
+                    "rollout_percentage": 100
+                }]}
+            }))
+            .unwrap()
+        };
+        let flags = HashMap::from([
+            ("a".to_string(), cyclic("a", "b")),
+            ("b".to_string(), cyclic("b", "a")),
+        ]);
+        assert!(context_flag(&flags["a"], &pro, &HashMap::new(), &flags, &HashMap::new()).is_err());
     }
 
     #[test]
