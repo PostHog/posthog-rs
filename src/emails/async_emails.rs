@@ -1,12 +1,16 @@
 use std::future::Future;
 use std::sync::OnceLock;
+use std::time::Duration;
 
+use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::{Client as HttpClient, Method};
 
 use super::error::EmailError;
-use super::shared::{self, Accepted, EmailTracker, Reply, Upload};
-use super::types::{EmailAttachment, EmailStatus, SendEmail, SendEmailResult};
+use super::shared::{self, Accepted, BatchRun, BatchStep, EmailTracker, Reply, Upload};
+use super::types::{
+    EmailAttachment, EmailStatus, SendBatch, SendBatchResult, SendEmail, SendEmailResult,
+};
 use crate::client::{parse_retry_after, ClientOptions};
 
 #[doc = include_str!("guide.md")]
@@ -116,7 +120,7 @@ impl<'a> Emails<'a> {
                 Method::POST,
                 &url,
                 &headers,
-                Some(&prepared.body),
+                Some(Bytes::from(prepared.body)),
                 &connection,
                 max_retries,
             )
@@ -124,6 +128,99 @@ impl<'a> Emails<'a> {
         let result = shared::parse_send_reply(reply, schedule)?;
         shared::log_warnings(&result.warnings);
         Ok(result)
+    }
+
+    /// Queues the same email for 1 to 100 recipients, one email each, from a
+    /// template made in PostHog or from content your code rendered.
+    ///
+    /// The client sends the batch in one request and waits at least 45 seconds
+    /// for the answer. Each recipient has an idempotency key, given or made by
+    /// the client, that every retry reuses, so a retry never queues an email
+    /// twice. The request retries what [`send`](Self::send) retries.
+    ///
+    /// `Ok` holds a result per recipient, in the order of the recipients.
+    /// Check each [`status`](crate::BatchEmailResult::status), and send an
+    /// [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed) email again with
+    /// the same key within 24 hours of the first request that used it, so it
+    /// goes out once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`EmailError`] whose
+    /// [`batch_result`](EmailError::batch_result) holds every recipient when
+    /// PostHog refused the request or never answered it. The client never
+    /// reads an email by its key: a recipient whose email PostHog may have
+    /// queued stays [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed), and
+    /// you send it again with its key. The code is `content_too_large` when
+    /// PostHog finds the batch too large, and the error says how to fix it.
+    /// With status `413` the request is more than PostHog takes at once:
+    /// split the recipients into smaller batches. With status `400` the
+    /// content or template data sent to every recipient is over PostHog's
+    /// limit, and splitting doesn't help: send larger emails one at a time
+    /// with [`send`](Self::send). The code is `batch_unavailable` when
+    /// the project can't send batches yet. A `404` `not_found` means PostHog
+    /// found no template with that ID or batch sends aren't available for the
+    /// project: check the template ID, and if it is right, send each email
+    /// the batch didn't queue with [`send`](Self::send) and its recipient's
+    /// idempotency key.
+    /// `client_closed` means the client shut down before a retry: it sends no
+    /// retry, and returns at once from the wait before it.
+    ///
+    /// Returns an [`EmailError`] without a batch result when the client sent
+    /// nothing: an argument check failed, such as more than 100 recipients or
+    /// two recipients with the same idempotency key, or the client is
+    /// disabled, shut down or has no `secret_key`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use posthog::{BatchEmailStatus, BatchRecipient, TemplateBatch};
+    /// use serde_json::json;
+    ///
+    /// # async fn example(posthog: posthog::Client) -> Result<(), posthog::EmailError> {
+    /// let sent = posthog
+    ///     .emails()
+    ///     .batch(TemplateBatch::new(
+    ///         "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b",
+    ///         vec![
+    ///             BatchRecipient::new("ada@example.com").template_data(json!({ "name": "Ada" })),
+    ///             BatchRecipient::new("alan@example.com").template_data(json!({ "name": "Alan" })),
+    ///         ],
+    ///     ))
+    ///     .await?;
+    /// for email in &sent.results {
+    ///     if email.status != BatchEmailStatus::Queued {
+    ///         println!("{} {} {:?}", email.to, email.status, email.error);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn batch(&self, batch: impl Into<SendBatch>) -> Result<SendBatchResult, EmailError> {
+        let prepared = shared::prepare_batch(batch.into())?;
+        let _in_flight = self
+            .tracker
+            .admit(self.options.is_disabled(), shared::SEND_NOT_DONE)?;
+        let connection = shared::connect(self.options, shared::SEND_KEY_NEEDED)?;
+        let mut run = BatchRun::new(prepared, &connection, self.tracker)?;
+        loop {
+            match run.next() {
+                BatchStep::Call(call) => {
+                    let reply = self
+                        .attempt(
+                            Method::POST,
+                            &call.url,
+                            &call.headers,
+                            Some(call.body),
+                            call.timeout,
+                        )
+                        .await;
+                    run.answered(reply);
+                }
+                BatchStep::Wait(delay) => self.tracker.wait_to_retry(delay).await,
+                BatchStep::Done(result) => return result,
+            }
+        }
     }
 
     /// Reads the status of an email that [`send`](Self::send) queued or
@@ -170,7 +267,7 @@ impl<'a> Emails<'a> {
                 Method::POST,
                 &request.url,
                 &request.headers,
-                Some(&request.body),
+                Some(Bytes::from(request.body)),
                 connection,
                 max_retries,
             )
@@ -191,14 +288,14 @@ impl<'a> Emails<'a> {
         method: Method,
         url: &str,
         headers: &HeaderMap,
-        body: Option<&[u8]>,
+        body: Option<Bytes>,
         connection: &shared::Connection,
         max_retries: u32,
     ) -> Result<Accepted, EmailError> {
         retrying(max_retries, || {
-            let method = method.clone();
+            let (method, body) = (method.clone(), body.clone());
             async move {
-                self.attempt(method, url, headers, body, connection)
+                self.attempt(method, url, headers, body, connection.timeout)
                     .await
                     .and_then(shared::accept)
             }
@@ -211,16 +308,16 @@ impl<'a> Emails<'a> {
         method: Method,
         url: &str,
         headers: &HeaderMap,
-        body: Option<&[u8]>,
-        connection: &shared::Connection,
+        body: Option<Bytes>,
+        timeout: Duration,
     ) -> Result<Reply, EmailError> {
         let mut request = self
             .http()?
             .request(method, url)
-            .timeout(connection.timeout)
+            .timeout(timeout)
             .headers(headers.clone());
         if let Some(body) = body {
-            request = request.body(body.to_vec());
+            request = request.body(body);
         }
         let response = request.send().await.map_err(shared::request_error)?;
         let status = response.status().as_u16();

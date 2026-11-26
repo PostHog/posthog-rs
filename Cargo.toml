@@ -58,7 +58,7 @@ rustls = { version = "0.23", default-features = false, features = [
     "std",
 ] }
 ctor = "1.0.12"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 httpmock = "0.9"
 tokio-rustls = { version = "0.26", default-features = false }
 serde_json = "1.0"

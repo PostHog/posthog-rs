@@ -1,12 +1,13 @@
 //! Servers for email tests: [`FakePostHog`], which behaves like PostHog's
-//! upload and send routes and its file store, and [`ScriptedServer`], an
-//! httpmock server that answers a scripted sequence of responses, the last one
+//! upload and send routes and its file store, and [`ScriptedServer`], a
+//! server that answers a scripted sequence of responses, the last one
 //! repeating, and records every request it answered.
 
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -20,13 +21,18 @@ pub const TEMPLATE_ID: &str = "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b";
 pub const MESSAGE_ID: &str = "01a18356-c56c-0001-e494-7666bc915188";
 pub const SEND_PATH: &str = "/api/messaging/send/email/";
 pub const UPLOADS_PATH: &str = "/api/messaging/attachments/uploads/";
+pub const BATCH_PATH: &str = "/api/messaging/send/email_batch/";
 
-#[derive(Debug, Clone)]
+type AnswerOf = Arc<dyn Fn(&Recorded) -> Answer + Send + Sync>;
+
+#[derive(Clone)]
 pub struct Answer {
     status: u16,
     content_type: &'static str,
     body: String,
     headers: Vec<(String, String)>,
+    lost: bool,
+    of_request: Option<AnswerOf>,
 }
 
 impl Answer {
@@ -36,16 +42,34 @@ impl Answer {
             content_type: "application/json",
             body: body.to_string(),
             headers: Vec::new(),
+            lost: false,
+            of_request: None,
         }
     }
 
     /// An answer as an S3-compatible bucket gives it.
     pub fn xml(status: u16, body: &str) -> Self {
         Self {
-            status,
             content_type: "application/xml",
             body: body.to_string(),
-            headers: Vec::new(),
+            ..Self::json(status, serde_json::Value::Null)
+        }
+    }
+
+    /// The answer `answer` makes of the request it answers.
+    pub fn of_request(answer: impl Fn(&Recorded) -> Answer + Send + Sync + 'static) -> Self {
+        Self {
+            of_request: Some(Arc::new(answer)),
+            ..Self::json(500, serde_json::Value::Null)
+        }
+    }
+
+    /// No answer: the server closes the connection after reading the request,
+    /// so the client can't tell what PostHog did with it.
+    pub fn lost() -> Self {
+        Self {
+            lost: true,
+            ..Self::json(200, serde_json::Value::Null)
         }
     }
 
@@ -59,6 +83,8 @@ impl Answer {
 pub struct Recorded {
     pub method: String,
     pub path: String,
+    /// The query string, without `?`, or empty.
+    pub query: String,
     /// Header names in lowercase.
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
@@ -74,43 +100,33 @@ impl Recorded {
     }
 }
 
+/// Answers each request on a connection of its own, which it closes after the
+/// answer, so a [`lost`](Answer::lost) answer drops only its own request.
 pub struct ScriptedServer {
     pub url: String,
     requests: Arc<Mutex<Vec<Recorded>>>,
-    _server: MockServer,
 }
 
-type Responder = Box<dyn Fn(&HttpMockRequest) -> HttpMockResponse + Send + Sync>;
-
 impl ScriptedServer {
-    /// For blocking tests.
     pub fn start(answers: Vec<Answer>) -> Self {
-        let server = MockServer::start();
-        let (requests, respond) = script(answers);
-        server.mock(|_, then| {
-            then.respond_with(respond);
+        assert!(!answers.is_empty());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let answers = Arc::new(answers);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let (recorded, answers) = (Arc::clone(&recorded), Arc::clone(&answers));
+                std::thread::spawn(move || answer_request(stream, &recorded, &answers));
+            }
         });
-        Self::new(server, requests)
+        Self { url, requests }
     }
 
-    /// For async tests, where httpmock's blocking calls would block the runtime.
     pub async fn start_async(answers: Vec<Answer>) -> Self {
-        let server = MockServer::start_async().await;
-        let (requests, respond) = script(answers);
-        server
-            .mock_async(|_, then| {
-                then.respond_with(respond);
-            })
-            .await;
-        Self::new(server, requests)
-    }
-
-    fn new(server: MockServer, requests: Arc<Mutex<Vec<Recorded>>>) -> Self {
-        Self {
-            url: server.base_url(),
-            requests,
-            _server: server,
-        }
+        Self::start(answers)
     }
 
     pub fn requests(&self) -> Vec<Recorded> {
@@ -127,28 +143,74 @@ impl ScriptedServer {
     }
 }
 
-/// Records each request before it answers, so a test that sees the answer
-/// sees the request.
-fn script(answers: Vec<Answer>) -> (Arc<Mutex<Vec<Recorded>>>, Responder) {
-    assert!(!answers.is_empty());
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let recorded = Arc::clone(&requests);
-    let next = AtomicUsize::new(0);
-    let respond = move |request: &HttpMockRequest| {
-        recorded.lock().unwrap().push(Recorded {
-            method: request.method_str().to_string(),
-            path: request.uri().path().to_string(),
-            headers: request
-                .headers_vec()
-                .iter()
-                .map(|(name, value)| (name.to_lowercase(), value.clone()))
-                .collect(),
-            body: request.body_vec(),
-        });
-        let index = next.fetch_add(1, Ordering::SeqCst);
-        response(&answers[index.min(answers.len() - 1)])
+/// Records the request before it answers, so a test that sees the answer sees
+/// the request.
+fn answer_request(stream: TcpStream, recorded: &Mutex<Vec<Recorded>>, answers: &[Answer]) {
+    let mut reader = BufReader::new(stream);
+    let Some(request) = read_request(&mut reader) else {
+        return;
     };
-    (requests, Box::new(respond))
+    let mut answer = {
+        let mut requests = recorded.lock().unwrap();
+        requests.push(request.clone());
+        answers[(requests.len() - 1).min(answers.len() - 1)].clone()
+    };
+    while let Some(of_request) = answer.of_request.take() {
+        answer = of_request(&request);
+    }
+    if answer.lost {
+        return;
+    }
+    let mut head = format!(
+        "HTTP/1.1 {} Scripted\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+        answer.status,
+        answer.content_type,
+        answer.body.len()
+    );
+    for (name, value) in &answer.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    let mut stream = reader.into_inner();
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(answer.body.as_bytes());
+}
+
+fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Recorded> {
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let mut parts = line.split_whitespace();
+    let (method, target) = (parts.next()?.to_string(), parts.next()?);
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = (path.to_string(), query.to_string());
+    let mut headers = HashMap::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        if line == "\r\n" {
+            break;
+        }
+        let (name, value) = line.split_once(':')?;
+        headers.insert(name.to_lowercase(), value.trim().to_string());
+    }
+    assert!(
+        !headers.contains_key("transfer-encoding"),
+        "the scripted server reads only bodies with a content-length"
+    );
+    let length = headers
+        .get("content-length")
+        .map_or(0, |length| length.parse().unwrap());
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).ok()?;
+    Some(Recorded {
+        method,
+        path,
+        query,
+        headers,
+        body,
+    })
 }
 
 fn response(answer: &Answer) -> HttpMockResponse {
@@ -621,7 +683,6 @@ fn unhex(text: &str) -> Vec<u8> {
 /// its cap gets an answer before its request timeout. httpmock always sends
 /// the whole body, so this one is a raw socket.
 pub fn endless_body_server() -> String {
-    use std::io::{Read, Write};
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
@@ -645,7 +706,6 @@ pub fn endless_body_server() -> String {
 /// opened, so a test can see whether uploads reuse a connection. httpmock
 /// doesn't show connections, so this one is a raw socket.
 pub fn connection_counting_store() -> (String, Arc<AtomicUsize>) {
-    use std::io::{BufRead, BufReader, Read, Write};
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let connections = Arc::new(AtomicUsize::new(0));
@@ -883,4 +943,76 @@ pub fn unavailable() -> Answer {
         503,
         serde_json::json!({"code": "service_unavailable", "detail": "Try again."}),
     )
+}
+
+pub fn queued(message_id: &str) -> serde_json::Value {
+    serde_json::json!({"message_id": message_id, "status": "queued", "replayed": false})
+}
+
+pub fn refused(message_id: &str, code: &str, status: u16) -> serde_json::Value {
+    serde_json::json!({
+        "message_id": message_id,
+        "error": {"code": code, "detail": format!("Refused: {code}."), "status": status},
+    })
+}
+
+/// A batch answer with these per-recipient results.
+pub fn ok(slots: Vec<serde_json::Value>) -> Answer {
+    Answer::json(200, serde_json::json!({ "results": slots }))
+}
+
+pub fn keys_of(request: &Recorded) -> Vec<String> {
+    request.json()["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|recipient| recipient["idempotency_key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Queues every recipient of the request, as `msg_<key>`.
+pub fn all_queued() -> Answer {
+    Answer::of_request(|request| {
+        ok(keys_of(request)
+            .iter()
+            .map(|key| queued(&format!("msg_{key}")))
+            .collect())
+    })
+}
+
+/// A refusal of the whole request.
+pub fn whole_call(status: u16, code: &str) -> Answer {
+    Answer::json(
+        status,
+        serde_json::json!({"type": "invalid_request", "code": code, "detail": "Nope."}),
+    )
+}
+
+pub fn status_found(message_id: &str) -> Answer {
+    Answer::json(
+        200,
+        serde_json::json!({
+            "id": message_id,
+            "status": "sent",
+            "created_at": "2026-11-22T10:00:00Z",
+            "status_at": "2026-11-22T10:00:01Z",
+        }),
+    )
+}
+
+/// Whether `error` tells the caller to send the email again with its key.
+pub fn says_to_resend_with_its_key(error: Option<&posthog::EmailError>) -> bool {
+    error.and_then(posthog::EmailError::fix).is_some_and(|fix| {
+        fix.contains("same idempotency_key within 24 hours of the first request that used it")
+    })
+}
+
+/// `count` recipients, `user<n>@example.com` with the key `key-<n>`.
+pub fn recipients(count: usize) -> Vec<posthog::BatchRecipient> {
+    (0..count)
+        .map(|index| {
+            posthog::BatchRecipient::new(format!("user{index}@example.com"))
+                .idempotency_key(format!("key-{index}"))
+        })
+        .collect()
 }

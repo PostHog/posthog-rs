@@ -9,11 +9,13 @@ use std::time::Duration;
 
 use common::default_user_agent;
 use email_support::{
-    accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, ScriptedServer,
-    MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    accepted, connection_counting_store, options, says_to_resend_with_its_key, status_found,
+    unavailable, Answer, FakePostHog, Recorded, ScriptedServer, BATCH_PATH, MESSAGE_ID, SEND_PATH,
+    TEMPLATE_ID,
 };
 use posthog::{
-    CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, SendEmailStatus, TemplateEmail,
+    BatchEmailStatus, BatchRecipient, CodeEmail, EmailAttachment, EmailDeliveryStatus,
+    EmailErrorKind, SendEmailStatus, TemplateBatch, TemplateEmail,
 };
 use serde_json::json;
 
@@ -591,4 +593,111 @@ fn get_reads_a_scheduled_email() {
         client.emails().get(MESSAGE_ID).unwrap().status,
         EmailDeliveryStatus::Scheduled
     );
+}
+
+fn batch_keys(request: &Recorded) -> Vec<String> {
+    request.json()["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|recipient| recipient["idempotency_key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn batch_queued() -> Answer {
+    Answer::of_request(|request| {
+        let slots: Vec<_> = batch_keys(request)
+            .iter()
+            .map(|key| json!({"message_id": format!("msg_{key}"), "status": "queued"}))
+            .collect();
+        Answer::json(200, json!({ "results": slots }))
+    })
+}
+
+fn batch_of(count: usize) -> TemplateBatch {
+    TemplateBatch::new(
+        TEMPLATE_ID,
+        (0..count).map(|index| {
+            BatchRecipient::new(format!("user{index}@example.com"))
+                .idempotency_key(format!("key-{index}"))
+        }),
+    )
+}
+
+#[test]
+fn a_batch_of_100_goes_in_one_request_and_101_sends_nothing() {
+    let server = ScriptedServer::start(vec![batch_queued()]);
+    let client = client_for(&server);
+
+    let error = client.emails().batch(batch_of(101)).unwrap_err();
+    assert_eq!(
+        (error.code(), error.field()),
+        ("invalid_recipients", Some("recipients"))
+    );
+    assert_eq!(
+        error.fix(),
+        Some("Split the recipients into batches of at most 100.")
+    );
+    assert!(server.requests().is_empty());
+
+    let result = client.emails().batch(batch_of(100)).unwrap();
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, BATCH_PATH);
+    assert_eq!(batch_keys(&requests[0]).len(), 100);
+    assert!(result
+        .results
+        .iter()
+        .all(|result| result.status == BatchEmailStatus::Queued));
+    assert_eq!(result.results[99].message_id.as_deref(), Some("msg_key-99"));
+}
+
+#[test]
+fn a_batch_posthog_finds_too_large_returns_its_413() {
+    for answer in [
+        Answer::xml(413, "<h1>Request Entity Too Large</h1>"),
+        Answer::json(413, json!({"code": 413, "detail": " ", "fix": ""})),
+    ] {
+        let server = ScriptedServer::start(vec![answer]);
+        let client = client_for(&server);
+
+        let error = client.emails().batch(batch_of(2)).unwrap_err();
+
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(
+            (error.code(), error.status()),
+            ("content_too_large", Some(413))
+        );
+        assert_eq!(
+            error.fix(),
+            Some("Split the recipients into smaller batches.")
+        );
+        assert!(error
+            .batch_result()
+            .unwrap()
+            .results
+            .iter()
+            .all(|result| result.status == BatchEmailStatus::Failed));
+    }
+}
+
+#[test]
+fn a_lost_batch_answer_leaves_the_recipient_unconfirmed_without_a_read() {
+    let server = ScriptedServer::start(vec![Answer::lost(), status_found("m0")]);
+    let client = client_for(&server);
+
+    let error = client
+        .emails()
+        .batch(batch_of(1).max_retries(0))
+        .unwrap_err();
+
+    assert_eq!(error.code(), "network_error");
+    assert_eq!(server.requests().len(), 1);
+    let only = &error.batch_result().unwrap().results[0];
+    assert_eq!(
+        (only.status, only.message_id.as_deref()),
+        (BatchEmailStatus::Unconfirmed, None)
+    );
+    assert!(says_to_resend_with_its_key(only.error.as_ref()));
 }
