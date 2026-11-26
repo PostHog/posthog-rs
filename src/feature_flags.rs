@@ -1364,7 +1364,7 @@ fn match_feature_flag_in_context(
     dependency_results: &RefCell<DependencyResults>,
     nesting_depth: usize,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    if let Some(result) = metadata_result(flag, person_properties, metadata) {
+    if let Some(result) = metadata_result(flag, person_properties, known_absent, metadata) {
         return result;
     }
     let dependency_path = DependencyPath {
@@ -1424,6 +1424,7 @@ impl<F> PropertyMatcher for F where
 pub(crate) fn metadata_result(
     flag: &FeatureFlag,
     person_properties: &HashMap<String, serde_json::Value>,
+    known_absent: &KnownAbsentProperties,
     metadata: &DefinitionMetadataMap,
 ) -> Option<Result<FlagValue, InconclusiveMatchError>> {
     let metadata = metadata.get(&flag.key).filter(|_| flag.active)?;
@@ -1432,9 +1433,11 @@ pub(crate) fn metadata_result(
             "Flag has experience continuity enabled",
         )));
     }
-    metadata
-        .feature_enrollment
-        .then(|| match_feature_enrollment(flag, person_properties))
+    let enrollment_key = format!("$feature_enrollment/{}", flag.key);
+    // A listed enrollment key means the person isn't enrolled, even when a
+    // value was supplied, so the holdout and release conditions decide.
+    (metadata.feature_enrollment && !known_absent.person.contains(&enrollment_key))
+        .then(|| match_feature_enrollment(&enrollment_key, person_properties))
 }
 
 /// An early-access feature flag returns the person's enrollment at once:
@@ -1442,11 +1445,10 @@ pub(crate) fn metadata_result(
 /// `null` included, means opted out. Without the enrollment property the flag
 /// can't be resolved locally.
 fn match_feature_enrollment(
-    flag: &FeatureFlag,
+    enrollment_key: &str,
     person_properties: &HashMap<String, serde_json::Value>,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    let enrollment_key = format!("$feature_enrollment/{}", flag.key);
-    match person_properties.get(&enrollment_key) {
+    match person_properties.get(enrollment_key) {
         None => Err(InconclusiveMatchError::new(&format!(
             "Flag has feature enrollment and '{enrollment_key}' was not passed"
         ))),

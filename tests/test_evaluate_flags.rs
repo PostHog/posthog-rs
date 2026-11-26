@@ -3,6 +3,7 @@ mod common;
 use common::default_user_agent;
 use httpmock::prelude::*;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener};
 use std::sync::{
@@ -491,6 +492,57 @@ fn person_metadata_options(only_evaluate_locally: bool) -> posthog::EvaluateFlag
     );
     options.person_property_keys_known_absent = Some(vec!["created_at".to_string()]);
     options.only_evaluate_locally = only_evaluate_locally;
+    options
+}
+
+/// Early-access flags at 0% and 100% rollout, so a result shows whether the
+/// enrollment shortcut or the release conditions decided it.
+fn mock_enrollment_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    let flag = |key: &str, rollout: f64| {
+        json!({
+            "key": key,
+            "active": true,
+            "filters": {
+                "feature_enrollment": true,
+                "groups": [{"properties": [], "rollout_percentage": rollout}]
+            }
+        })
+    };
+    let definitions = json!({
+        "flags": [flag("beta-none", 0.0), flag("beta-all", 100.0)],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(definitions);
+    })
+}
+
+/// `(flag key, enrollment supplied as true, enrollment key listed, local
+/// result)`. A listed enrollment key means not enrolled, so the release
+/// conditions decide; `None` is inconclusive and falls back to `/flags`.
+const ENROLLMENT_CASES: [(&str, bool, bool, Option<bool>); 4] = [
+    ("beta-none", true, true, Some(false)),
+    ("beta-all", false, true, Some(true)),
+    ("beta-none", true, false, Some(true)),
+    ("beta-all", false, false, None),
+];
+
+fn enrollment_options(
+    flag_key: &str,
+    supplied: bool,
+    listed: bool,
+) -> posthog::EvaluateFlagsOptions {
+    let enrollment_key = format!("$feature_enrollment/{flag_key}");
+    let mut options = posthog::EvaluateFlagsOptions::default();
+    options.flag_keys = Some(vec![flag_key.to_string()]);
+    if supplied {
+        options.person_properties = Some(HashMap::from([(enrollment_key.clone(), json!(true))]));
+    }
+    if listed {
+        options.person_property_keys_known_absent = Some(vec![enrollment_key]);
+    }
     options
 }
 
@@ -1648,6 +1700,32 @@ mod blocking {
             .unwrap();
         flags_mock.assert_calls(1);
     }
+
+    #[test]
+    fn listed_enrollment_key_means_not_enrolled() {
+        let server = MockServer::start();
+        mock_enrollment_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(json!({"flags": {}}));
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        for (key, supplied, listed, expected) in ENROLLMENT_CASES {
+            let calls_before = flags_mock.calls();
+            let snapshot = client
+                .evaluate_flags("user-1", enrollment_options(key, supplied, listed))
+                .unwrap();
+            let case = format!("{key} supplied={supplied} listed={listed}");
+            assert_eq!(
+                snapshot.get_flag(key),
+                expected.map(FlagValue::Boolean),
+                "{case}"
+            );
+            let remote_calls = usize::from(expected.is_none());
+            assert_eq!(flags_mock.calls() - calls_before, remote_calls, "{case}");
+        }
+    }
 }
 
 #[cfg(feature = "async-client")]
@@ -2344,6 +2422,33 @@ mod async_tests {
             .await
             .unwrap();
         flags_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn listed_enrollment_key_means_not_enrolled() {
+        let server = MockServer::start();
+        mock_enrollment_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(json!({"flags": {}}));
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        for (key, supplied, listed, expected) in ENROLLMENT_CASES {
+            let calls_before = flags_mock.calls();
+            let snapshot = client
+                .evaluate_flags("user-1", enrollment_options(key, supplied, listed))
+                .await
+                .unwrap();
+            let case = format!("{key} supplied={supplied} listed={listed}");
+            assert_eq!(
+                snapshot.get_flag(key),
+                expected.map(FlagValue::Boolean),
+                "{case}"
+            );
+            let remote_calls = usize::from(expected.is_none());
+            assert_eq!(flags_mock.calls() - calls_before, remote_calls, "{case}");
+        }
     }
 }
 

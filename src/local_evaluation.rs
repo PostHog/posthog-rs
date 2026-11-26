@@ -1123,20 +1123,25 @@ impl LocalEvaluator {
         let snapshot = self.cache.snapshot.read().unwrap();
         match snapshot.flags.get(key) {
             Some(flag) => {
-                let result = metadata_result(flag, person_properties, &snapshot.flag_metadata)
-                    .unwrap_or_else(|| {
-                        match_feature_flag_with_version(
-                            flag,
-                            distinct_id,
-                            person_properties,
-                            groups,
-                            group_properties,
-                            &snapshot.group_type_mapping,
-                            snapshot.property_matching_version,
-                            &KnownAbsentProperties::default(),
-                            &snapshot.flag_metadata,
-                        )
-                    });
+                let result = metadata_result(
+                    flag,
+                    person_properties,
+                    &KnownAbsentProperties::default(),
+                    &snapshot.flag_metadata,
+                )
+                .unwrap_or_else(|| {
+                    match_feature_flag_with_version(
+                        flag,
+                        distinct_id,
+                        person_properties,
+                        groups,
+                        group_properties,
+                        &snapshot.group_type_mapping,
+                        snapshot.property_matching_version,
+                        &KnownAbsentProperties::default(),
+                        &snapshot.flag_metadata,
+                    )
+                });
                 trace!(key, ?result, "Local flag evaluation (simple)");
                 result.map(Some)
             }
