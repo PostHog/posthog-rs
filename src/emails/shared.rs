@@ -885,9 +885,6 @@ pub(crate) mod clock {
 /// passed when PostHog sends the email now, for clocks that drift apart.
 const CLOCK_SKEW_SECONDS: i64 = 60;
 
-/// The send's result. For a send with `scheduled_at`, PostHog must confirm
-/// the time it waits for, or answer `queued` with `null` when the time had
-/// passed: any other acceptance may send the email at another time.
 /// A scheduled send's time, and when the client first sent it.
 pub(crate) struct Schedule {
     pub(crate) at: DateTime<Utc>,
@@ -904,6 +901,9 @@ impl Schedule {
     }
 }
 
+/// The send's result. For a send with `scheduled_at`, PostHog must confirm
+/// the time it waits for, or answer `queued` with `null` when the time had
+/// passed: any other acceptance may send the email at another time.
 pub(crate) fn parse_send_reply(
     reply: Accepted,
     schedule: Option<Schedule>,
