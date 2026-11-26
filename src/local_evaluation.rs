@@ -120,13 +120,13 @@ impl From<WireDefinitions> for LocalEvaluationResponse {
 
 impl From<LocalEvaluationResponse> for WireDefinitions {
     fn from(response: LocalEvaluationResponse) -> Self {
-        let flag_metadata = response.flag_metadata;
+        let mut flag_metadata = response.flag_metadata;
         Self {
             flags: response
                 .flags
                 .into_iter()
                 .map(|flag| {
-                    let metadata = flag_metadata.get(&flag.key).copied().unwrap_or_default();
+                    let metadata = flag_metadata.remove(&flag.key).unwrap_or_default();
                     WireFlag::new(flag, metadata)
                 })
                 .collect(),
@@ -1134,6 +1134,7 @@ impl LocalEvaluator {
                             &snapshot.group_type_mapping,
                             snapshot.property_matching_version,
                             &KnownAbsentProperties::default(),
+                            &snapshot.flag_metadata,
                         )
                     });
                 trace!(key, ?result, "Local flag evaluation (simple)");
