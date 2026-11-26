@@ -1241,11 +1241,17 @@ where
             } => (bucketing, properties),
             ConditionTarget::Skip => continue,
             ConditionTarget::Inconclusive => {
-                let reason = if condition.properties.iter().any(has_definition_error) {
-                    UnresolvedFlagReason::UnsupportedDefinition
-                } else {
-                    UnresolvedFlagReason::MissingContext
-                };
+                // The group properties are missing, but a filter can still have
+                // a cause that outranks that, such as an unsupported operator
+                // or an unresolved dependency.
+                let no_properties = HashMap::new();
+                let reason = condition
+                    .properties
+                    .iter()
+                    .filter_map(|property| property_matcher(property, &no_properties).err())
+                    .fold(UnresolvedFlagReason::MissingContext, |reason, error| {
+                        UnresolvedFlagReason::pick(Some(reason), error.reason)
+                    });
                 inconclusive_reason = Some(UnresolvedFlagReason::pick(inconclusive_reason, reason));
                 continue;
             }
@@ -1681,8 +1687,8 @@ fn match_flag_dependency_property(
     // The dependency's own cause belongs to the dependency's entry. The
     // dependency is matched here without person properties, cohorts or its own
     // dependencies, so if it reads any of them, passing more context can't help.
-    let unresolved_dependency = |error: MatchError| {
-        let reason = if dependency_needs_dropped_context(flag) {
+    let unresolved_dependency = |error: MatchError, filters_read: bool| {
+        let reason = if filters_read && dependency_needs_dropped_context(flag) {
             UnresolvedFlagReason::UnsupportedDefinition
         } else {
             UnresolvedFlagReason::UnresolvedDependency
@@ -1699,7 +1705,7 @@ fn match_flag_dependency_property(
     // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
     // Group context flows through from the outer ctx so dependent group/mixed flags can resolve.
     let flag_value = match metadata_result(flag, scope.person_properties, scope.metadata) {
-        Some(result) => result.map_err(unresolved_dependency)?,
+        Some(result) => result.map_err(|error| unresolved_dependency(error, false))?,
         None => match_feature_flag_with_version(
             flag,
             ctx.distinct_id,
@@ -1709,7 +1715,7 @@ fn match_flag_dependency_property(
             ctx.group_type_mapping,
             ctx.property_matching_version,
         )
-        .map_err(unresolved_dependency)?,
+        .map_err(|error| unresolved_dependency(error, true))?,
     };
 
     // Compare the flag value with the expected value
@@ -2005,20 +2011,7 @@ fn dependency_needs_dropped_context(flag: &FeatureFlag) -> bool {
     })
 }
 
-/// Whether a filter is unsupported whatever context the call passes. Cohort
-/// contents and dependency values aren't inspected.
-fn has_definition_error(property: &Property) -> bool {
-    if property.property_type.as_deref() == Some("cohort") {
-        return !matches!(property.operator.as_str(), "exact" | "in" | "not_in");
-    }
-    if property.key.starts_with("$feature/") {
-        return !matches!(property.operator.as_str(), "exact" | "is_not");
-    }
-    check_property_filter_type(property).is_err() || check_filter_definition(property).is_err()
-}
-
-/// Definition errors that passing the property can't fix, so they outrank the
-/// missing property's `missing_context` reason.
+/// Definition errors that passing the property can't fix.
 fn check_filter_definition(property: &Property) -> Result<(), MatchError> {
     match property.operator.as_str() {
         "exact" | "is_not" | "is_set" | "is_not_set" | "icontains" | "not_icontains"
@@ -2053,10 +2046,12 @@ fn match_property_with_version(
     property_matching_version: i64,
 ) -> Result<bool, MatchError> {
     check_property_filter_type(property)?;
+    // Before the property is read, so a definition error outranks a missing or
+    // unusable property.
+    check_filter_definition(property)?;
     let value = match properties.get(&property.key) {
         Some(v) => v,
         None => {
-            check_filter_definition(property)?;
             return Err(MatchError::missing_context(&format!(
                 "Property '{}' not found in provided properties",
                 property.key
@@ -6299,6 +6294,110 @@ mod tests {
             ("b".to_string(), cyclic("b", "a")),
         ]);
         assert!(context_flag(&flags["a"], &pro, &HashMap::new(), &flags, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn a_continuity_dependency_with_person_conditions_is_an_unresolved_dependency() {
+        let checkout: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {"groups": [{
+                "properties": [{"key": "plan", "type": "person", "operator": "exact", "value": "pro"}],
+                "rollout_percentage": 100
+            }]}
+        }))
+        .unwrap();
+        let flags = HashMap::from([("checkout".to_string(), checkout)]);
+        let metadata = HashMap::from([(
+            "checkout".to_string(),
+            DefinitionMetadata {
+                feature_enrollment: false,
+                ensure_experience_continuity: true,
+            },
+        )]);
+        let dependent = flag_with_groups(json!([{
+            "properties": [{"key": "$feature/checkout", "type": "flag", "operator": "exact", "value": true}],
+            "rollout_percentage": 100
+        }]));
+        let error = context_flag(
+            &dependent,
+            &HashMap::new(),
+            &HashMap::new(),
+            &flags,
+            &metadata,
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::UnresolvedDependency);
+    }
+
+    #[test]
+    fn a_group_condition_without_group_properties_reports_its_dependency_causes() {
+        let group_flag = |dependency: &str| -> FeatureFlag {
+            serde_json::from_value(json!({
+                "key": "company-flag",
+                "active": true,
+                "filters": {
+                    "aggregation_group_type_index": 0,
+                    "groups": [{
+                        "properties": [{"key": format!("$feature/{dependency}"), "type": "flag", "operator": "exact", "value": true}],
+                        "rollout_percentage": 100
+                    }]
+                }
+            }))
+            .unwrap()
+        };
+        let checkout: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+        }))
+        .unwrap();
+        let flags = HashMap::from([("checkout".to_string(), checkout)]);
+        let metadata = HashMap::from([(
+            "checkout".to_string(),
+            DefinitionMetadata {
+                feature_enrollment: false,
+                ensure_experience_continuity: true,
+            },
+        )]);
+        let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
+        let group_type_mapping = HashMap::from([("0".to_string(), "company".to_string())]);
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &HashMap::new(),
+            flags: &flags,
+            distinct_id: "user-123",
+            groups: &groups,
+            group_properties: &HashMap::new(),
+            group_type_mapping: &group_type_mapping,
+        };
+
+        let reason = |flag: &FeatureFlag| {
+            match_flag_definition(flag, &HashMap::new(), &ctx, &metadata)
+                .unwrap_err()
+                .reason
+        };
+        assert_eq!(
+            reason(&group_flag("missing")),
+            UnresolvedFlagReason::UnsupportedDefinition
+        );
+        assert_eq!(
+            reason(&group_flag("checkout")),
+            UnresolvedFlagReason::UnresolvedDependency
+        );
+    }
+
+    #[test]
+    fn a_malformed_target_outranks_a_malformed_property() {
+        let flag = flag_with_groups(json!([{
+            "properties": [{"key": "app_version", "type": "person", "operator": "semver_wildcard", "value": "not-a-pattern"}],
+            "rollout_percentage": 100
+        }]));
+        let malformed = HashMap::from([("app_version".to_string(), json!("x.y"))]);
+        assert_eq!(
+            unresolved_reason(&flag, &malformed),
+            UnresolvedFlagReason::UnsupportedDefinition
+        );
     }
 
     #[test]
