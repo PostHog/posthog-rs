@@ -53,6 +53,7 @@ pub(super) fn definitions(has_experiment: Option<bool>, gate: bool) -> LocalEval
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
         minimal_flag_called_events: gate,
+        ..LocalEvaluationResponse::new(vec![])
     }
 }
 

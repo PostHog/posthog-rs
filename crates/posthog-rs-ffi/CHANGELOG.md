@@ -1,5 +1,23 @@
 # posthog-rs-ffi
 
+## 0.1.4 — 2026-11-26
+
+### Patch changes
+
+- Updated dependencies: posthog@1.7.0
+
+## 0.1.3 — 2026-11-25
+
+### Patch changes
+
+- Updated dependencies: posthog@1.6.0
+
+## 0.1.2 — 2026-11-25
+
+### Patch changes
+
+- Updated dependencies: posthog@1.5.0
+
 ## 0.1.1 — 2026-11-24
 
 ### Patch changes

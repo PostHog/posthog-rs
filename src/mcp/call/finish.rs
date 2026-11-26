@@ -14,7 +14,7 @@ use crate::mcp::contract::limits::{MAX_INPUT_REQUEST_METHODS, MAX_NAME_LENGTH, M
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{events, ANALYTICS_SOURCE, REDACTED};
 use crate::mcp::privacy::TextPass;
-use crate::mcp::session::new_session_id;
+use crate::mcp::session::{Session, SessionSource};
 
 const VALIDATION_ERROR_TYPE: &str = "validation";
 const RMCP_ARGUMENT_ERROR_PREFIX: &str = "failed to deserialize parameters:";
@@ -42,7 +42,7 @@ pub(crate) fn complete_call(
     result: CallToolResult,
 ) -> CallToolResult {
     let duration_ms = elapsed_ms(&call);
-    call.transport.call_ended();
+    call.on_connection.take();
     let response = core
         .options
         .capture_responses
@@ -50,13 +50,15 @@ pub(crate) fn complete_call(
         .flatten();
     let failure = (result.is_error == Some(true)).then(|| reported_failure(&result));
     let mut delivered = result;
-    let mirror = call
-        .facts
-        .as_ref()
-        .is_some_and(|facts| facts.mirrors_instructions);
+    let mirror = !call.handle_free
+        && call
+            .facts
+            .as_ref()
+            .is_some_and(|facts| facts.mirrors_instructions);
     if !deliver_handle(&mut delivered, &call.conversation, mirror) {
         forget_undelivered_handle(&mut call);
     }
+    call.tool_scope.settle(&call.context.session);
     if names_a_tool(&call) {
         core.emit(|| match &failure {
             Some(failure) => failure_events(core, &call, duration_ms, failure, response.as_ref()),
@@ -69,8 +71,9 @@ pub(crate) fn complete_call(
 /// Sends the events of a call that ended without a result.
 pub(crate) fn end_call(core: &Core, mut call: PreparedCall, end: CallEnd) {
     let duration_ms = elapsed_ms(&call);
-    call.transport.call_ended();
+    call.on_connection.take();
     forget_undelivered_handle(&mut call);
+    call.tool_scope.settle(&call.context.session);
     if !names_a_tool(&call) {
         return;
     }
@@ -89,13 +92,15 @@ fn names_a_tool(call: &PreparedCall) -> bool {
     !call.tool_name.trim().is_empty()
 }
 
-/// A minted handle the agent never received names no conversation, so the
-/// call keeps a session of its own.
+/// A minted handle the agent never received names no conversation, so a
+/// call whose session it chose keeps a session of its own.
 fn forget_undelivered_handle(call: &mut PreparedCall) {
     if call.conversation.minted {
         call.conversation.undelivered();
         call.context.conversation_id = None;
-        call.context.session_id = new_session_id();
+        if call.context.session.source == SessionSource::Conversation {
+            call.context.session = Session::generated();
+        }
     }
 }
 

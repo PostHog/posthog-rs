@@ -1,5 +1,6 @@
-use super::connection::Connection;
+use super::connection::{CallOnConnection, Connection};
 use super::ids::derive_session_id;
+use super::source::{Session, SessionSource};
 use super::token;
 
 /// What the transport already uses to keep one client's requests together.
@@ -26,7 +27,7 @@ pub(crate) struct TokenClient {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResolvedSession {
-    pub(crate) session_id: Option<String>,
+    pub(crate) session: Option<Session>,
     pub(crate) token_client: Option<TokenClient>,
 }
 
@@ -35,12 +36,15 @@ impl TransportSession {
         !matches!(self, TransportSession::None)
     }
 
-    pub(crate) fn resolve_for_call(&self) -> ResolvedSession {
+    /// A call's session, and on a connection the call, which ends when
+    /// dropped.
+    pub(crate) fn resolve_for_call(&self) -> (ResolvedSession, Option<CallOnConnection>) {
         match self {
             TransportSession::Connection(connection) => {
-                Self::from_session_id(connection.session_for_call())
+                let (session_id, call) = connection.begin_call();
+                (Self::generated(session_id), Some(call))
             }
-            other => other.resolve(),
+            other => (other.resolve(), None),
         }
     }
 
@@ -49,35 +53,34 @@ impl TransportSession {
             TransportSession::None => ResolvedSession::default(),
             TransportSession::Id(id) => Self::from_id(id),
             TransportSession::Connection(connection) => {
-                Self::from_session_id(connection.current_session())
+                Self::generated(connection.current_session())
             }
-        }
-    }
-
-    pub(crate) fn call_ended(&self) {
-        if let TransportSession::Connection(connection) = self {
-            connection.call_ended();
         }
     }
 
     fn from_id(id: &str) -> ResolvedSession {
         let Some(token) = token::decode(id) else {
-            return Self::from_session_id(derive_session_id(id));
+            return Self::transport(derive_session_id(id), None);
         };
         let token_client = TokenClient {
             name: token.cn,
             version: token.cv,
             protocol_version: token.pv,
         };
+        Self::transport(token.sid, Some(token_client))
+    }
+
+    fn transport(session_id: String, token_client: Option<TokenClient>) -> ResolvedSession {
         ResolvedSession {
-            session_id: Some(token.sid),
-            token_client: Some(token_client),
+            session: Some(Session::new(session_id, SessionSource::Transport)),
+            token_client,
         }
     }
 
-    fn from_session_id(session_id: String) -> ResolvedSession {
+    /// A one-client connection's session, which the SDK generated.
+    fn generated(session_id: String) -> ResolvedSession {
         ResolvedSession {
-            session_id: Some(session_id),
+            session: Some(Session::new(session_id, SessionSource::Generated)),
             token_client: None,
         }
     }

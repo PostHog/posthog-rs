@@ -276,6 +276,103 @@ pub struct FeatureFlag {
     pub has_experiment: Option<bool>,
 }
 
+/// Definition fields local evaluation needs that are not on the public
+/// [`FeatureFlag`] and [`FeatureFlagFilters`]. Those structs can be built with a
+/// literal, so a new public field would break callers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DefinitionMetadata {
+    /// Marks an early-access feature flag. The person property
+    /// `$feature_enrollment/<flag key>` decides it before its release conditions.
+    pub(crate) feature_enrollment: bool,
+    /// The flag's value is persisted per person, so only the server knows it.
+    pub(crate) ensure_experience_continuity: bool,
+}
+
+/// [`DefinitionMetadata`] by flag key. Flags without any are left out.
+pub(crate) type DefinitionMetadataMap = HashMap<String, DefinitionMetadata>;
+
+/// A flag definition as it is sent, with the fields of [`DefinitionMetadata`].
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WireFlag {
+    key: String,
+    active: bool,
+    #[serde(default)]
+    filters: WireFilters,
+    #[serde(default)]
+    has_experiment: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ensure_experience_continuity: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct WireFilters {
+    #[serde(default)]
+    groups: Vec<FeatureFlagCondition>,
+    #[serde(default)]
+    multivariate: Option<MultivariateFilter>,
+    #[serde(default)]
+    payloads: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    aggregation_group_type_index: Option<i32>,
+    #[serde(default)]
+    early_exit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feature_enrollment: Option<bool>,
+}
+
+impl WireFlag {
+    pub(crate) fn new(flag: FeatureFlag, metadata: DefinitionMetadata) -> Self {
+        // Destructured in full, so a new public field can't be left out here.
+        let FeatureFlag {
+            key,
+            active,
+            filters:
+                FeatureFlagFilters {
+                    groups,
+                    multivariate,
+                    payloads,
+                    aggregation_group_type_index,
+                    early_exit,
+                },
+            has_experiment,
+        } = flag;
+        Self {
+            key,
+            active,
+            filters: WireFilters {
+                groups,
+                multivariate,
+                payloads,
+                aggregation_group_type_index,
+                early_exit,
+                feature_enrollment: metadata.feature_enrollment.then_some(true),
+            },
+            has_experiment,
+            ensure_experience_continuity: metadata.ensure_experience_continuity.then_some(true),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (FeatureFlag, DefinitionMetadata) {
+        let metadata = DefinitionMetadata {
+            feature_enrollment: self.filters.feature_enrollment.unwrap_or(false),
+            ensure_experience_continuity: self.ensure_experience_continuity.unwrap_or(false),
+        };
+        let flag = FeatureFlag {
+            key: self.key,
+            active: self.active,
+            filters: FeatureFlagFilters {
+                groups: self.filters.groups,
+                multivariate: self.filters.multivariate,
+                payloads: self.filters.payloads,
+                aggregation_group_type_index: self.filters.aggregation_group_type_index,
+                early_exit: self.filters.early_exit,
+            },
+            has_experiment: self.has_experiment,
+        };
+        (flag, metadata)
+    }
+}
+
 /// Targeting rules and configuration for a feature flag.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FeatureFlagFilters {
@@ -577,6 +674,8 @@ struct PropertyMatchContext<'a> {
     /// Known-absent keys for the properties being matched: the person list, or
     /// the list for the condition's group type.
     known_absent_keys: Option<KnownAbsentKeys<'a>>,
+    /// Metadata of the loaded definitions, so flag dependencies honor it too.
+    metadata: &'a DefinitionMetadataMap,
     /// The flags being evaluated, from the innermost dependency outward.
     dependency_path: Option<&'a DependencyPath<'a>>,
     /// Flag dependency work for this top-level evaluation.
@@ -1093,25 +1192,40 @@ pub fn match_feature_flag_with_context(
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    match_feature_flag_with_known_absent(
+    match_flag_definition(
         flag,
         person_properties,
         ctx,
         &KnownAbsentProperties::default(),
+        &HashMap::new(),
     )
 }
 
+#[cfg(test)]
 pub(crate) fn match_feature_flag_with_known_absent(
     flag: &FeatureFlag,
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
     known_absent: &KnownAbsentProperties,
 ) -> Result<FlagValue, InconclusiveMatchError> {
+    match_flag_definition(flag, person_properties, ctx, known_absent, &HashMap::new())
+}
+
+/// [`match_feature_flag_with_context`] with the caller's known-absent keys and
+/// the metadata of loaded definitions.
+pub(crate) fn match_flag_definition(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+    known_absent: &KnownAbsentProperties,
+    metadata: &DefinitionMetadataMap,
+) -> Result<FlagValue, InconclusiveMatchError> {
     match_feature_flag_in_context(
         flag,
         person_properties,
         ctx,
         known_absent,
+        metadata,
         None,
         &RefCell::default(),
         0,
@@ -1127,10 +1241,14 @@ fn match_feature_flag_in_context(
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
     known_absent: &KnownAbsentProperties,
+    metadata: &DefinitionMetadataMap,
     dependency_path: Option<&DependencyPath>,
     dependency_results: &RefCell<DependencyResults>,
     nesting_depth: usize,
 ) -> Result<FlagValue, InconclusiveMatchError> {
+    if let Some(result) = metadata_result(flag, person_properties, metadata) {
+        return result;
+    }
     let dependency_path = DependencyPath {
         flag_key: &flag.key,
         parent: dependency_path,
@@ -1152,6 +1270,7 @@ fn match_feature_flag_in_context(
                     person_properties,
                     known_absent,
                     known_absent_keys,
+                    metadata,
                     dependency_path: Some(&dependency_path),
                     dependency_results,
                     nesting_depth,
@@ -1179,6 +1298,43 @@ impl<F> PropertyMatcher for F where
         Option<KnownAbsentKeys>,
     ) -> Result<bool, InconclusiveMatchError>
 {
+}
+
+/// The result of an active flag whose metadata decides it before its group
+/// aggregation and release conditions are read.
+pub(crate) fn metadata_result(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+    metadata: &DefinitionMetadataMap,
+) -> Option<Result<FlagValue, InconclusiveMatchError>> {
+    let metadata = metadata.get(&flag.key).filter(|_| flag.active)?;
+    if metadata.ensure_experience_continuity {
+        return Some(Err(InconclusiveMatchError::new(
+            "Flag has experience continuity enabled",
+        )));
+    }
+    metadata
+        .feature_enrollment
+        .then(|| match_feature_enrollment(flag, person_properties))
+}
+
+/// An early-access feature flag returns the person's enrollment at once:
+/// `true` or `"true"` means enrolled, and any other value that was passed,
+/// `null` included, means opted out. Without the enrollment property the flag
+/// can't be resolved locally.
+fn match_feature_enrollment(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    let enrollment_key = format!("$feature_enrollment/{}", flag.key);
+    match person_properties.get(&enrollment_key) {
+        None => Err(InconclusiveMatchError::new(&format!(
+            "Flag has feature enrollment and '{enrollment_key}' was not passed"
+        ))),
+        Some(serde_json::Value::Bool(enrolled)) => Ok(FlagValue::Boolean(*enrolled)),
+        Some(serde_json::Value::String(enrolled)) => Ok(FlagValue::Boolean(enrolled == "true")),
+        Some(_) => Ok(FlagValue::Boolean(false)),
+    }
 }
 
 /// Shared feature flag evaluation engine. Public entry points differ only in
@@ -1305,6 +1461,7 @@ pub fn match_property_with_context(
             person_properties: properties,
             known_absent: &KnownAbsentProperties::default(),
             known_absent_keys: None,
+            metadata: &HashMap::new(),
             dependency_path: None,
             dependency_results: &RefCell::default(),
             nesting_depth: 0,
@@ -1354,6 +1511,7 @@ fn match_cohort_property(
         known_absent_keys: ctx
             .known_absent_keys
             .filter(|keys| keys.filter_type == "person"),
+        metadata: ctx.metadata,
         dependency_path: ctx.dependency_path,
         dependency_results: ctx.dependency_results,
         nesting_depth: ctx.nesting_depth,
@@ -1776,6 +1934,7 @@ fn evaluate_flag_dependency(
         ctx.person_properties,
         ctx.evaluation,
         ctx.known_absent,
+        ctx.metadata,
         ctx.dependency_path,
         results,
         depth,

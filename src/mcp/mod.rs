@@ -28,6 +28,39 @@
 //! Context properties and options fill only the keys the event leaves unset,
 //! before [`McpOptionsBuilder::before_send`] runs.
 //!
+//! # Sessions
+//!
+//! Every event's `$session_id` comes from the first of these that names one,
+//! and its `$mcp_session_source` says which:
+//!
+//! 1. `"host"`: [`McpOptionsBuilder::session_resolver`].
+//! 2. `"client_metadata"`: the conversation id a recognized client sends in a
+//!    tool call's `_meta`: ChatGPT's `openai/session`, Codex's `sessionId`,
+//!    or VS Code's `vscode.conversationId`. ChatGPT sends one on every call,
+//!    so it is offered no `conversation_id` argument.
+//! 3. `"conversation"`: the conversation handle the agent echoes as
+//!    `conversation_id`.
+//! 4. `"transport"`: a replayed `Mcp-Session-Id`.
+//! 5. `"generated"`: a session the SDK made for a one-client connection, such
+//!    as stdio, or for a single stateless HTTP request.
+//!
+//! The value of a client's conversation id is hashed into `$session_id` and
+//! never sent.
+//!
+//! Events a tool captures itself, through [`Client::capture`](crate::Client::capture),
+//! carry its call's `$session_id` and `$mcp_session_source`: the handler runs
+//! in a [`RequestContext`](crate::RequestContext) that holds them, and, when
+//! [`McpOptionsBuilder::identify`] resolves a person, their distinct ID and
+//! `$groups`; an anonymous call's context has neither, as its MCP events do. Build such an event with `RequestContext::current()` and
+//! [`RequestContext::event`](crate::RequestContext::event) to take that
+//! distinct ID. Work the handler spawns onto another task takes the context
+//! only when scoped with [`RequestContext::scope`](crate::RequestContext::scope).
+//! With the manual API, run the tool in
+//! [`StartedToolCall::request_context`] for the same.
+//! On a call that hands the agent a new conversation handle, these events wait
+//! until the call ends, then take the call's final session; an immediate
+//! capture, which cannot wait, carries no session.
+//!
 //! # Event options
 //!
 //! [`McpOptionsBuilder::event_options`] sets capture options on each request's
@@ -74,7 +107,7 @@ pub use identity::Identity;
 pub use manual::{StartedToolCall, ToolCallError, ToolCallRequest, ToolRegistration};
 pub use options::{
     EventOptionsCallback, IdentifyCallback, IntentFallback, McpOptions, McpOptionsBuilder,
-    McpOptionsBuilderError,
+    McpOptionsBuilderError, SessionResolver,
 };
 pub use request_info::RequestInfo;
 pub use server::{instrument, Instrumented};

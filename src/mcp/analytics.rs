@@ -4,12 +4,12 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 
 use super::call::RequestScope;
-use super::capture::{self, Delivery, EventContext, OutgoingEvent};
+use super::capture::{self, ClientIdentity, Delivery, EventContext, OutgoingEvent};
 use super::contract::arguments::{CONTEXT_DESCRIPTION, LLM_MODEL_DESCRIPTION};
 use super::identity::Identity;
 use super::options::McpOptions;
 use super::request_info::RequestInfo;
-use super::session::{derive_session_id, new_session_id, ResolvedSession};
+use super::session::SessionClaims;
 use super::tools::catalog::ToolCatalog;
 use super::tools::injection::ArgumentInjection;
 use super::tools::ownership::ArgumentFlags;
@@ -92,14 +92,12 @@ impl Core {
     pub(crate) fn event_context(
         &self,
         scope: &RequestScope<'_>,
-        session: ResolvedSession,
-        conversation_id: Option<String>,
+        client: ClientIdentity,
+        claims: SessionClaims,
         request: &RequestInfo<'_>,
     ) -> EventContext {
-        let session_id = match &conversation_id {
-            Some(handle) => derive_session_id(handle),
-            None => session.session_id.unwrap_or_else(new_session_id),
-        };
+        let conversation_id = claims.handle.clone();
+        let session = claims.decide(self.resolve_session(request));
         let (host_properties, host_options) = host_context(scope);
         let mut options = self.event_options(scope, request);
         for (name, value) in host_options {
@@ -107,11 +105,11 @@ impl Core {
         }
         EventContext {
             timestamp: scope.timestamp,
-            session_id,
+            session,
             conversation_id,
             identity: self.identify(request),
             options,
-            client: scope.client_identity(session.token_client.as_ref()),
+            client,
             server: scope.server.clone(),
             server_build: self.options.server_build.clone(),
             host_properties,
@@ -154,6 +152,19 @@ impl Core {
             }
         }
         options
+    }
+
+    fn resolve_session(&self, request: &RequestInfo<'_>) -> Option<String> {
+        let resolve = self.options.session_resolver.as_ref()?;
+        match catch_unwind(AssertUnwindSafe(|| resolve(request))) {
+            Ok(session) => session.filter(|session| !session.is_empty()),
+            Err(_) => {
+                tracing::warn!(
+                    "MCP analytics session_resolver panicked; the request's session comes from the client, handle or transport"
+                );
+                None
+            }
+        }
     }
 
     fn identify(&self, request: &RequestInfo<'_>) -> Option<Identity> {

@@ -1,5 +1,28 @@
 # posthog-rs
 
+## 1.7.0 — 2026-11-26
+
+### Minor changes
+
+- [f167359](https://github.com/posthog/posthog-rs/commit/f167359494c0d27dc76163de7c177a1d7027f179) The MCP manual API gains what the automatic path already uses: `McpAnalytics::list_tools_for_request` reads the listing's headers so ChatGPT is offered no `conversation_id`, `ToolCallRequest::client_info` and `ToolCallRequest::protocol_version` pass the bound handshake's client and negotiated revision so a client is recognized by name, and `StartedToolCall::request_context` gives the tool a context whose custom events carry the call's session and identity. — Thanks @lucasheriques!
+
+### Patch changes
+
+- [6efc296](https://github.com/posthog/posthog-rs/commit/6efc2965b318691cda90f8bb805bd18ffe4c5709) MCP analytics no longer starts a new stdio session while a tool call is still running: the 30-minute inactivity rotation now counts from the end of the last call only once no call is in flight, and a cancelled call counts as ended even when its tool keeps running. — Thanks @lucasheriques!
+
+## 1.6.0 — 2026-11-25
+
+### Minor changes
+
+- [8baa8e2](https://github.com/posthog/posthog-rs/commit/8baa8e223911935794b5a0cfe86bc8a26874b818) Events an MCP tool captures through `Client::capture` while its call runs carry that call's `$session_id`, `$mcp_session_source` and, when `identify` resolves one, its distinct ID and `$groups`, even when other calls run on the same server meanwhile. — Thanks @lucasheriques!
+- [3c24aeb](https://github.com/posthog/posthog-rs/commit/3c24aeb063a352248a6fd7804c4808e7e8c3a9e8) MCP analytics groups ChatGPT, Codex and VS Code tool calls by the conversation id each client sends in `_meta`, adds a `session_resolver` option that ranks ahead of every other session source, and sends `$mcp_session_source` on every MCP event. ChatGPT is no longer offered a `conversation_id` argument. — Thanks @lucasheriques!
+
+## 1.5.0 — 2026-11-25
+
+### Minor changes
+
+- [eaead37](https://github.com/posthog/posthog-rs/commit/eaead370109b7ac832b4ab8291380c34cb8414c4) Local flag evaluation supports early-access feature enrollment. For a flag with `feature_enrollment`, the person property `$feature_enrollment/<flag key>` decides the flag before its release conditions: `true` or `"true"` is enrolled, any other value is opted out, and without it the flag is inconclusive and falls back to the server. Flags with experience continuity are also inconclusive locally, since only the server knows their persisted value. — Thanks @srednoff888-art for your first contribution 🎉!
+
 ## 1.4.0 — 2026-11-24
 
 ### Minor changes

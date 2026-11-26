@@ -11,9 +11,11 @@ use crate::mcp::contract::events;
 use crate::mcp::contract::limits::MAX_NAME_LENGTH;
 use crate::mcp::contract::properties as key;
 use crate::mcp::privacy::TextPass;
+use crate::mcp::session::SessionClaims;
 
 /// `$mcp_tools_list` describes the server's catalogue: a listing carries no
-/// conversation handle, so it groups only by the transport's session.
+/// conversation handle, so it groups only by the session resolver or the
+/// transport's session.
 pub(crate) fn emit_tools_listed(
     core: &Core,
     scope: &RequestScope<'_>,
@@ -48,5 +50,11 @@ pub(crate) fn emit_initialized(core: &Core, scope: &RequestScope<'_>) {
 
 fn request_context(core: &Core, scope: &RequestScope<'_>) -> EventContext {
     let info = scope.request_info(None, None);
-    core.event_context(scope, scope.transport.resolve(), None, &info)
+    let transport = scope.transport.resolve();
+    let client = scope.client_identity(transport.token_client.as_ref());
+    let claims = SessionClaims {
+        transport: transport.session,
+        ..SessionClaims::default()
+    };
+    core.event_context(scope, client, claims, &info)
 }

@@ -88,6 +88,7 @@ impl posthog::mcp::McpAnalytics
 pub fn posthog::mcp::McpAnalytics::instrument<H: rmcp::handler::server::ServerHandler>(&self, H) -> posthog::mcp::Instrumented<H>
 impl posthog::mcp::McpAnalytics
 pub fn posthog::mcp::McpAnalytics::list_tools(&self, alloc::vec::Vec<rmcp::model::tool::Tool>) -> alloc::vec::Vec<rmcp::model::tool::Tool>
+pub fn posthog::mcp::McpAnalytics::list_tools_for_request(&self, alloc::vec::Vec<rmcp::model::tool::Tool>, &http::header::map::HeaderMap) -> alloc::vec::Vec<rmcp::model::tool::Tool>
 pub fn posthog::mcp::McpAnalytics::start_tool_call(&self, posthog::mcp::ToolCallRequest) -> posthog::mcp::StartedToolCall
 impl posthog::mcp::McpAnalytics
 pub fn posthog::mcp::McpAnalytics::new(alloc::sync::Arc<posthog::Client>, posthog::mcp::McpOptions) -> Self
@@ -107,6 +108,7 @@ pub fn posthog::mcp::McpOptionsBuilder::identify<F>(&mut self, F) -> &mut Self w
 pub fn posthog::mcp::McpOptionsBuilder::intent_fallback<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync + 'static
 pub fn posthog::mcp::McpOptionsBuilder::on_feedback<F, Reply>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(posthog::mcp::FeedbackReport) -> Reply + core::marker::Send + core::marker::Sync + 'static, Reply: core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'static
 pub fn posthog::mcp::McpOptionsBuilder::required_feedback_field(&mut self, impl core::convert::Into<alloc::string::String>, serde_json::value::Value) -> &mut Self
+pub fn posthog::mcp::McpOptionsBuilder::session_resolver<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync + 'static
 impl posthog::mcp::McpOptionsBuilder
 pub fn posthog::mcp::McpOptionsBuilder::build(&self) -> core::result::Result<posthog::mcp::McpOptions, posthog::mcp::McpOptionsBuilderError>
 pub fn posthog::mcp::McpOptionsBuilder::capture_model(&mut self, bool) -> &mut Self
@@ -135,16 +137,19 @@ pub fn posthog::mcp::StartedToolCall::arguments(&self) -> core::option::Option<&
 pub fn posthog::mcp::StartedToolCall::complete(self, rmcp::model::CallToolResult) -> rmcp::model::CallToolResult
 pub fn posthog::mcp::StartedToolCall::fail(self, posthog::mcp::ToolCallError)
 pub fn posthog::mcp::StartedToolCall::input_required(self, &rmcp::model::mrtr::InputRequiredResult)
+pub fn posthog::mcp::StartedToolCall::request_context(&self) -> core::option::Option<posthog::RequestContext>
 pub struct posthog::mcp::ToolCallError
 impl posthog::mcp::ToolCallError
 pub fn posthog::mcp::ToolCallError::error_type(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::mcp::ToolCallError::new<E: core::error::Error + ?core::marker::Sized>(&E) -> Self
 pub struct posthog::mcp::ToolCallRequest
 impl posthog::mcp::ToolCallRequest
+pub fn posthog::mcp::ToolCallRequest::client_info(self, rmcp::model::Implementation) -> Self
 pub fn posthog::mcp::ToolCallRequest::event_option(self, impl core::convert::Into<alloc::string::String>, impl serde_core::ser::Serialize) -> core::result::Result<Self, posthog::Error>
 pub fn posthog::mcp::ToolCallRequest::http(self, http::request::Parts) -> Self
 pub fn posthog::mcp::ToolCallRequest::meta(self, rmcp::model::JsonObject) -> Self
 pub fn posthog::mcp::ToolCallRequest::new(impl core::convert::Into<alloc::string::String>, core::option::Option<rmcp::model::JsonObject>) -> Self
+pub fn posthog::mcp::ToolCallRequest::protocol_version(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::mcp::ToolCallRequest::server(self, rmcp::model::Implementation) -> Self
 pub fn posthog::mcp::ToolCallRequest::started_at(self, std::time::Instant) -> Self
 pub fn posthog::mcp::ToolCallRequest::tool(self, posthog::mcp::ToolRegistration) -> Self
@@ -154,6 +159,7 @@ pub type posthog::mcp::EventOptionsCallback = alloc::sync::Arc<(dyn core::ops::f
 pub type posthog::mcp::FeedbackHandler = alloc::sync::Arc<(dyn core::ops::function::Fn(posthog::mcp::FeedbackReport) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send)>> + core::marker::Send + core::marker::Sync)>
 pub type posthog::mcp::IdentifyCallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<posthog::mcp::Identity> + core::marker::Send + core::marker::Sync)>
 pub type posthog::mcp::IntentFallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync)>
+pub type posthog::mcp::SessionResolver = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub mod posthog::tower
 pub struct posthog::tower::PostHogLayer
 impl posthog::tower::PostHogLayer
