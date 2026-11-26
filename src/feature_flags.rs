@@ -292,6 +292,9 @@ pub(crate) struct DefinitionMetadata {
     /// explicit JSON `null`. Such a condition targets persons even on a group
     /// flag, while a condition without the field uses the flag's aggregation.
     pub(crate) person_conditions: Vec<usize>,
+    /// The `group_type_index` of each filter that has one, keyed by condition
+    /// index and then filter index. A group filter reads that group type.
+    pub(crate) filter_group_type_indexes: HashMap<(usize, usize), i32>,
 }
 
 impl DefinitionMetadata {
@@ -359,7 +362,7 @@ struct WireFilters {
 #[derive(Serialize, Deserialize)]
 struct WireCondition {
     #[serde(default)]
-    properties: Vec<Property>,
+    properties: Vec<WireProperty>,
     rollout_percentage: Option<f64>,
     variant: Option<String>,
     #[serde(
@@ -368,6 +371,15 @@ struct WireCondition {
         skip_serializing_if = "Option::is_none"
     )]
     aggregation_group_type_index: Option<Option<i32>>,
+}
+
+/// A condition [`Property`] as it is sent, with its `group_type_index`.
+#[derive(Serialize, Deserialize)]
+struct WireProperty {
+    #[serde(flatten)]
+    property: Property,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group_type_index: Option<i32>,
 }
 
 /// Reads a field that is present, `null` included, as `Some`.
@@ -404,8 +416,20 @@ impl WireFlag {
                 } else {
                     condition.aggregation_group_type_index.map(Some)
                 };
+                let properties = condition
+                    .properties
+                    .into_iter()
+                    .enumerate()
+                    .map(|(filter_index, property)| WireProperty {
+                        property,
+                        group_type_index: metadata
+                            .filter_group_type_indexes
+                            .get(&(index, filter_index))
+                            .copied(),
+                    })
+                    .collect();
                 WireCondition {
-                    properties: condition.properties,
+                    properties,
                     rollout_percentage: condition.rollout_percentage,
                     variant: condition.variant,
                     aggregation_group_type_index: aggregation,
@@ -438,18 +462,36 @@ impl WireFlag {
             .filter(|(_, condition)| condition.aggregation_group_type_index == Some(None))
             .map(|(index, _)| index)
             .collect();
+        let filter_group_type_indexes = self
+            .filters
+            .groups
+            .iter()
+            .enumerate()
+            .flat_map(|(index, condition)| {
+                condition.properties.iter().enumerate().filter_map(
+                    move |(filter_index, property)| {
+                        Some(((index, filter_index), property.group_type_index?))
+                    },
+                )
+            })
+            .collect();
         let metadata = DefinitionMetadata {
             feature_enrollment: self.filters.feature_enrollment.unwrap_or(false),
             ensure_experience_continuity: self.ensure_experience_continuity.unwrap_or(false),
             holdout: self.filters.holdout,
             person_conditions,
+            filter_group_type_indexes,
         };
         let groups = self
             .filters
             .groups
             .into_iter()
             .map(|condition| FeatureFlagCondition {
-                properties: condition.properties,
+                properties: condition
+                    .properties
+                    .into_iter()
+                    .map(|property| property.property)
+                    .collect(),
                 rollout_percentage: condition.rollout_percentage,
                 variant: condition.variant,
                 aggregation_group_type_index: condition.aggregation_group_type_index.flatten(),
@@ -741,8 +783,8 @@ impl KnownAbsentProperties {
 
 /// The known-absent keys that apply to one condition, with the filter type
 /// they resolve. Person keys resolve only `type: "person"` filters, and a
-/// group type's keys resolve only `type: "group"` filters in conditions
-/// aggregated on that group type. Any other filter type, such as
+/// group type's keys resolve only `type: "group"` filters that read that
+/// group type. Any other filter type, such as
 /// `person_metadata`, never resolves from a listing.
 #[derive(Clone, Copy)]
 struct KnownAbsentKeys<'a> {
@@ -1143,6 +1185,110 @@ fn resolve_condition_target<'a>(
     }
 }
 
+/// Where one condition filter reads its properties.
+enum FilterSource<'a> {
+    /// The condition's properties and known-absent keys.
+    Condition,
+    /// These properties and known-absent keys. With `missing_is_absent`, the
+    /// properties are complete, so a key missing from them is absent.
+    Properties {
+        properties: &'a HashMap<String, serde_json::Value>,
+        known_absent_keys: Option<KnownAbsentKeys<'a>>,
+        missing_is_absent: bool,
+    },
+    /// The filter doesn't match.
+    NoMatch,
+}
+
+/// The inputs a condition filter can read besides the condition's own
+/// properties, as the flags service routes them in
+/// `PropertyContext::resolve_for_filter` and `filter_needs_partial_props`.
+struct FilterSources<'a> {
+    condition_aggregation: Option<i32>,
+    groups: &'a HashMap<String, String>,
+    group_properties: &'a HashMap<String, HashMap<String, serde_json::Value>>,
+    group_type_mapping: &'a HashMap<String, String>,
+    known_absent: &'a KnownAbsentProperties,
+    definition: &'a DefinitionMetadata,
+}
+
+impl<'a> FilterSources<'a> {
+    fn source(
+        &self,
+        condition_index: usize,
+        filter_index: usize,
+        property: &Property,
+    ) -> FilterSource<'a> {
+        if property.property_type.as_deref() != Some("group") {
+            return FilterSource::Condition;
+        }
+        match self
+            .definition
+            .filter_group_type_indexes
+            .get(&(condition_index, filter_index))
+        {
+            Some(&index) if Some(index) != self.condition_aggregation => {
+                self.group_type_source(index)
+            }
+            _ => FilterSource::Condition,
+        }
+    }
+
+    /// The source of a group filter whose `group_type_index` names a group
+    /// type other than the condition's aggregation.
+    fn group_type_source(&self, index: i32) -> FilterSource<'a> {
+        static NO_PROPERTIES: OnceLock<HashMap<String, serde_json::Value>> = OnceLock::new();
+        let no_properties = NO_PROPERTIES.get_or_init(HashMap::new);
+
+        let Some(group_type) = self.group_type_mapping.get(&index.to_string()) else {
+            // The flags service can't tell which supplied group has this
+            // index, so with any group context the filter doesn't match.
+            // Without it, the filter reads no properties.
+            if self.has_group_context() {
+                return FilterSource::NoMatch;
+            }
+            return FilterSource::Properties {
+                properties: no_properties,
+                known_absent_keys: None,
+                missing_is_absent: true,
+            };
+        };
+        FilterSource::Properties {
+            properties: self
+                .group_properties
+                .get(group_type)
+                .unwrap_or(no_properties),
+            known_absent_keys: self.known_absent.groups.get(group_type).map(|keys| {
+                KnownAbsentKeys {
+                    filter_type: "group",
+                    keys,
+                }
+            }),
+            // Without a usable key there is no group to load properties for,
+            // so the supplied ones are complete.
+            missing_is_absent: usable_group_key(index, self.groups, self.group_type_mapping)
+                .is_none(),
+        }
+    }
+
+    /// A usable group key, or a group property other than an unusable
+    /// `$group_key`, as the flags service decides `request_has_group_context`.
+    fn has_group_context(&self) -> bool {
+        self.groups.values().any(|key| !key.is_empty())
+            || self
+                .group_properties
+                .values()
+                .flatten()
+                .any(|(key, value)| {
+                    key != "$group_key"
+                        || match value {
+                            serde_json::Value::String(key) => !key.is_empty(),
+                            value => value.is_number(),
+                        }
+                })
+    }
+}
+
 /// Evaluate a feature flag definition against person and optional group
 /// context.
 ///
@@ -1163,11 +1309,13 @@ fn resolve_condition_target<'a>(
 /// multivariate flags.
 ///
 /// A hand-built [`FeatureFlag`] can't express a condition with an explicit
-/// person aggregation (JSON `null` under a group flag) or a holdout, so a
-/// condition without its own aggregation uses the flag's, and holdouts are
-/// ignored. Definitions loaded by [`LocalEvaluator`](crate::LocalEvaluator)
-/// follow the flags service for explicit person conditions, and are
-/// inconclusive when their holdout excludes anyone.
+/// person aggregation (JSON `null` under a group flag), a holdout or a group
+/// filter's own `group_type_index`, so a condition without its own aggregation
+/// uses the flag's, holdouts are ignored and group filters read the
+/// condition's group type. Definitions loaded by
+/// [`LocalEvaluator`](crate::LocalEvaluator) follow the flags service for
+/// explicit person conditions and group filter indexes, and are inconclusive
+/// when their holdout excludes anyone.
 ///
 /// # Errors
 ///
@@ -1246,12 +1394,15 @@ enum ConditionMatch {
     OutOfRolloutBound,
 }
 
-fn is_condition_match<F>(
+#[allow(clippy::too_many_arguments)]
+fn is_condition_match<'a, F>(
     flag: &FeatureFlag,
     bucketing_id: &str,
+    condition_index: usize,
     condition: &FeatureFlagCondition,
-    properties: &HashMap<String, serde_json::Value>,
-    known_absent_keys: Option<KnownAbsentKeys>,
+    properties: &'a HashMap<String, serde_json::Value>,
+    known_absent_keys: Option<KnownAbsentKeys<'a>>,
+    filter_sources: &FilterSources<'a>,
     property_matcher: &F,
 ) -> Result<ConditionMatch, InconclusiveMatchError>
 where
@@ -1262,8 +1413,23 @@ where
     // Filters in a condition have no defined order, so an inconclusive filter
     // doesn't stop the loop: a later filter can still rule the condition out.
     let mut inconclusive = None;
-    for prop in &condition.properties {
-        match property_matcher(prop, properties, known_absent_keys) {
+    for (filter_index, prop) in condition.properties.iter().enumerate() {
+        let result = match filter_sources.source(condition_index, filter_index, prop) {
+            FilterSource::Condition => property_matcher(prop, properties, known_absent_keys),
+            FilterSource::Properties {
+                properties,
+                known_absent_keys,
+                missing_is_absent,
+            } => {
+                if missing_is_absent && !properties.contains_key(&prop.key) {
+                    match_known_absent_property(prop)
+                } else {
+                    property_matcher(prop, properties, known_absent_keys)
+                }
+            }
+            FilterSource::NoMatch => Ok(false),
+        };
+        match result {
             Ok(true) => {}
             Ok(false) => return Ok(ConditionMatch::NoMatch),
             Err(err) => {
@@ -1294,11 +1460,13 @@ where
 /// the flag itself) targets a group via `aggregation_group_type_index`.
 ///
 /// A hand-built [`FeatureFlag`] can't express a condition with an explicit
-/// person aggregation (JSON `null` under a group flag) or a holdout, so a
-/// condition without its own aggregation uses the flag's, and holdouts are
-/// ignored. Definitions loaded by [`LocalEvaluator`](crate::LocalEvaluator)
-/// follow the flags service for explicit person conditions, and are
-/// inconclusive when their holdout excludes anyone.
+/// person aggregation (JSON `null` under a group flag), a holdout or a group
+/// filter's own `group_type_index`, so a condition without its own aggregation
+/// uses the flag's, holdouts are ignored and group filters read the
+/// condition's group type. Definitions loaded by
+/// [`LocalEvaluator`](crate::LocalEvaluator) follow the flags service for
+/// explicit person conditions and group filter indexes, and are inconclusive
+/// when their holdout excludes anyone.
 ///
 /// # Errors
 ///
@@ -1501,9 +1669,10 @@ where
     let mut is_inconclusive = false;
 
     for (index, condition) in flag.filters.groups.iter().enumerate() {
+        let aggregation = definition.condition_aggregation(index, condition, flag_aggregation);
         let (effective_bucketing, effective_properties, known_absent_keys) =
             match resolve_condition_target(
-                definition.condition_aggregation(index, condition, flag_aggregation),
+                aggregation,
                 distinct_id,
                 person_properties,
                 groups,
@@ -1523,12 +1692,22 @@ where
                 }
             };
 
+        let filter_sources = FilterSources {
+            condition_aggregation: aggregation,
+            groups,
+            group_properties,
+            group_type_mapping,
+            known_absent,
+            definition,
+        };
         match is_condition_match(
             flag,
             &effective_bucketing,
+            index,
             condition,
             effective_properties,
             known_absent_keys,
+            &filter_sources,
             &property_matcher,
         ) {
             Ok(ConditionMatch::Match) => {

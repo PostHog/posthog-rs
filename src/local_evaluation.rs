@@ -1324,3 +1324,263 @@ mod tests {
         assert_eq!(evaluation.has_experiment, Some(true));
     }
 }
+
+/// Condition filters read the properties and known-absent keys of their own
+/// source, as the flags service routes them in
+/// `PropertyContext::resolve_for_filter`.
+#[cfg(test)]
+mod condition_filter_source_tests {
+    use super::*;
+    use serde_json::json;
+
+    type Properties = HashMap<String, serde_json::Value>;
+
+    fn props(entries: &[(&str, serde_json::Value)]) -> Properties {
+        entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    fn keys(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(group_type, keys)| {
+                (
+                    group_type.to_string(),
+                    keys.iter().map(|key| key.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn evaluator(
+        flags: Vec<serde_json::Value>,
+        group_type_mapping: serde_json::Value,
+    ) -> LocalEvaluator {
+        let response: LocalEvaluationResponse = serde_json::from_value(
+            json!({"flags": flags, "group_type_mapping": group_type_mapping, "cohorts": {
+                "1": {"type": "AND", "values": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}]}
+            }}),
+        )
+        .unwrap();
+        let cache = FlagCache::new();
+        cache.update(response);
+        LocalEvaluator::new(cache)
+    }
+
+    #[derive(Default)]
+    struct Inputs {
+        person_properties: Properties,
+        groups: HashMap<String, String>,
+        group_properties: HashMap<String, Properties>,
+        person_keys_known_absent: Vec<String>,
+        group_keys_known_absent: HashMap<String, Vec<String>>,
+    }
+
+    /// `None` when the flag is inconclusive.
+    fn evaluate(evaluator: &LocalEvaluator, key: &str, inputs: &Inputs) -> Option<FlagValue> {
+        let known_absent = KnownAbsentProperties::new(
+            Some(&inputs.person_keys_known_absent),
+            Some(&inputs.group_keys_known_absent),
+        );
+        evaluator
+            .evaluate_all_flags_with_details(
+                "user-1",
+                &inputs.person_properties,
+                &inputs.groups,
+                &inputs.group_properties,
+                &known_absent,
+            )
+            .remove(key)
+            .expect("the flag is defined")
+            .result
+            .ok()
+    }
+
+    /// A `company` flag whose condition filters `project` (index 1) on `tier`.
+    fn company_flag_with_a_project_filter(
+        operator: &str,
+        value: serde_json::Value,
+    ) -> serde_json::Value {
+        json!({
+            "key": "project-tier",
+            "active": true,
+            "filters": {
+                "aggregation_group_type_index": 0,
+                "groups": [{
+                    "properties": [{"key": "tier", "value": value, "operator": operator, "type": "group", "group_type_index": 1}],
+                    "rollout_percentage": 100
+                }]
+            }
+        })
+    }
+
+    fn company_and_project() -> serde_json::Value {
+        json!({"0": "company", "1": "project"})
+    }
+
+    fn company_and_project_inputs() -> Inputs {
+        Inputs {
+            groups: HashMap::from([
+                ("company".to_string(), "acme".to_string()),
+                ("project".to_string(), "p1".to_string()),
+            ]),
+            group_properties: HashMap::from([("company".to_string(), Properties::new())]),
+            ..Inputs::default()
+        }
+    }
+
+    #[test]
+    fn group_filter_does_not_read_the_condition_groups_known_absent_keys() {
+        let evaluator = evaluator(
+            vec![company_flag_with_a_project_filter(
+                "is_not_set",
+                json!(null),
+            )],
+            company_and_project(),
+        );
+        let inputs = Inputs {
+            group_keys_known_absent: keys(&[("company", &["tier"])]),
+            ..company_and_project_inputs()
+        };
+
+        assert_eq!(evaluate(&evaluator, "project-tier", &inputs), None);
+    }
+
+    #[test]
+    fn group_filter_reads_its_own_groups_known_absent_keys() {
+        let evaluator = evaluator(
+            vec![company_flag_with_a_project_filter(
+                "is_not_set",
+                json!(null),
+            )],
+            company_and_project(),
+        );
+        let inputs = Inputs {
+            group_keys_known_absent: keys(&[("project", &["tier"])]),
+            ..company_and_project_inputs()
+        };
+
+        assert_eq!(
+            evaluate(&evaluator, "project-tier", &inputs),
+            Some(FlagValue::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn group_filter_reads_its_own_groups_properties() {
+        let evaluator = evaluator(
+            vec![company_flag_with_a_project_filter("exact", json!("pro"))],
+            company_and_project(),
+        );
+        for (company_tier, project_tier, expected) in
+            [("pro", "free", false), ("free", "pro", true)]
+        {
+            let mut inputs = company_and_project_inputs();
+            inputs.group_properties = HashMap::from([
+                (
+                    "company".to_string(),
+                    props(&[("tier", json!(company_tier))]),
+                ),
+                (
+                    "project".to_string(),
+                    props(&[("tier", json!(project_tier))]),
+                ),
+            ]);
+            assert_eq!(
+                evaluate(&evaluator, "project-tier", &inputs),
+                Some(FlagValue::Boolean(expected)),
+                "project tier {project_tier}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_filter_without_a_usable_key_reads_the_supplied_properties_as_complete() {
+        let evaluator = evaluator(
+            vec![company_flag_with_a_project_filter(
+                "is_not_set",
+                json!(null),
+            )],
+            company_and_project(),
+        );
+        for project_key in [None, Some("")] {
+            for (project_properties, expected) in [
+                (None, true),
+                (Some(props(&[("name", json!("P1"))])), true),
+                (Some(props(&[("tier", json!("pro"))])), false),
+            ] {
+                let mut inputs = company_and_project_inputs();
+                inputs.groups.remove("project");
+                if let Some(project_key) = project_key {
+                    inputs
+                        .groups
+                        .insert("project".to_string(), project_key.to_string());
+                }
+                if let Some(project_properties) = project_properties.clone() {
+                    inputs
+                        .group_properties
+                        .insert("project".to_string(), project_properties);
+                }
+                assert_eq!(
+                    evaluate(&evaluator, "project-tier", &inputs),
+                    Some(FlagValue::Boolean(expected)),
+                    "project key {project_key:?}, properties {project_properties:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn group_filter_with_an_unmapped_index_needs_no_group_context() {
+        let flag = json!({
+            "key": "unmapped",
+            "active": true,
+            "filters": {"groups": [{
+                "properties": [{"key": "tier", "operator": "is_not_set", "type": "group", "group_type_index": 3}],
+                "rollout_percentage": 100
+            }]}
+        });
+        let evaluator = evaluator(vec![flag], company_and_project());
+
+        assert_eq!(
+            evaluate(&evaluator, "unmapped", &Inputs::default()),
+            Some(FlagValue::Boolean(true))
+        );
+        let with_a_group = Inputs {
+            groups: HashMap::from([("company".to_string(), "acme".to_string())]),
+            ..Inputs::default()
+        };
+        assert_eq!(
+            evaluate(&evaluator, "unmapped", &with_a_group),
+            Some(FlagValue::Boolean(false))
+        );
+        let with_group_properties = Inputs {
+            group_properties: HashMap::from([(
+                "company".to_string(),
+                props(&[("tier", json!("pro"))]),
+            )]),
+            ..Inputs::default()
+        };
+        assert_eq!(
+            evaluate(&evaluator, "unmapped", &with_group_properties),
+            Some(FlagValue::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn group_filter_index_survives_a_definitions_round_trip() {
+        let response: LocalEvaluationResponse = serde_json::from_value(json!({
+            "flags": [company_flag_with_a_project_filter("is_not_set", json!(null))],
+            "group_type_mapping": company_and_project()
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(
+            serialized["flags"][0]["filters"]["groups"][0]["properties"][0]["group_type_index"],
+            json!(1)
+        );
+    }
+}
