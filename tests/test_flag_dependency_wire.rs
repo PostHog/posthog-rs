@@ -337,3 +337,36 @@ fn a_failed_long_path_does_not_decide_a_direct_dependency() {
     cache.update(response);
     assert_eq!(child(&LocalEvaluator::new(cache), json!({})), Ok(T));
 }
+
+// A cycle reached through branching conditions makes callers on that path skip
+// the cache, so the work is capped instead of growing with every level.
+#[test]
+fn a_cycle_behind_branching_conditions_is_inconclusive_quickly() {
+    let len = 30;
+    let mut flags = Vec::new();
+    for i in 0..len {
+        let next = format!("flag-{}", i + 1);
+        let condition = json!({"properties": [wire(&next, json!(true), json!([next]))], "rollout_percentage": 100});
+        flags.push(json!({"key": format!("flag-{i}"), "active": true, "filters": {"groups": [condition.clone(), condition]}}));
+    }
+    let last = format!("flag-{len}");
+    flags.push(json!({"key": last, "active": true, "filters": {"groups": [
+        {"properties": [wire(&last, json!(true), json!([]))], "rollout_percentage": 100}
+    ]}}));
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(json!({"flags": flags})).unwrap();
+    let cache = FlagCache::new();
+    cache.update(response);
+    let e = LocalEvaluator::new(cache);
+    let started = std::time::Instant::now();
+    assert!(e
+        .evaluate_flag(
+            "flag-0",
+            "user",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new()
+        )
+        .is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}

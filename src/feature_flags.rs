@@ -1058,6 +1058,7 @@ pub(crate) fn match_flag_definition(
     };
     let dependency_results = RefCell::new(HashMap::new());
     let path_failures = Cell::new(0);
+    let dependency_evaluations = Cell::new(0);
     let scope = EvaluationScope {
         ctx,
         person_properties,
@@ -1065,6 +1066,7 @@ pub(crate) fn match_flag_definition(
         dependency_path: Some(&path),
         dependency_results: &dependency_results,
         path_failures: &path_failures,
+        dependency_evaluations: &dependency_evaluations,
     };
     evaluate_flag_in_scope(flag, scope)
 }
@@ -1146,10 +1148,17 @@ struct EvaluationScope<'a> {
     /// Cycles and depth-limit failures found so far. They depend on the path
     /// that reached a flag, so a result that met one isn't cached.
     path_failures: &'a Cell<usize>,
+    /// Referenced flags evaluated so far in this call.
+    dependency_evaluations: &'a Cell<usize>,
 }
 
 /// Deeper chains are inconclusive, so a long chain can't exhaust the stack.
 const MAX_FLAG_DEPENDENCY_DEPTH: usize = 100;
+
+/// Each referenced flag is evaluated once per call unless a path to it fails,
+/// so only a cycle or an over-deep chain repeats work. Past this many
+/// evaluations the flag is inconclusive instead of stalling the caller.
+const MAX_FLAG_DEPENDENCY_EVALUATIONS: usize = 10_000;
 
 /// One flag on the path of dependencies being resolved, linked to the flag
 /// that depends on it.
@@ -1289,6 +1298,7 @@ pub fn match_property_with_context(
         dependency_path: None,
         dependency_results: &RefCell::new(HashMap::new()),
         path_failures: &Cell::new(0),
+        dependency_evaluations: &Cell::new(0),
     };
     match_property_in_scope(property, properties, scope)
 }
@@ -1678,6 +1688,13 @@ fn evaluate_dependency(
             "Circular dependency detected for flag '{flag_key}'"
         )));
     }
+    let evaluations = scope.dependency_evaluations.get() + 1;
+    if evaluations > MAX_FLAG_DEPENDENCY_EVALUATIONS {
+        return Err(InconclusiveMatchError::new(&format!(
+            "Evaluated more than {MAX_FLAG_DEPENDENCY_EVALUATIONS} flag dependencies"
+        )));
+    }
+    scope.dependency_evaluations.set(evaluations);
     let depth = scope.dependency_path.map_or(0, |path| path.depth + 1);
     if depth > MAX_FLAG_DEPENDENCY_DEPTH {
         scope.path_failures.set(scope.path_failures.get() + 1);
