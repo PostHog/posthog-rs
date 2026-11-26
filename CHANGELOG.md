@@ -1,5 +1,15 @@
 # posthog-rs
 
+## 1.7.0 — 2026-11-26
+
+### Minor changes
+
+- [f167359](https://github.com/posthog/posthog-rs/commit/f167359494c0d27dc76163de7c177a1d7027f179) The MCP manual API gains what the automatic path already uses: `McpAnalytics::list_tools_for_request` reads the listing's headers so ChatGPT is offered no `conversation_id`, `ToolCallRequest::client_info` and `ToolCallRequest::protocol_version` pass the bound handshake's client and negotiated revision so a client is recognized by name, and `StartedToolCall::request_context` gives the tool a context whose custom events carry the call's session and identity. — Thanks @lucasheriques!
+
+### Patch changes
+
+- [6efc296](https://github.com/posthog/posthog-rs/commit/6efc2965b318691cda90f8bb805bd18ffe4c5709) MCP analytics no longer starts a new stdio session while a tool call is still running: the 30-minute inactivity rotation now counts from the end of the last call only once no call is in flight, and a cancelled call counts as ended even when its tool keeps running. — Thanks @lucasheriques!
+
 ## 1.6.0 — 2026-11-25
 
 ### Minor changes
