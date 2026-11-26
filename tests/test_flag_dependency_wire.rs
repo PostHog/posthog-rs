@@ -175,6 +175,11 @@ fn flag_leaf_in_a_cohort_follows_the_flags_service() {
             json!({"parent": false}),
             F,
         ),
+        (
+            json!({"key": "parent", "type": "flag", "operator": "exact"}),
+            json!({"parent": null}),
+            F,
+        ),
     ];
     for (leaf, properties, expected) in cases {
         let response: LocalEvaluationResponse = serde_json::from_value(json!({
