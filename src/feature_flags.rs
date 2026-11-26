@@ -308,8 +308,8 @@ impl std::error::Error for InconclusiveMatchError {}
 pub(crate) struct MatchError {
     pub(crate) message: String,
     pub(crate) reason: UnresolvedFlagReason,
-    /// Set when the failure comes from context a dependency check evaluates
-    /// the dependency without, so passing more context can't fix it.
+    /// Set when every cause of the failure is context a dependency check
+    /// evaluates the dependency without, so passing more context can't fix it.
     dropped_context: bool,
 }
 
@@ -1228,7 +1228,7 @@ where
     let flag_aggregation = flag.filters.aggregation_group_type_index;
 
     let mut inconclusive_reason: Option<UnresolvedFlagReason> = None;
-    let mut dropped_context = false;
+    let mut all_dropped_context = true;
 
     for condition in &flag.filters.groups {
         let (effective_bucketing, effective_properties) = match resolve_condition_target(
@@ -1252,11 +1252,21 @@ where
                 let no_properties = HashMap::new();
                 let mut reason = UnresolvedFlagReason::MissingContext;
                 for property in &condition.properties {
-                    if let Err(error) = property_matcher(property, &no_properties) {
-                        reason = UnresolvedFlagReason::pick(Some(reason), error.reason);
-                        dropped_context |= error.dropped_context;
+                    match property_matcher(property, &no_properties) {
+                        Ok(false) => {
+                            // A false filter rules the condition out, so its
+                            // other filters don't contribute a cause.
+                            reason = UnresolvedFlagReason::MissingContext;
+                            break;
+                        }
+                        Ok(true) => {}
+                        Err(error) => {
+                            reason = UnresolvedFlagReason::pick(Some(reason), error.reason)
+                        }
                     }
                 }
+                // The caller didn't pass these group properties.
+                all_dropped_context = false;
                 inconclusive_reason = Some(UnresolvedFlagReason::pick(inconclusive_reason, reason));
                 continue;
             }
@@ -1302,7 +1312,7 @@ where
             Err(err) => {
                 inconclusive_reason =
                     Some(UnresolvedFlagReason::pick(inconclusive_reason, err.reason));
-                dropped_context |= err.dropped_context;
+                all_dropped_context &= err.dropped_context;
             }
         }
     }
@@ -1312,7 +1322,7 @@ where
             "Can't determine if feature flag is enabled or not with given properties",
             reason,
         );
-        error.dropped_context = dropped_context;
+        error.dropped_context = all_dropped_context;
         return Err(error);
     }
 
@@ -1323,7 +1333,7 @@ fn keep_higher_precedence(current: Option<MatchError>, new: MatchError) -> Match
     let Some(current) = current else {
         return new;
     };
-    let dropped_context = current.dropped_context || new.dropped_context;
+    let dropped_context = current.dropped_context && new.dropped_context;
     let mut kept = if UnresolvedFlagReason::pick(Some(current.reason), new.reason) == current.reason
     {
         current
@@ -6443,6 +6453,71 @@ mod tests {
         };
         let error =
             match_flag_definition(&dependent, &HashMap::new(), &ctx, &HashMap::new()).unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::UnresolvedDependency);
+    }
+
+    #[test]
+    fn a_group_condition_ruled_out_by_a_dependency_contributes_no_cause() {
+        let inactive: FeatureFlag = serde_json::from_value(json!({
+            "key": "inactive",
+            "active": false,
+            "filters": {"groups": []}
+        }))
+        .unwrap();
+        let flags = HashMap::from([("inactive".to_string(), inactive)]);
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "company-flag",
+            "active": true,
+            "filters": {
+                "aggregation_group_type_index": 0,
+                "groups": [{
+                    "properties": [
+                        {"key": "$feature/inactive", "type": "flag", "operator": "exact", "value": true},
+                        {"key": "$feature/missing", "type": "flag", "operator": "exact", "value": true}
+                    ],
+                    "rollout_percentage": 100
+                }]
+            }
+        }))
+        .unwrap();
+        let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
+        let group_type_mapping = HashMap::from([("0".to_string(), "company".to_string())]);
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &HashMap::new(),
+            flags: &flags,
+            distinct_id: "user-123",
+            groups: &groups,
+            group_properties: &HashMap::new(),
+            group_type_mapping: &group_type_mapping,
+        };
+        let error =
+            match_flag_definition(&flag, &HashMap::new(), &ctx, &HashMap::new()).unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::MissingContext);
+    }
+
+    #[test]
+    fn a_dependency_failing_for_its_own_cause_is_an_unresolved_dependency() {
+        let checkout: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {"groups": [{
+                "properties": [
+                    {"key": "plan", "type": "person", "operator": "exact", "value": "pro"},
+                    {"key": "plan", "type": "person", "operator": "future_op", "value": "pro"}
+                ],
+                "rollout_percentage": 100
+            }]}
+        }))
+        .unwrap();
+        let flags = HashMap::from([("checkout".to_string(), checkout)]);
+        let dependent = flag_with_groups(json!([{
+            "properties": [{"key": "$feature/checkout", "type": "flag", "operator": "exact", "value": true}],
+            "rollout_percentage": 100
+        }]));
+        let pro = HashMap::from([("plan".to_string(), json!("pro"))]);
+        let error =
+            context_flag(&dependent, &pro, &HashMap::new(), &flags, &HashMap::new()).unwrap_err();
         assert_eq!(error.reason, UnresolvedFlagReason::UnresolvedDependency);
     }
 
