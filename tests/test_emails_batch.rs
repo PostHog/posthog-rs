@@ -402,13 +402,26 @@ async fn a_refusal_without_an_earlier_lost_answer_is_failed() {
 
 #[tokio::test]
 async fn a_recipient_posthog_could_not_confirm_is_unconfirmed() {
-    for (answered, code) in [
-        ("delivery_unavailable", "delivery_unavailable"),
-        ("idempotency_key_in_flight", "idempotency_key_in_flight"),
-        (" ", "api_error"),
+    for (slot, code) in [
+        (
+            refused("m0", "delivery_unavailable", 503),
+            "delivery_unavailable",
+        ),
+        (
+            refused("m0", "idempotency_key_in_flight", 409),
+            "idempotency_key_in_flight",
+        ),
+        (refused("m0", " ", 503), "api_error"),
+        (
+            json!({"message_id": "m0", "error": {"code": " ", "status": 503}}),
+            "api_error",
+        ),
+        (
+            json!({"message_id": "m0", "error": {"code": "delivery_unavailable"}}),
+            "delivery_unavailable",
+        ),
     ] {
-        let server =
-            ScriptedServer::start_async(vec![ok(vec![refused("m0", answered, 503)])]).await;
+        let server = ScriptedServer::start_async(vec![ok(vec![slot])]).await;
         let client = client_for(&server).await;
 
         let result = client
@@ -423,6 +436,16 @@ async fn a_recipient_posthog_could_not_confirm_is_unconfirmed() {
             (Unconfirmed, Some("m0"))
         );
         assert_eq!(only.error.as_ref().unwrap().code(), code);
+        assert!(
+            !only
+                .error
+                .as_ref()
+                .unwrap()
+                .message()
+                .contains("didn't queue"),
+            "{}",
+            only.error.as_ref().unwrap().message()
+        );
         assert!(says_to_resend_with_its_key(only.error.as_ref()), "{}", code);
         assert_eq!(server.requests().len(), 1, "{}", code);
     }

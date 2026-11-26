@@ -1538,8 +1538,13 @@ fn slot_error(error: Option<&Value>) -> EmailError {
         .get("status")
         .and_then(Value::as_u64)
         .and_then(|status| u16::try_from(status).ok());
-    let message = text(error, "detail")
-        .unwrap_or_else(|| format!("PostHog didn't queue this email: {code}."));
+    let message = text(error, "detail").unwrap_or_else(|| {
+        if UNCONFIRMED_SLOT_CODES.contains(&code.as_str()) {
+            format!("PostHog didn't confirm this email: {code}, so it may still go out.")
+        } else {
+            format!("PostHog didn't queue this email: {code}.")
+        }
+    });
     EmailError::answered(status, code, message)
 }
 
