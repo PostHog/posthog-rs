@@ -2,7 +2,7 @@ use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
@@ -1057,12 +1057,14 @@ pub(crate) fn match_flag_definition(
         depth: 0,
     };
     let dependency_results = RefCell::new(HashMap::new());
+    let path_failures = Cell::new(0);
     let scope = EvaluationScope {
         ctx,
         person_properties,
         metadata,
         dependency_path: Some(&path),
         dependency_results: &dependency_results,
+        path_failures: &path_failures,
     };
     evaluate_flag_in_scope(flag, scope)
 }
@@ -1141,6 +1143,9 @@ struct EvaluationScope<'a> {
     /// Referenced flags already evaluated with this context, so a flag several
     /// filters depend on is evaluated once, as on the server.
     dependency_results: &'a RefCell<HashMap<String, Result<FlagValue, String>>>,
+    /// Cycles and depth-limit failures found so far. They depend on the path
+    /// that reached a flag, so a result that met one isn't cached.
+    path_failures: &'a Cell<usize>,
 }
 
 /// Deeper chains are inconclusive, so a long chain can't exhaust the stack.
@@ -1283,6 +1288,7 @@ pub fn match_property_with_context(
         metadata: &HashMap::new(),
         dependency_path: None,
         dependency_results: &RefCell::new(HashMap::new()),
+        path_failures: &Cell::new(0),
     };
     match_property_in_scope(property, properties, scope)
 }
@@ -1641,11 +1647,14 @@ fn match_flag_dependency_property(
     let flag_value = match cached {
         Some(result) => result,
         None => {
+            let path_failures = scope.path_failures.get();
             let result = evaluate_dependency(flag_key, scope).map_err(|e| e.message);
-            scope
-                .dependency_results
-                .borrow_mut()
-                .insert(flag_key.to_string(), result.clone());
+            if scope.path_failures.get() == path_failures {
+                scope
+                    .dependency_results
+                    .borrow_mut()
+                    .insert(flag_key.to_string(), result.clone());
+            }
             result
         }
     }
@@ -1664,12 +1673,14 @@ fn evaluate_dependency(
         .dependency_path
         .is_some_and(|path| path.contains(flag_key))
     {
+        scope.path_failures.set(scope.path_failures.get() + 1);
         return Err(InconclusiveMatchError::new(&format!(
             "Circular dependency detected for flag '{flag_key}'"
         )));
     }
     let depth = scope.dependency_path.map_or(0, |path| path.depth + 1);
     if depth > MAX_FLAG_DEPENDENCY_DEPTH {
+        scope.path_failures.set(scope.path_failures.get() + 1);
         return Err(InconclusiveMatchError::new(&format!(
             "Flag dependency chain is deeper than {MAX_FLAG_DEPENDENCY_DEPTH}"
         )));

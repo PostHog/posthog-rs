@@ -311,3 +311,29 @@ fn a_long_dependency_chain_is_inconclusive_instead_of_overflowing() {
 fn a_shared_prerequisite_is_evaluated_once() {
     assert_eq!(evaluate_last(&chain(60, 4), 60), Ok(T));
 }
+
+// A depth-limit failure on one path must not decide a later, shorter path.
+#[test]
+fn a_failed_long_path_does_not_decide_a_direct_dependency() {
+    let len = 150;
+    let mut flags = vec![
+        json!({"key": "flag-0", "active": true, "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}}),
+    ];
+    for i in 1..=len {
+        let previous = format!("flag-{}", i - 1);
+        flags.push(json!({"key": format!("flag-{i}"), "active": true, "filters": {"groups": [
+            {"properties": [wire(&previous, json!(true), json!([previous]))], "rollout_percentage": 100}
+        ]}}));
+    }
+    // The first condition walks the long chain and hits the depth limit at
+    // flag-50. The second depends on flag-50 directly, at a depth that is fine.
+    flags.push(json!({"key": "child", "active": true, "filters": {"groups": [
+        {"properties": [wire(&format!("flag-{len}"), json!(true), json!([]))], "rollout_percentage": 100},
+        {"properties": [wire("flag-50", json!(true), json!(["flag-50"]))], "rollout_percentage": 100}
+    ]}}));
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(json!({"flags": flags})).unwrap();
+    let cache = FlagCache::new();
+    cache.update(response);
+    assert_eq!(child(&LocalEvaluator::new(cache), json!({})), Ok(T));
+}
