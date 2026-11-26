@@ -637,10 +637,8 @@ pub fn posthog::FlagsFailure<'a>::error(&self) -> &posthog::Error
 pub fn posthog::FlagsFailure<'a>::status(&self) -> core::option::Option<u16>
 pub struct posthog::InconclusiveMatchError
 pub posthog::InconclusiveMatchError::message: alloc::string::String
-pub posthog::InconclusiveMatchError::reason: posthog::UnresolvedFlagReason
 impl posthog::InconclusiveMatchError
 pub fn posthog::InconclusiveMatchError::new(&str) -> Self
-pub fn posthog::InconclusiveMatchError::with_reason(&str, posthog::UnresolvedFlagReason) -> Self
 impl core::error::Error for posthog::InconclusiveMatchError
 impl core::fmt::Display for posthog::InconclusiveMatchError
 pub fn posthog::InconclusiveMatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
