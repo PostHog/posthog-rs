@@ -1681,7 +1681,7 @@ async fn scheduling_off_posthog_cloud_makes_no_request() {
             .unwrap_err();
 
         assert_eq!(error.code(), "scheduling_requires_cloud", "{}", app_host);
-        assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+        assert_eq!(error.kind(), EmailErrorKind::ApplicationError);
         assert_eq!(error.field(), Some("scheduled_at"));
         for secret in ["hunter2", "token-abc"] {
             assert!(!error.to_string().contains(secret), "{}", error);

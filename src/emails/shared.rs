@@ -237,11 +237,11 @@ pub(crate) fn check_schedulable(
         || "a host that isn't PostHog Cloud".to_string(),
         str::to_string,
     );
-    Err(EmailError::invalid(
+    Err(EmailError::new(
         "scheduling_requires_cloud",
         format!("Scheduled sends work only on PostHog Cloud (https://us.posthog.com or https://eu.posthog.com), and this client sends to {target}, so no email was sent."),
-        "scheduled_at",
     )
+    .with_field(Some("scheduled_at".to_string()))
     .with_details(
         Some("A PostHog that doesn't schedule emails would send this one at once.".into()),
         Some("Send without scheduled_at, or send through PostHog Cloud's app host. A reverse proxy or custom domain can't schedule emails yet.".into()),
