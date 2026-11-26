@@ -157,6 +157,77 @@ fn local_definitions_fixture() -> Value {
     })
 }
 
+fn unresolved_definitions_fixture() -> Value {
+    json!({
+        "flags": [
+            {
+                "key": "beta-ui",
+                "active": true,
+                "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+            },
+            {
+                "key": "checkout",
+                "active": true,
+                "ensure_experience_continuity": true,
+                "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+            },
+            {
+                "key": "first-seen",
+                "active": true,
+                "filters": {"groups": [{
+                    "properties": [{"key": "created_at", "type": "person_metadata", "operator": "is_date_after", "value": "2025-01-01"}],
+                    "rollout_percentage": 100
+                }]}
+            },
+            {
+                "key": "pro-plan",
+                "active": true,
+                "filters": {"groups": [{
+                    "properties": [{"key": "plan", "type": "person", "operator": "exact", "value": "pro"}],
+                    "rollout_percentage": 100
+                }]}
+            },
+            {
+                "key": "needs-checkout",
+                "active": true,
+                "filters": {"groups": [{
+                    "properties": [{"key": "$feature/checkout", "type": "flag", "operator": "exact", "value": true}],
+                    "rollout_percentage": 100
+                }]}
+            },
+            {
+                "key": "inactive-continuity",
+                "active": false,
+                "ensure_experience_continuity": true,
+                "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {}
+    })
+}
+
+fn expected_unresolved() -> std::collections::HashMap<String, posthog::UnresolvedFlagReason> {
+    use posthog::UnresolvedFlagReason::*;
+    std::collections::HashMap::from([
+        ("checkout".to_string(), ExperienceContinuity),
+        ("first-seen".to_string(), UnsupportedDefinition),
+        ("pro-plan".to_string(), MissingContext),
+        ("needs-checkout".to_string(), UnresolvedDependency),
+    ])
+}
+
+fn local_evaluation_options(base_url: String) -> posthog::ClientOptions {
+    posthog::ClientOptionsBuilder::default()
+        .api_key("test_api_key".to_string())
+        .host(base_url)
+        .secret_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(3600)
+        .build()
+        .unwrap()
+}
+
 struct FlakyFlagsServer {
     base_url: String,
     attempts: Arc<AtomicUsize>,
@@ -735,6 +806,79 @@ mod blocking {
         opts.flag_keys = Some(vec!["alpha".into(), "beta".into()]);
         let _ = client.evaluate_flags("user-1", opts).unwrap();
         flags_mock.assert_calls(1);
+    }
+
+    #[test]
+    fn local_only_evaluation_reports_unresolved_flags_with_reasons() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/flags/definitions/");
+            then.status(200).json_body(unresolved_definitions_fixture());
+        });
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_events_mock(
+            &server,
+            vec![(
+                "$feature_flag_called",
+                json!({"$feature_flag": "checkout", "$feature_flag_error": "local_evaluation_inconclusive"}),
+            )],
+        );
+        let client = posthog::client(local_evaluation_options(server.base_url()));
+
+        let mut options = EvaluateFlagsOptions::default();
+        options.only_evaluate_locally = true;
+        let snapshot = client.evaluate_flags("user-123", options).unwrap();
+
+        assert_eq!(snapshot.unresolved_flags(), &expected_unresolved());
+        let mut keys = snapshot.keys();
+        keys.sort();
+        assert_eq!(keys, vec!["beta-ui", "inactive-continuity"]);
+        assert!(snapshot
+            .only(&["beta-ui", "checkout"])
+            .unresolved_flags()
+            .is_empty());
+        assert!(snapshot.only_accessed().keys().is_empty());
+
+        assert!(!snapshot.is_enabled("checkout"));
+        client.flush();
+        flags_mock.assert_calls(0);
+        capture_mock.assert_calls(1);
+    }
+
+    #[test]
+    fn unresolved_flags_are_scoped_to_requested_keys_and_filled_by_remote() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/flags/definitions/");
+            then.status(200).json_body(unresolved_definitions_fixture());
+        });
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(json!({
+                "flags": {"checkout": {"key": "checkout", "enabled": true, "variant": null}}
+            }));
+        });
+        let client = posthog::client(local_evaluation_options(server.base_url()));
+
+        let mut options = EvaluateFlagsOptions::default();
+        options.flag_keys = Some(vec![
+            "checkout".into(),
+            "pro-plan".into(),
+            "typo-flag".into(),
+        ]);
+        let snapshot = client.evaluate_flags("user-123", options).unwrap();
+
+        assert!(snapshot.is_enabled("checkout"));
+        assert_eq!(
+            snapshot.unresolved_flags(),
+            &std::collections::HashMap::from([(
+                "pro-plan".to_string(),
+                posthog::UnresolvedFlagReason::MissingContext
+            )])
+        );
     }
 
     #[test]
@@ -1375,6 +1519,39 @@ mod async_tests {
         opts.flag_keys = Some(vec!["alpha".into()]);
         let _ = client.evaluate_flags("user-1", opts).await.unwrap();
         flags_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn local_only_evaluation_reports_unresolved_flags_with_reasons() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/flags/definitions/");
+            then.status(200).json_body(unresolved_definitions_fixture());
+        });
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_events_mock(
+            &server,
+            vec![(
+                "$feature_flag_called",
+                json!({"$feature_flag": "checkout", "$feature_flag_error": "local_evaluation_inconclusive"}),
+            )],
+        );
+        let client = posthog::client(local_evaluation_options(server.base_url())).await;
+
+        let mut options = EvaluateFlagsOptions::default();
+        options.only_evaluate_locally = true;
+        let snapshot = client.evaluate_flags("user-123", options).await.unwrap();
+
+        assert_eq!(snapshot.unresolved_flags(), &expected_unresolved());
+        assert!(!snapshot.keys().contains(&"checkout".to_string()));
+
+        assert!(!snapshot.is_enabled("checkout"));
+        client.flush().await;
+        flags_mock.assert_calls(0);
+        capture_mock.assert_calls(1);
     }
 
     #[tokio::test]

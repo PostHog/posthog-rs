@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use crate::feature_flags::FlagValue;
+use crate::feature_flags::{FlagValue, UnresolvedFlagReason};
 
 /// One evaluated flag inside a [`FeatureFlagEvaluations`] snapshot.
 ///
@@ -119,6 +119,7 @@ pub struct FeatureFlagEvaluations {
     host: Arc<dyn FeatureFlagEvaluationsHost>,
     distinct_id: String,
     flags: HashMap<String, EvaluatedFlagRecord>,
+    unresolved: HashMap<String, UnresolvedFlagReason>,
     groups: HashMap<String, String>,
     disable_geoip: Option<bool>,
     request_id: Option<String>,
@@ -146,6 +147,7 @@ impl FeatureFlagEvaluations {
             host,
             distinct_id,
             flags,
+            unresolved: HashMap::new(),
             groups,
             disable_geoip,
             request_id,
@@ -155,6 +157,17 @@ impl FeatureFlagEvaluations {
             accessed: Mutex::new(HashSet::new()),
             request_context: crate::RequestContext::current().unwrap_or_default(),
         }
+    }
+
+    /// Attach the flags local evaluation left without a value. Keys that hold a
+    /// value are ignored.
+    pub(crate) fn with_unresolved(
+        mut self,
+        mut unresolved: HashMap<String, UnresolvedFlagReason>,
+    ) -> Self {
+        unresolved.retain(|key, _| !self.flags.contains_key(key));
+        self.unresolved = unresolved;
+        self
     }
 
     /// Construct an empty snapshot used when evaluation is skipped.
@@ -223,6 +236,28 @@ impl FeatureFlagEvaluations {
     #[must_use]
     pub fn keys(&self) -> Vec<String> {
         self.flags.keys().cloned().collect()
+    }
+
+    /// Flags that have a loaded local definition but no value, each with the
+    /// reason local evaluation couldn't resolve it.
+    ///
+    /// A flag is listed when it was in the requested keys (or every loaded
+    /// flag, without [`EvaluateFlagsOptions::flag_keys`]), local evaluation was
+    /// inconclusive, and no remote `/flags` value filled the gap, for example
+    /// with [`EvaluateFlagsOptions::only_evaluate_locally`]. A key without a
+    /// local definition is never listed.
+    ///
+    /// Listed flags are not in [`keys`](Self::keys) and don't change any
+    /// accessor's result. Reading one with [`is_enabled`](Self::is_enabled) or
+    /// [`get_flag`](Self::get_flag) reports `local_evaluation_inconclusive`
+    /// instead of `flag_missing`.
+    ///
+    /// Reading this map makes no request, doesn't count as an access and fires
+    /// no event. Snapshots returned by [`only`](Self::only) and
+    /// [`only_accessed`](Self::only_accessed) have no entries.
+    #[must_use]
+    pub fn unresolved_flags(&self) -> &HashMap<String, UnresolvedFlagReason> {
+        &self.unresolved
     }
 
     /// A clone of the snapshot containing only flags whose values were read via
@@ -301,6 +336,7 @@ impl FeatureFlagEvaluations {
             host: Arc::clone(&self.host),
             distinct_id: self.distinct_id.clone(),
             flags,
+            unresolved: HashMap::new(),
             groups: self.groups.clone(),
             disable_geoip: self.disable_geoip,
             request_id: self.request_id.clone(),
@@ -415,7 +451,9 @@ impl FeatureFlagEvaluations {
         if self.quota_limited {
             errors.push("quota_limited");
         }
-        if flag.is_none() {
+        if self.unresolved.contains_key(key) {
+            errors.push("local_evaluation_inconclusive");
+        } else if flag.is_none() {
             errors.push("flag_missing");
         }
         if !errors.is_empty() {
@@ -431,6 +469,7 @@ impl std::fmt::Debug for FeatureFlagEvaluations {
         f.debug_struct("FeatureFlagEvaluations")
             .field("distinct_id", &self.distinct_id)
             .field("flags", &self.flags)
+            .field("unresolved", &self.unresolved)
             .field("groups", &self.groups)
             .field("disable_geoip", &self.disable_geoip)
             .field("request_id", &self.request_id)
@@ -915,5 +954,63 @@ mod tests {
         assert_eq!(props.get("$feature/gamma"), Some(&json!(true)));
         let active = props.get("$active_feature_flags").unwrap();
         assert_eq!(active, &json!(["alpha", "gamma"]));
+    }
+
+    #[test]
+    fn unresolved_flags_report_inconclusive_without_changing_reads() {
+        let host = Arc::new(RecordingHost::default());
+        let snap = build(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            "u1",
+        )
+        .with_unresolved(HashMap::from([
+            (
+                "checkout".to_string(),
+                UnresolvedFlagReason::ExperienceContinuity,
+            ),
+            ("alpha".to_string(), UnresolvedFlagReason::MissingContext),
+        ]));
+
+        assert_eq!(
+            snap.unresolved_flags(),
+            &HashMap::from([(
+                "checkout".to_string(),
+                UnresolvedFlagReason::ExperienceContinuity
+            )])
+        );
+        assert!(host.captured.lock().unwrap().is_empty());
+        assert!(snap.only_accessed().keys().is_empty());
+        assert!(!snap.keys().contains(&"checkout".to_string()));
+        assert!(!snap.event_properties().contains_key("$feature/checkout"));
+
+        assert!(!snap.is_enabled("checkout"));
+        assert!(snap.get_flag("typo").is_none());
+        let captured = host.captured.lock().unwrap();
+        assert_eq!(
+            captured[0].properties.get("$feature_flag_error"),
+            Some(&json!("local_evaluation_inconclusive"))
+        );
+        assert_eq!(
+            captured[1].properties.get("$feature_flag_error"),
+            Some(&json!("flag_missing"))
+        );
+    }
+
+    #[test]
+    fn filtered_snapshots_carry_no_unresolved_flags() {
+        let host = Arc::new(RecordingHost::default());
+        let snap = build(host as Arc<dyn FeatureFlagEvaluationsHost>, "u1").with_unresolved(
+            HashMap::from([(
+                "checkout".to_string(),
+                UnresolvedFlagReason::ExperienceContinuity,
+            )]),
+        );
+        let _ = snap.is_enabled("checkout");
+
+        assert!(snap
+            .only(&["alpha", "checkout"])
+            .unresolved_flags()
+            .is_empty());
+        assert!(snap.only_accessed().unresolved_flags().is_empty());
     }
 }

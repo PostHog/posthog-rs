@@ -180,7 +180,7 @@ fn get_cached_regex(pattern: &str) -> Result<Option<Regex>, InconclusiveMatchErr
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache_guard = cache
         .lock()
-        .map_err(|_| InconclusiveMatchError::new("Regex cache mutex poisoned"))?;
+        .map_err(|_| InconclusiveMatchError::unsupported("Regex cache mutex poisoned"))?;
     let cached = if let Some(cached) = cache_guard.get(pattern) {
         cached.clone()
     } else {
@@ -199,7 +199,7 @@ fn get_cached_regex(pattern: &str) -> Result<Option<Regex>, InconclusiveMatchErr
     match cached {
         CachedRegex::Compiled(regex) => Ok(Some(regex)),
         CachedRegex::Invalid => Ok(None),
-        CachedRegex::Inconclusive => Err(InconclusiveMatchError::new(
+        CachedRegex::Inconclusive => Err(InconclusiveMatchError::unsupported(
             "Regex requires server-side evaluation",
         )),
     }
@@ -218,6 +218,63 @@ pub enum FlagValue {
     String(String),
 }
 
+/// Why local evaluation left a flag without a value.
+///
+/// Reported by [`InconclusiveMatchError::reason`] and
+/// [`FeatureFlagEvaluations::unresolved_flags`](crate::FeatureFlagEvaluations::unresolved_flags).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UnresolvedFlagReason {
+    /// The flag has experience continuity enabled, which local evaluation
+    /// never resolves.
+    ExperienceContinuity,
+    /// The definition uses something the local evaluator does not support, such
+    /// as a static cohort, an unknown operator or filter type, a malformed
+    /// value, or a dependency with no loaded definition.
+    UnsupportedDefinition,
+    /// A flag the definition depends on was unresolved.
+    UnresolvedDependency,
+    /// The call did not pass a property or group property the flag needs, or
+    /// passed it in a form the evaluator cannot use.
+    MissingContext,
+}
+
+impl UnresolvedFlagReason {
+    /// The reason's wire name, such as `"unsupported_definition"`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExperienceContinuity => "experience_continuity",
+            Self::UnsupportedDefinition => "unsupported_definition",
+            Self::UnresolvedDependency => "unresolved_dependency",
+            Self::MissingContext => "missing_context",
+        }
+    }
+
+    fn precedence(self) -> u8 {
+        match self {
+            Self::ExperienceContinuity => 0,
+            Self::UnsupportedDefinition => 1,
+            Self::UnresolvedDependency => 2,
+            Self::MissingContext => 3,
+        }
+    }
+
+    /// When several causes apply to one flag, the spec reports the first in
+    /// this order, whatever order the evaluator inspected them in.
+    fn pick(current: Option<Self>, new: Self) -> Self {
+        match current {
+            Some(current) if current.precedence() <= new.precedence() => current,
+            _ => new,
+        }
+    }
+}
+
+impl fmt::Display for UnresolvedFlagReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Error returned when a feature flag cannot be evaluated locally.
 ///
 /// This typically occurs when:
@@ -229,14 +286,32 @@ pub enum FlagValue {
 pub struct InconclusiveMatchError {
     /// Human-readable description of why evaluation was inconclusive
     pub message: String,
+    /// Why evaluation was inconclusive.
+    pub reason: UnresolvedFlagReason,
 }
 
 impl InconclusiveMatchError {
-    /// Create an inconclusive-match error with a human-readable message.
+    /// Create an inconclusive-match error with a human-readable message and
+    /// the [`UnresolvedFlagReason::UnsupportedDefinition`] reason.
     pub fn new(message: &str) -> Self {
+        Self::with_reason(message, UnresolvedFlagReason::UnsupportedDefinition)
+    }
+
+    /// Create an inconclusive-match error with a human-readable message and a
+    /// reason.
+    pub fn with_reason(message: &str, reason: UnresolvedFlagReason) -> Self {
         Self {
             message: message.to_string(),
+            reason,
         }
+    }
+
+    fn unsupported(message: &str) -> Self {
+        Self::with_reason(message, UnresolvedFlagReason::UnsupportedDefinition)
+    }
+
+    fn missing_context(message: &str) -> Self {
+        Self::with_reason(message, UnresolvedFlagReason::MissingContext)
     }
 }
 
@@ -991,14 +1066,12 @@ where
     // the context-aware matcher; rollout handling remains identical.
     // Filters in a condition have no defined order, so an inconclusive filter
     // doesn't stop the loop: a later filter can still rule the condition out.
-    let mut inconclusive = None;
+    let mut inconclusive: Option<InconclusiveMatchError> = None;
     for prop in &condition.properties {
         match property_matcher(prop, properties) {
             Ok(true) => {}
             Ok(false) => return Ok(ConditionMatch::NoMatch),
-            Err(err) => {
-                inconclusive.get_or_insert(err);
-            }
+            Err(err) => inconclusive = Some(keep_higher_precedence(inconclusive, err)),
         }
     }
     if let Some(err) = inconclusive {
@@ -1071,8 +1144,9 @@ pub(crate) fn metadata_result(
 ) -> Option<Result<FlagValue, InconclusiveMatchError>> {
     let metadata = metadata.get(&flag.key).filter(|_| flag.active)?;
     if metadata.ensure_experience_continuity {
-        return Some(Err(InconclusiveMatchError::new(
+        return Some(Err(InconclusiveMatchError::with_reason(
             "Flag has experience continuity enabled",
+            UnresolvedFlagReason::ExperienceContinuity,
         )));
     }
     metadata
@@ -1090,7 +1164,7 @@ fn match_feature_enrollment(
 ) -> Result<FlagValue, InconclusiveMatchError> {
     let enrollment_key = format!("$feature_enrollment/{}", flag.key);
     match person_properties.get(&enrollment_key) {
-        None => Err(InconclusiveMatchError::new(&format!(
+        None => Err(InconclusiveMatchError::missing_context(&format!(
             "Flag has feature enrollment and '{enrollment_key}' was not passed"
         ))),
         Some(serde_json::Value::Bool(enrolled)) => Ok(FlagValue::Boolean(*enrolled)),
@@ -1130,7 +1204,7 @@ where
 
     let flag_aggregation = flag.filters.aggregation_group_type_index;
 
-    let mut is_inconclusive = false;
+    let mut inconclusive_reason: Option<UnresolvedFlagReason> = None;
 
     for condition in &flag.filters.groups {
         let (effective_bucketing, effective_properties) = match resolve_condition_target(
@@ -1148,7 +1222,10 @@ where
             } => (bucketing, properties),
             ConditionTarget::Skip => continue,
             ConditionTarget::Inconclusive => {
-                is_inconclusive = true;
+                inconclusive_reason = Some(UnresolvedFlagReason::pick(
+                    inconclusive_reason,
+                    UnresolvedFlagReason::MissingContext,
+                ));
                 continue;
             }
         };
@@ -1190,17 +1267,35 @@ where
                 }
             }
             Ok(ConditionMatch::NoMatch) => continue,
-            Err(_) => is_inconclusive = true,
+            Err(err) => {
+                inconclusive_reason =
+                    Some(UnresolvedFlagReason::pick(inconclusive_reason, err.reason))
+            }
         }
     }
 
-    if is_inconclusive {
-        return Err(InconclusiveMatchError::new(
+    if let Some(reason) = inconclusive_reason {
+        return Err(InconclusiveMatchError::with_reason(
             "Can't determine if feature flag is enabled or not with given properties",
+            reason,
         ));
     }
 
     Ok(FlagValue::Boolean(false))
+}
+
+fn keep_higher_precedence(
+    current: Option<InconclusiveMatchError>,
+    new: InconclusiveMatchError,
+) -> InconclusiveMatchError {
+    match current {
+        Some(current)
+            if UnresolvedFlagReason::pick(Some(current.reason), new.reason) == current.reason =>
+        {
+            current
+        }
+        _ => new,
+    }
 }
 
 /// Match a property with additional context for cohorts and flag dependencies.
@@ -1488,6 +1583,12 @@ fn match_property_group_values(
             Ok(false) if is_and => decisive_result = Some(false),
             Ok(_) => {}
             Err(error) if error.requires_server_evaluation() => return Err(error),
+            Err(CohortMatchError::Inconclusive(error)) => {
+                inconclusive = Some(CohortMatchError::Inconclusive(keep_higher_precedence(
+                    inconclusive.map(CohortMatchError::into_inconclusive),
+                    error,
+                )))
+            }
             Err(error) => inconclusive = Some(error),
         }
     }
@@ -1554,10 +1655,21 @@ fn match_flag_dependency_property(
         InconclusiveMatchError::new(&format!("Flag '{}' not found in local cache", flag_key))
     })?;
 
+    // The dependency's own cause belongs to the dependency's entry.
+    let unresolved_dependency = |error: InconclusiveMatchError| {
+        InconclusiveMatchError::with_reason(
+            &format!(
+                "Flag dependency '{flag_key}' is unresolved: {}",
+                error.message
+            ),
+            UnresolvedFlagReason::UnresolvedDependency,
+        )
+    };
+
     // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
     // Group context flows through from the outer ctx so dependent group/mixed flags can resolve.
     let flag_value = match metadata_result(flag, scope.person_properties, scope.metadata) {
-        Some(result) => result?,
+        Some(result) => result.map_err(unresolved_dependency)?,
         None => match_feature_flag_with_version(
             flag,
             ctx.distinct_id,
@@ -1566,7 +1678,8 @@ fn match_flag_dependency_property(
             ctx.group_properties,
             ctx.group_type_mapping,
             ctx.property_matching_version,
-        )?,
+        )
+        .map_err(unresolved_dependency)?,
     };
 
     // Compare the flag value with the expected value
@@ -1867,7 +1980,7 @@ fn match_property_with_version(
     let value = match properties.get(&property.key) {
         Some(v) => v,
         None => {
-            return Err(InconclusiveMatchError::new(&format!(
+            return Err(InconclusiveMatchError::missing_context(&format!(
                 "Property '{}' not found in provided properties",
                 property.key
             )));
@@ -1877,7 +1990,7 @@ fn match_property_with_version(
     let parse_property_semver = || {
         let prop_str = value_to_string(value);
         parse_semver(&prop_str).ok_or_else(|| {
-            InconclusiveMatchError::new(&format!(
+            InconclusiveMatchError::missing_context(&format!(
                 "Unable to parse property semver value for '{}': {:?}",
                 property.key, value
             ))
@@ -1954,7 +2067,7 @@ fn match_property_with_version(
             })?;
 
             let prop_date = parse_date_value(value).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
+                InconclusiveMatchError::missing_context(&format!(
                     "Unable to parse property date value for '{}': {:?}",
                     property.key, value
                 ))
@@ -3236,8 +3349,9 @@ mod tests {
                 "properties": [{"key": "created_at", "type": property_type, "operator": "is_date_after", "value": "2025-01-01"}],
                 "rollout_percentage": 100
             }]));
-            assert!(
-                evaluate(&flag, &created_in_2026()).is_err(),
+            assert_eq!(
+                evaluate(&flag, &created_in_2026()).unwrap_err().reason,
+                UnresolvedFlagReason::UnsupportedDefinition,
                 "{}",
                 property_type
             );
@@ -5735,5 +5849,222 @@ mod tests {
         let properties = HashMap::from([("region".to_string(), json!("US"))]);
         let result = evaluate_both_ways(&flag, "user-0", &properties);
         assert!(result.is_err(), "expected inconclusive, got {:?}", result);
+    }
+
+    fn context_flag(
+        flag: &FeatureFlag,
+        person_properties: &HashMap<String, serde_json::Value>,
+        cohorts: &HashMap<String, CohortDefinition>,
+        flags: &HashMap<String, FeatureFlag>,
+        metadata: &DefinitionMetadataMap,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts,
+            flags,
+            distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
+        };
+        match_flag_definition(flag, person_properties, &ctx, metadata)
+    }
+
+    fn unresolved_reason(
+        flag: &FeatureFlag,
+        person_properties: &HashMap<String, serde_json::Value>,
+    ) -> UnresolvedFlagReason {
+        context_flag(
+            flag,
+            person_properties,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_err()
+        .reason
+    }
+
+    #[test]
+    fn unresolved_reason_names_the_cause() {
+        let plan_pro =
+            json!({"key": "plan", "type": "person", "operator": "exact", "value": "pro"});
+        let static_cohort = json!({"key": "id", "type": "cohort", "value": 99});
+        let no_properties = HashMap::new();
+        let enterprise = HashMap::from([("plan".to_string(), json!("enterprise"))]);
+
+        let cases = [
+            (
+                "missing property",
+                json!([plan_pro]),
+                no_properties.clone(),
+                UnresolvedFlagReason::MissingContext,
+            ),
+            (
+                "unknown operator",
+                json!([{"key": "plan", "type": "person", "operator": "future_op", "value": "pro"}]),
+                enterprise.clone(),
+                UnresolvedFlagReason::UnsupportedDefinition,
+            ),
+            (
+                "static cohort",
+                json!([static_cohort]),
+                no_properties.clone(),
+                UnresolvedFlagReason::UnsupportedDefinition,
+            ),
+            (
+                "static cohort beats missing property",
+                json!([plan_pro, static_cohort]),
+                no_properties.clone(),
+                UnresolvedFlagReason::UnsupportedDefinition,
+            ),
+            (
+                "missing property listed first still loses to static cohort",
+                json!([static_cohort, plan_pro]),
+                no_properties.clone(),
+                UnresolvedFlagReason::UnsupportedDefinition,
+            ),
+            (
+                "person_metadata filter",
+                json!([{"key": "created_at", "type": "person_metadata", "operator": "is_date_after", "value": "2025-01-01"}]),
+                no_properties.clone(),
+                UnresolvedFlagReason::UnsupportedDefinition,
+            ),
+        ];
+        for (label, properties, person_properties, expected) in cases {
+            let flag =
+                flag_with_groups(json!([{ "properties": properties, "rollout_percentage": 100 }]));
+            assert_eq!(
+                unresolved_reason(&flag, &person_properties),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_reason_takes_the_highest_precedence_across_conditions() {
+        let flag = flag_with_groups(json!([
+            {"properties": [{"key": "plan", "type": "person", "operator": "exact", "value": "pro"}], "rollout_percentage": 100},
+            {"properties": [{"key": "id", "type": "cohort", "value": 99}], "rollout_percentage": 100},
+            {"properties": [{"key": "email", "type": "person", "operator": "exact", "value": "a@b.c"}], "rollout_percentage": 100}
+        ]));
+        assert_eq!(
+            unresolved_reason(&flag, &HashMap::new()),
+            UnresolvedFlagReason::UnsupportedDefinition
+        );
+    }
+
+    #[test]
+    fn unresolved_reason_in_a_cohort_takes_the_highest_precedence() {
+        let cohorts = cohort_7(json!([
+            {"key": "plan", "type": "person", "operator": "exact", "value": "pro"},
+            {"key": "created_at", "type": "person_metadata", "operator": "is_date_after", "value": "2025-01-01"}
+        ]));
+        let flag = flag_with_groups(json!([{
+            "properties": [{"key": "id", "type": "cohort", "value": 7}],
+            "rollout_percentage": 100
+        }]));
+        let error = context_flag(
+            &flag,
+            &HashMap::new(),
+            &cohorts,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::UnsupportedDefinition);
+
+        let cohorts = cohort_7(json!([
+            {"key": "plan", "type": "person", "operator": "exact", "value": "pro"}
+        ]));
+        let error = context_flag(
+            &flag,
+            &HashMap::new(),
+            &cohorts,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::MissingContext);
+    }
+
+    #[test]
+    fn unresolved_reason_for_flag_dependencies() {
+        let dependent = flag_with_groups(json!([{
+            "properties": [{"key": "$feature/checkout", "type": "flag", "operator": "exact", "value": true}],
+            "rollout_percentage": 100
+        }]));
+
+        let error = context_flag(
+            &dependent,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.reason,
+            UnresolvedFlagReason::UnsupportedDefinition,
+            "missing definition"
+        );
+
+        let checkout: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+        }))
+        .unwrap();
+        let flags = HashMap::from([("checkout".to_string(), checkout)]);
+        let metadata = HashMap::from([(
+            "checkout".to_string(),
+            DefinitionMetadata {
+                feature_enrollment: false,
+                ensure_experience_continuity: true,
+            },
+        )]);
+        let error = context_flag(
+            &dependent,
+            &HashMap::new(),
+            &HashMap::new(),
+            &flags,
+            &metadata,
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, UnresolvedFlagReason::UnresolvedDependency);
+
+        let checkout_error = context_flag(
+            &flags["checkout"],
+            &HashMap::new(),
+            &HashMap::new(),
+            &flags,
+            &metadata,
+        )
+        .unwrap_err();
+        assert_eq!(
+            checkout_error.reason,
+            UnresolvedFlagReason::ExperienceContinuity
+        );
+    }
+
+    #[test]
+    fn unresolved_reason_wire_names() {
+        assert_eq!(
+            UnresolvedFlagReason::ExperienceContinuity.as_str(),
+            "experience_continuity"
+        );
+        assert_eq!(
+            UnresolvedFlagReason::UnsupportedDefinition.to_string(),
+            "unsupported_definition"
+        );
+        assert_eq!(
+            UnresolvedFlagReason::UnresolvedDependency.as_str(),
+            "unresolved_dependency"
+        );
+        assert_eq!(
+            UnresolvedFlagReason::MissingContext.as_str(),
+            "missing_context"
+        );
     }
 }
