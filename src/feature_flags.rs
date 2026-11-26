@@ -781,6 +781,15 @@ impl KnownAbsentProperties {
     }
 }
 
+impl KnownAbsentProperties {
+    fn person_keys(&self) -> KnownAbsentKeys<'_> {
+        KnownAbsentKeys {
+            filter_type: "person",
+            keys: &self.person,
+        }
+    }
+}
+
 /// The known-absent keys that apply to one condition, with the filter type
 /// they resolve. Person keys resolve only `type: "person"` filters, and a
 /// group type's keys resolve only `type: "group"` filters that read that
@@ -1153,10 +1162,7 @@ fn resolve_condition_target<'a>(
         None => ConditionTarget::Use {
             bucketing: distinct_id.to_string(),
             properties: person_properties,
-            known_absent_keys: Some(KnownAbsentKeys {
-                filter_type: "person",
-                keys: &known_absent.person,
-            }),
+            known_absent_keys: Some(known_absent.person_keys()),
         },
         Some(idx) => {
             let Some((group_type, group_key)) = usable_group_key(idx, groups, group_type_mapping)
@@ -1205,6 +1211,7 @@ enum FilterSource<'a> {
 /// `PropertyContext::resolve_for_filter` and `filter_needs_partial_props`.
 struct FilterSources<'a> {
     condition_aggregation: Option<i32>,
+    person_properties: &'a HashMap<String, serde_json::Value>,
     groups: &'a HashMap<String, String>,
     group_properties: &'a HashMap<String, HashMap<String, serde_json::Value>>,
     group_type_mapping: &'a HashMap<String, String>,
@@ -1219,8 +1226,18 @@ impl<'a> FilterSources<'a> {
         filter_index: usize,
         property: &Property,
     ) -> FilterSource<'a> {
-        if property.property_type.as_deref() != Some("group") {
-            return FilterSource::Condition;
+        match property.property_type.as_deref() {
+            // A person filter reads person properties whatever the condition
+            // aggregates on.
+            Some("person") if self.condition_aggregation.is_some() => {
+                return FilterSource::Properties {
+                    properties: self.person_properties,
+                    known_absent_keys: Some(self.known_absent.person_keys()),
+                    missing_is_absent: false,
+                };
+            }
+            Some("group") => {}
+            _ => return FilterSource::Condition,
         }
         match self
             .definition
@@ -1694,6 +1711,7 @@ where
 
         let filter_sources = FilterSources {
             condition_aggregation: aggregation,
+            person_properties,
             groups,
             group_properties,
             group_type_mapping,
@@ -1819,8 +1837,8 @@ fn match_cohort_property(
     let cohort_id = cohort_id_to_string(&property.value)
         .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string or number"))?;
 
-    // Cohorts hold person filters, so a cohort in a group condition gets no
-    // known-absent keys.
+    // A cohort in a group condition gets no group known-absent keys. Its
+    // person leaves read the person keys on their own.
     let cohort_ctx = PropertyMatchContext {
         evaluation: ctx.evaluation,
         person_properties: ctx.person_properties,
@@ -2063,16 +2081,28 @@ fn match_property_group_values(
             // A cohort filter nested inside another cohort.
             match_nested_cohort(value, properties, ctx, active_cohorts, resolution_depth + 1)
         } else {
-            // Leaf property filter.
+            // Leaf property filter. A person leaf reads person properties
+            // whatever the condition aggregates on.
             match serde_json::from_value::<CohortProperty>(value.clone()) {
-                Ok(prop) => match_property_in_context(
-                    &prop.property,
-                    properties,
-                    &PropertyMatchContext {
+                Ok(prop) => {
+                    let leaf_ctx = PropertyMatchContext {
                         nesting_depth: resolution_depth + 1,
                         ..*ctx
-                    },
-                )
+                    };
+                    let (properties, leaf_ctx) =
+                        if prop.property.property_type.as_deref() == Some("person") {
+                            (
+                                ctx.person_properties,
+                                PropertyMatchContext {
+                                    known_absent_keys: Some(ctx.known_absent.person_keys()),
+                                    ..leaf_ctx
+                                },
+                            )
+                        } else {
+                            (properties, leaf_ctx)
+                        };
+                    match_property_in_context(&prop.property, properties, &leaf_ctx)
+                }
                 .map(|matches| matches != prop.negation)
                 .map_err(CohortMatchError::Inconclusive),
                 Err(e) => Err(CohortMatchError::InvalidDefinition(

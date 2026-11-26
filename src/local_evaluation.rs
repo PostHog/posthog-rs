@@ -1583,4 +1583,136 @@ mod condition_filter_source_tests {
             json!(1)
         );
     }
+
+    /// An `organization` flag whose condition holds a person filter on `plan`,
+    /// at the top or as a cohort leaf.
+    fn organization_flag_with_a_person_filter(filter: serde_json::Value) -> serde_json::Value {
+        json!({
+            "key": "org-pro",
+            "active": true,
+            "filters": {
+                "aggregation_group_type_index": 0,
+                "groups": [{"properties": [filter], "rollout_percentage": 100}]
+            }
+        })
+    }
+
+    fn person_plan_pro() -> serde_json::Value {
+        json!({"key": "plan", "value": "pro", "operator": "exact", "type": "person"})
+    }
+
+    fn person_in_cohort() -> serde_json::Value {
+        json!({"key": "id", "value": 1, "operator": "in", "type": "cohort"})
+    }
+
+    fn free_person_in_a_pro_organization() -> Inputs {
+        Inputs {
+            person_properties: props(&[("plan", json!("free"))]),
+            groups: HashMap::from([("organization".to_string(), "org-1".to_string())]),
+            group_properties: HashMap::from([(
+                "organization".to_string(),
+                props(&[("plan", json!("pro"))]),
+            )]),
+            ..Inputs::default()
+        }
+    }
+
+    #[test]
+    fn person_filter_in_a_group_condition_reads_person_properties() {
+        for filter in [person_plan_pro(), person_in_cohort()] {
+            let evaluator = evaluator(
+                vec![
+                    organization_flag_with_a_person_filter(filter.clone()),
+                    json!({
+                        "key": "dependent",
+                        "active": true,
+                        "filters": {"groups": [{
+                            "properties": [{"key": "$feature/org-pro", "value": true, "operator": "exact", "type": "flag"}],
+                            "rollout_percentage": 100
+                        }]}
+                    }),
+                ],
+                json!({"0": "organization"}),
+            );
+            for (person_plan, expected) in [("free", false), ("pro", true)] {
+                let mut inputs = free_person_in_a_pro_organization();
+                inputs.person_properties = props(&[("plan", json!(person_plan))]);
+                for key in ["org-pro", "dependent"] {
+                    assert_eq!(
+                        evaluate(&evaluator, key, &inputs),
+                        Some(FlagValue::Boolean(expected)),
+                        "{key}, person plan {person_plan}, filter {filter}"
+                    );
+                }
+                let direct = evaluator
+                    .evaluate_flag(
+                        "org-pro",
+                        "user-1",
+                        &inputs.person_properties,
+                        &inputs.groups,
+                        &inputs.group_properties,
+                    )
+                    .ok()
+                    .flatten();
+                assert_eq!(
+                    direct,
+                    Some(FlagValue::Boolean(expected)),
+                    "evaluate_flag, person plan {person_plan}, filter {filter}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn person_filter_in_a_group_condition_reads_the_person_known_absent_keys() {
+        let filter = json!({"key": "plan", "operator": "is_not_set", "type": "person"});
+        let mut cohort_flag = organization_flag_with_a_person_filter(person_in_cohort());
+        cohort_flag["key"] = json!("org-cohort");
+        let response: LocalEvaluationResponse = serde_json::from_value(json!({
+            "flags": [organization_flag_with_a_person_filter(filter.clone()), cohort_flag],
+            "group_type_mapping": {"0": "organization"},
+            "cohorts": {"1": {"type": "AND", "values": [filter]}}
+        }))
+        .unwrap();
+        let cache = FlagCache::new();
+        cache.update(response);
+        let evaluator = LocalEvaluator::new(cache);
+        let inputs = Inputs {
+            person_properties: Properties::new(),
+            person_keys_known_absent: vec!["plan".to_string()],
+            ..free_person_in_a_pro_organization()
+        };
+
+        for key in ["org-pro", "org-cohort"] {
+            assert_eq!(
+                evaluate(&evaluator, key, &inputs),
+                Some(FlagValue::Boolean(true)),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_filter_and_group_cohort_leaf_in_a_group_condition_read_the_group() {
+        let filter = json!({"key": "plan", "value": "pro", "operator": "exact", "type": "group"});
+        let mut cohort_flag = organization_flag_with_a_person_filter(person_in_cohort());
+        cohort_flag["key"] = json!("org-cohort");
+        let response: LocalEvaluationResponse = serde_json::from_value(json!({
+            "flags": [organization_flag_with_a_person_filter(filter.clone()), cohort_flag],
+            "group_type_mapping": {"0": "organization"},
+            "cohorts": {"1": {"type": "AND", "values": [filter]}}
+        }))
+        .unwrap();
+        let cache = FlagCache::new();
+        cache.update(response);
+        let evaluator = LocalEvaluator::new(cache);
+
+        for key in ["org-pro", "org-cohort"] {
+            assert_eq!(
+                evaluate(&evaluator, key, &free_person_in_a_pro_organization()),
+                Some(FlagValue::Boolean(true)),
+                "{key}"
+            );
+        }
+    }
 }
