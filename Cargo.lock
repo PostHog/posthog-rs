@@ -1668,7 +1668,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "posthog"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "axum",
  "backtrace",
@@ -1711,14 +1711,14 @@ dependencies = [
 
 [[package]]
 name = "posthog-rs"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "posthog",
 ]
 
 [[package]]
 name = "posthog-rs-ffi"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "httpmock",

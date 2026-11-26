@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 1.7.1 — 2026-11-26
+
+### Patch changes
+
+- Updated dependencies: posthog@1.7.1
+
 ## 1.7.0 — 2026-11-26
 
 ### Patch changes

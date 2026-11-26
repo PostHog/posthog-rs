@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 1.7.1 — 2026-11-26
+
+### Patch changes
+
+- [89f6e47](https://github.com/posthog/posthog-rs/commit/89f6e47ac8861a9ada64210c06f6e7ef13f36c35) Local flag evaluation treats a filter type it cannot evaluate, such as a cohort's `person_metadata` filter on first seen, as inconclusive so the flag falls back to the server, instead of matching it against a person property with the same key. — Thanks @srednoff888-art for your first contribution 🎉!
+
 ## 1.7.0 — 2026-11-26
 
 ### Minor changes
