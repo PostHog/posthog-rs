@@ -1,6 +1,6 @@
 //! A condition aggregated by a group with no usable key is skipped on its own, as the
-//! flags service does: the flag's other conditions still decide it. A holdout on such a
-//! flag can't be evaluated locally, since the service hashes an empty identifier for it.
+//! flags service does: the flag's other conditions still decide it. This SDK doesn't
+//! evaluate holdouts, so a flag whose holdout excludes anyone is inconclusive.
 
 use posthog::{FlagCache, FlagValue, LocalEvaluationResponse, LocalEvaluator};
 use serde_json::{json, Value};
@@ -63,6 +63,36 @@ fn company_flag(holdout: Option<Value>) -> Value {
     flag
 }
 
+/// A person flag on `plan = pro`, with the given holdout.
+fn person_flag(holdout: Option<Value>) -> Value {
+    let mut flag = json!({
+        "key": "person-flag",
+        "active": true,
+        "filters": {
+            "groups": [{
+                "properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}],
+                "rollout_percentage": 100
+            }]
+        }
+    });
+    if let Some(holdout) = holdout {
+        flag["filters"]["holdout"] = holdout;
+    }
+    flag
+}
+
+/// Holdouts that exclude no one: 0%, and malformed ones.
+fn holdouts_that_exclude_no_one() -> Vec<Value> {
+    vec![
+        json!({"id": 7, "exclusion_percentage": 0}),
+        json!({"id": 7}),
+        json!({"id": 7, "exclusion_percentage": "50"}),
+        json!({"id": 7, "exclusion_percentage": null}),
+        json!("holdout"),
+        Value::Null,
+    ]
+}
+
 /// A person flag that depends on `parent`.
 fn depends_on(parent: &str) -> Value {
     json!({
@@ -100,6 +130,15 @@ fn groups_without_a_usable_key() -> [HashMap<String, String>; 2] {
     ]
 }
 
+/// Empty properties for every group passed, so a group condition doesn't stay
+/// inconclusive for lack of group properties.
+fn empty_group_properties(groups: &HashMap<String, String>) -> HashMap<String, Properties> {
+    groups
+        .keys()
+        .map(|group_type| (group_type.clone(), HashMap::new()))
+        .collect()
+}
+
 /// `None` when the flag is inconclusive. Every way to evaluate it must agree.
 fn evaluate(
     definitions: Value,
@@ -108,7 +147,7 @@ fn evaluate(
     groups: &HashMap<String, String>,
 ) -> Option<FlagValue> {
     let evaluator = evaluator(definitions);
-    let group_properties = HashMap::new();
+    let group_properties = empty_group_properties(groups);
     let single = evaluator
         .evaluate_flag(key, "user-1", person_properties, groups, &group_properties)
         .ok()
@@ -238,20 +277,120 @@ fn holdout_on_a_group_flag_without_a_group_key_is_inconclusive() {
 }
 
 #[test]
-fn holdout_on_a_group_flag_with_a_group_key_is_unchanged() {
+fn holdout_on_a_group_flag_with_a_group_key_is_inconclusive() {
+    let holdout = json!({"id": 7, "exclusion_percentage": 50});
     let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
-    let evaluate = |holdout| {
+    assert_eq!(
         evaluate(
-            definitions(vec![company_flag(holdout)]),
+            definitions(vec![company_flag(Some(holdout.clone()))]),
             "company-flag",
             &plan("pro"),
-            &groups,
+            &groups
+        ),
+        None
+    );
+    assert_eq!(
+        evaluate(
+            definitions(vec![
+                company_flag(Some(holdout)),
+                depends_on("company-flag")
+            ]),
+            "dependent",
+            &plan("pro"),
+            &groups
+        ),
+        None,
+        "dependent"
+    );
+}
+
+#[test]
+fn holdout_on_a_person_flag_is_inconclusive() {
+    let holdout = json!({"id": 7, "exclusion_percentage": 50});
+    for person_plan in ["pro", "free"] {
+        assert_eq!(
+            evaluate(
+                definitions(vec![person_flag(Some(holdout.clone()))]),
+                "person-flag",
+                &plan(person_plan),
+                &HashMap::new()
+            ),
+            None,
+            "plan {person_plan}"
+        );
+        assert_eq!(
+            evaluate(
+                definitions(vec![
+                    person_flag(Some(holdout.clone())),
+                    depends_on("person-flag")
+                ]),
+                "dependent",
+                &plan(person_plan),
+                &HashMap::new()
+            ),
+            None,
+            "dependent, plan {person_plan}"
+        );
+    }
+}
+
+#[test]
+fn holdout_that_excludes_no_one_is_ignored() {
+    let company = HashMap::from([("company".to_string(), "acme".to_string())]);
+    for holdout in holdouts_that_exclude_no_one() {
+        for (person_plan, expected) in [("pro", true), ("free", false)] {
+            assert_eq!(
+                evaluate(
+                    definitions(vec![person_flag(Some(holdout.clone()))]),
+                    "person-flag",
+                    &plan(person_plan),
+                    &HashMap::new()
+                ),
+                Some(FlagValue::Boolean(expected)),
+                "person flag, holdout {holdout}, plan {person_plan}"
+            );
+        }
+        assert_eq!(
+            evaluate(
+                definitions(vec![company_flag(Some(holdout.clone()))]),
+                "company-flag",
+                &plan("pro"),
+                &company
+            ),
+            Some(FlagValue::Boolean(true)),
+            "company flag, holdout {holdout}"
+        );
+        for groups in groups_without_a_usable_key() {
+            assert_eq!(
+                evaluate(
+                    definitions(vec![company_flag(Some(holdout.clone()))]),
+                    "company-flag",
+                    &plan("pro"),
+                    &groups
+                ),
+                Some(FlagValue::Boolean(false)),
+                "company flag, holdout {holdout}, groups {groups:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn feature_enrollment_decides_a_flag_with_a_holdout() {
+    let mut flag = person_flag(Some(json!({"id": 7, "exclusion_percentage": 50})));
+    flag["filters"]["feature_enrollment"] = json!(true);
+    let enrolled = |value: Value| {
+        let mut properties = plan("pro");
+        properties.insert("$feature_enrollment/person-flag".to_string(), value);
+        evaluate(
+            definitions(vec![flag.clone()]),
+            "person-flag",
+            &properties,
+            &HashMap::new(),
         )
     };
-    assert_eq!(
-        evaluate(Some(json!({"id": 7, "exclusion_percentage": 50}))),
-        evaluate(None)
-    );
+    assert_eq!(enrolled(json!(true)), Some(FlagValue::Boolean(true)));
+    assert_eq!(enrolled(json!(false)), Some(FlagValue::Boolean(false)));
 }
 
 #[test]
@@ -335,6 +474,7 @@ mod client {
         let mut options = EvaluateFlagsOptions::default();
         options.flag_keys = Some(flag_keys.iter().map(|key| key.to_string()).collect());
         options.person_properties = Some(plan(person_plan));
+        options.group_properties = Some(empty_group_properties(&groups));
         options.groups = Some(groups);
         options.only_evaluate_locally = only_evaluate_locally;
         options
@@ -430,5 +570,51 @@ mod client {
             Some(FlagValue::String("holdout-7".to_string()))
         );
         remote.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn holdout_with_a_group_key_or_on_a_person_flag_falls_back_to_the_server() {
+        let holdout = json!({"id": 7, "exclusion_percentage": 50});
+        let company = HashMap::from([("company".to_string(), "acme".to_string())]);
+        for (flag, key, groups) in [
+            (company_flag(Some(holdout.clone())), "company-flag", company),
+            (
+                person_flag(Some(holdout.clone())),
+                "person-flag",
+                HashMap::new(),
+            ),
+        ] {
+            let server = MockServer::start_async().await;
+            let remote = server.mock(|when, then| {
+                when.method(POST).path("/flags/");
+                then.status(200).json_body(json!({
+                    "flags": {key: {
+                        "key": key, "enabled": true, "variant": "holdout-7",
+                        "metadata": {"id": 1, "version": 1}
+                    }},
+                    "errorsWhileComputingFlags": false,
+                    "requestId": "request-1"
+                }));
+            });
+            let client = client(&server, vec![flag]).await;
+
+            let local = client
+                .evaluate_flags("user-1", options(&[key], "pro", groups.clone(), true))
+                .await
+                .unwrap();
+            assert_eq!(local.get_flag(key), None, "{key}");
+            remote.assert_calls(0);
+
+            let flags = client
+                .evaluate_flags("user-1", options(&[key], "pro", groups, false))
+                .await
+                .unwrap();
+            assert_eq!(
+                flags.get_flag(key),
+                Some(FlagValue::String("holdout-7".to_string())),
+                "{key}"
+            );
+            remote.assert_calls(1);
+        }
     }
 }

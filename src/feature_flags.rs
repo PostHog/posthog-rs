@@ -1166,7 +1166,8 @@ fn resolve_condition_target<'a>(
 /// person aggregation (JSON `null` under a group flag) or a holdout, so a
 /// condition without its own aggregation uses the flag's, and holdouts are
 /// ignored. Definitions loaded by [`LocalEvaluator`](crate::LocalEvaluator)
-/// follow the flags service for both.
+/// follow the flags service for explicit person conditions, and are
+/// inconclusive when their holdout excludes anyone.
 ///
 /// # Errors
 ///
@@ -1296,7 +1297,8 @@ where
 /// person aggregation (JSON `null` under a group flag) or a holdout, so a
 /// condition without its own aggregation uses the flag's, and holdouts are
 /// ignored. Definitions loaded by [`LocalEvaluator`](crate::LocalEvaluator)
-/// follow the flags service for both.
+/// follow the flags service for explicit person conditions, and are
+/// inconclusive when their holdout excludes anyone.
 ///
 /// # Errors
 ///
@@ -1479,17 +1481,19 @@ where
     let definition = definition.unwrap_or(&no_metadata);
     let flag_aggregation = flag.filters.aggregation_group_type_index;
 
-    // The flags service checks the holdout first and hashes the flag-level
-    // identifier for it. Without a usable group key it hashes an empty
-    // identifier, which local evaluation doesn't copy, so only the server can
-    // tell whether the holdout catches the flag.
-    if definition.holdout_excludes()
-        && flag_aggregation
+    // The flags service checks the holdout before the release conditions, and
+    // this SDK doesn't evaluate holdouts, so only the server can tell whether
+    // the holdout catches the flag. Without a usable group key the cause is the
+    // missing context, which the message names first.
+    if definition.holdout_excludes() {
+        let message = if flag_aggregation
             .is_some_and(|index| usable_group_key(index, groups, group_type_mapping).is_none())
-    {
-        return Err(InconclusiveMatchError::new(
-            "Flag has a holdout and its group key is missing",
-        ));
+        {
+            "Flag has a holdout and its group key is missing"
+        } else {
+            "Flag has a holdout, which local evaluation doesn't support"
+        };
+        return Err(InconclusiveMatchError::new(message));
     }
 
     let mut is_inconclusive = false;
