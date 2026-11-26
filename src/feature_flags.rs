@@ -423,7 +423,8 @@ pub struct FeatureFlagCondition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "RawProperty")]
 pub struct Property {
-    /// The property key to match (e.g., "email", "country", "$feature/other-flag")
+    /// The property key to match (e.g., "email", "country"). For a flag
+    /// dependency (`type = "flag"`), the key of the referenced flag.
     pub key: String,
     /// The value to compare against. The presence operators (`"is_set"` and
     /// `"is_not_set"`) never read it, and the API may omit it for them; it
@@ -436,8 +437,9 @@ pub struct Property {
     /// `"is_not_set"`, `"is_date_before"`, `"is_date_after"`, and the
     /// `"semver_*"` operators used by PostHog version targeting.
     pub operator: String,
-    /// Property type. Use `Some("cohort")` for cohort membership checks; flag
-    /// dependency checks use a property key that starts with `$feature/`.
+    /// Property type. Use `Some("cohort")` for cohort membership checks and
+    /// `Some("flag")` with the `"flag_evaluates_to"` operator for flag
+    /// dependency checks.
     #[serde(rename = "type")]
     pub property_type: Option<String>,
 }
@@ -464,7 +466,12 @@ impl std::convert::TryFrom<RawProperty> for Property {
     fn try_from(raw: RawProperty) -> Result<Self, Self::Error> {
         let value = match raw.value {
             Some(value) => value,
-            None if matches!(raw.operator.as_str(), "is_set" | "is_not_set") => {
+            // A flag dependency without a value never matches, as on the server.
+            None if matches!(
+                raw.operator.as_str(),
+                "is_set" | "is_not_set" | "flag_evaluates_to"
+            ) =>
+            {
                 serde_json::Value::Null
             }
             // Any other operator compares against the value, so a filter
@@ -1043,14 +1050,32 @@ pub(crate) fn match_flag_definition(
     ctx: &EvaluationContext,
     metadata: &DefinitionMetadataMap,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    if let Some(result) = metadata_result(flag, person_properties, metadata) {
-        return result;
-    }
+    let path = DependencyPath {
+        flag_key: &flag.key,
+        parent: None,
+    };
     let scope = EvaluationScope {
         ctx,
         person_properties,
         metadata,
+        dependency_path: Some(&path),
     };
+    evaluate_flag_in_scope(flag, scope)
+}
+
+fn evaluate_flag_in_scope(
+    flag: &FeatureFlag,
+    scope: EvaluationScope,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    let EvaluationScope {
+        ctx,
+        person_properties,
+        metadata,
+        ..
+    } = scope;
+    if let Some(result) = metadata_result(flag, person_properties, metadata) {
+        return result;
+    }
     evaluate_feature_flag(
         flag,
         ctx.distinct_id,
@@ -1107,6 +1132,28 @@ struct EvaluationScope<'a> {
     /// The person's properties, also where the condition targets a group.
     person_properties: &'a HashMap<String, serde_json::Value>,
     metadata: &'a DefinitionMetadataMap,
+    /// The flag dependencies being resolved above this evaluation.
+    dependency_path: Option<&'a DependencyPath<'a>>,
+}
+
+/// One flag on the path of dependencies being resolved, linked to the flag
+/// that depends on it.
+struct DependencyPath<'a> {
+    flag_key: &'a str,
+    parent: Option<&'a DependencyPath<'a>>,
+}
+
+impl DependencyPath<'_> {
+    fn contains(&self, flag_key: &str) -> bool {
+        let mut path = Some(self);
+        while let Some(current) = path {
+            if current.flag_key == flag_key {
+                return true;
+            }
+            path = current.parent;
+        }
+        false
+    }
 }
 
 /// Shared feature flag evaluation engine. Public entry points differ only in
@@ -1206,8 +1253,8 @@ where
 /// Match a property with additional context for cohorts and flag dependencies.
 ///
 /// Use this when evaluating local feature flag conditions that can reference
-/// cohort membership (`type = "cohort"`) or another feature flag via
-/// `$feature/<flag-key>`.
+/// cohort membership (`type = "cohort"`) or another feature flag
+/// (`type = "flag"`).
 ///
 /// # Errors
 ///
@@ -1223,6 +1270,7 @@ pub fn match_property_with_context(
         // Not read without metadata.
         person_properties: properties,
         metadata: &HashMap::new(),
+        dependency_path: None,
     };
     match_property_in_scope(property, properties, scope)
 }
@@ -1232,18 +1280,34 @@ fn match_property_in_scope(
     properties: &HashMap<String, serde_json::Value>,
     scope: EvaluationScope,
 ) -> Result<bool, InconclusiveMatchError> {
-    // Check if this is a cohort membership check
-    if property.property_type.as_deref() == Some("cohort") {
-        return match_cohort_property(property, properties, scope);
+    match property.property_type.as_deref() {
+        Some("cohort") => match_cohort_property(property, properties, scope),
+        Some("flag") => match_flag_dependency_property(property, scope),
+        // Use the same snapshot version for direct and recursive cohort leaves.
+        _ => match_property_with_version(property, properties, scope.ctx.property_matching_version),
     }
+}
 
-    // Check if this is a flag dependency check
-    if property.key.starts_with("$feature/") {
-        return match_flag_dependency_property(property, scope);
+/// A `flag` leaf inside a cohort. The flags service doesn't resolve dependencies
+/// there: it matches the leaf's key against person properties, and
+/// `flag_evaluates_to`, which the property matcher rejects, never matches.
+fn match_cohort_flag_leaf(
+    property: &Property,
+    properties: &HashMap<String, serde_json::Value>,
+    scope: EvaluationScope,
+) -> Result<bool, InconclusiveMatchError> {
+    if property.operator == "flag_evaluates_to" {
+        return Ok(false);
     }
-
-    // Use the same snapshot version for direct and recursive cohort leaves.
-    match_property_with_version(property, properties, scope.ctx.property_matching_version)
+    let person_property = Property {
+        property_type: None,
+        ..property.clone()
+    };
+    match_property_with_version(
+        &person_property,
+        properties,
+        scope.ctx.property_matching_version,
+    )
 }
 
 /// Evaluate cohort membership referenced by a flag property (`type = "cohort"`).
@@ -1474,9 +1538,15 @@ fn match_property_group_values(
         } else {
             // Leaf property filter.
             match serde_json::from_value::<CohortProperty>(value.clone()) {
-                Ok(prop) => match_property_in_scope(&prop.property, properties, scope)
-                    .map(|matches| matches != prop.negation)
-                    .map_err(CohortMatchError::Inconclusive),
+                Ok(prop) => {
+                    let matches = if prop.property.property_type.as_deref() == Some("flag") {
+                        match_cohort_flag_leaf(&prop.property, properties, scope)
+                    } else {
+                        match_property_in_scope(&prop.property, properties, scope)
+                    };
+                    matches.map(|matches| matches != prop.negation)
+                }
+                .map_err(CohortMatchError::Inconclusive),
                 Err(e) => Err(CohortMatchError::InvalidDefinition(
                     InconclusiveMatchError::new(&format!("Unable to parse cohort property: {}", e)),
                 )),
@@ -1537,71 +1607,54 @@ fn match_nested_cohort(
     Ok(is_member != negation)
 }
 
-/// Evaluate flag dependency
+/// Evaluate a flag dependency (`type = "flag"`), as the flags service does: the
+/// referenced flag is evaluated with the same inputs as if it were requested
+/// directly, then its value is compared with the expected one.
 fn match_flag_dependency_property(
     property: &Property,
     scope: EvaluationScope,
 ) -> Result<bool, InconclusiveMatchError> {
-    let ctx = scope.ctx;
-
-    // Extract flag key from "$feature/flag-key"
-    let flag_key = property
-        .key
-        .strip_prefix("$feature/")
-        .ok_or_else(|| InconclusiveMatchError::new("Invalid flag dependency format"))?;
-
-    let flag = ctx.flags.get(flag_key).ok_or_else(|| {
-        InconclusiveMatchError::new(&format!("Flag '{}' not found in local cache", flag_key))
+    // The server rejects any other operator for every flag value.
+    if property.operator != "flag_evaluates_to" {
+        return Ok(false);
+    }
+    let flag_key = property.key.as_str();
+    let flag = scope.ctx.flags.get(flag_key).ok_or_else(|| {
+        InconclusiveMatchError::new(&format!("Flag '{flag_key}' not found in local cache"))
     })?;
-
-    // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
-    // Group context flows through from the outer ctx so dependent group/mixed flags can resolve.
-    let flag_value = match metadata_result(flag, scope.person_properties, scope.metadata) {
-        Some(result) => result?,
-        None => match_feature_flag_with_version(
-            flag,
-            ctx.distinct_id,
-            &HashMap::new(),
-            ctx.groups,
-            ctx.group_properties,
-            ctx.group_type_mapping,
-            ctx.property_matching_version,
-        )?,
+    if scope
+        .dependency_path
+        .is_some_and(|path| path.contains(flag_key))
+    {
+        return Err(InconclusiveMatchError::new(&format!(
+            "Circular dependency detected for flag '{flag_key}'"
+        )));
+    }
+    let path = DependencyPath {
+        flag_key,
+        parent: scope.dependency_path,
     };
+    let flag_value = evaluate_flag_in_scope(
+        flag,
+        EvaluationScope {
+            dependency_path: Some(&path),
+            ..scope
+        },
+    )?;
+    Ok(flag_value_matches(&flag_value, &property.value))
+}
 
-    // Compare the flag value with the expected value
-    let expected = &property.value;
-
-    let matches = match (&flag_value, expected) {
-        (FlagValue::Boolean(b), serde_json::Value::Bool(expected_b)) => b == expected_b,
-        (FlagValue::String(s), serde_json::Value::String(expected_s)) => {
-            s.eq_ignore_ascii_case(expected_s)
+/// The flags service's `match_flag_value_to_flag_filter`: `true` matches any
+/// enabled value, `false` only `false`, and a string only the identical variant.
+fn flag_value_matches(flag_value: &FlagValue, expected: &serde_json::Value) -> bool {
+    match expected {
+        serde_json::Value::Bool(true) => flag_value != &FlagValue::Boolean(false),
+        serde_json::Value::Bool(false) => flag_value == &FlagValue::Boolean(false),
+        serde_json::Value::String(expected) => {
+            matches!(flag_value, FlagValue::String(variant) if variant == expected)
         }
-        (FlagValue::Boolean(true), serde_json::Value::String(s)) => {
-            // Flag is enabled (boolean true) but we're checking for a specific variant
-            // This should not match
-            s.is_empty() || s == "true"
-        }
-        (FlagValue::Boolean(false), serde_json::Value::String(s)) => s.is_empty() || s == "false",
-        (FlagValue::String(s), serde_json::Value::Bool(true)) => {
-            // Flag returns a variant string, checking for "enabled" (any variant is enabled)
-            !s.is_empty()
-        }
-        (FlagValue::String(_), serde_json::Value::Bool(false)) => false,
         _ => false,
-    };
-
-    // Handle different operators
-    Ok(match property.operator.as_str() {
-        "exact" => matches,
-        "is_not" => !matches,
-        op => {
-            return Err(InconclusiveMatchError::new(&format!(
-                "Unknown flag dependency operator: {}",
-                op
-            )));
-        }
-    })
+    }
 }
 
 /// Parse a relative date string like "-7d", "7d", "-24h", "-2w", "-3m" or "-1y".
@@ -3941,10 +3994,10 @@ mod tests {
 
         // Property checking if prerequisite-flag is enabled
         let prop = Property {
-            key: "$feature/prerequisite-flag".to_string(),
+            key: "prerequisite-flag".to_string(),
             value: json!(true),
-            operator: "exact".to_string(),
-            property_type: None,
+            operator: "flag_evaluates_to".to_string(),
+            property_type: Some("flag".to_string()),
         };
 
         let properties = HashMap::new();
@@ -3983,10 +4036,10 @@ mod tests {
 
         // Property checking if disabled-flag is enabled
         let prop = Property {
-            key: "$feature/disabled-flag".to_string(),
+            key: "disabled-flag".to_string(),
             value: json!(true),
-            operator: "exact".to_string(),
-            property_type: None,
+            operator: "flag_evaluates_to".to_string(),
+            property_type: Some("flag".to_string()),
         };
 
         let properties = HashMap::new();
@@ -4040,10 +4093,10 @@ mod tests {
         );
 
         let mut prop = Property {
-            key: "$feature/ab-test-flag".to_string(),
+            key: "ab-test-flag".to_string(),
             value: json!("control"),
-            operator: "exact".to_string(),
-            property_type: None,
+            operator: "flag_evaluates_to".to_string(),
+            property_type: Some("flag".to_string()),
         };
 
         let properties = HashMap::new();
@@ -4068,10 +4121,10 @@ mod tests {
         let flags = HashMap::new(); // No flags defined
 
         let prop = Property {
-            key: "$feature/nonexistent-flag".to_string(),
+            key: "nonexistent-flag".to_string(),
             value: json!(true),
-            operator: "exact".to_string(),
-            property_type: None,
+            operator: "flag_evaluates_to".to_string(),
+            property_type: Some("flag".to_string()),
         };
 
         let properties = HashMap::new();
@@ -5210,10 +5263,10 @@ mod tests {
             filters: FeatureFlagFilters {
                 groups: vec![FeatureFlagCondition {
                     properties: vec![Property {
-                        key: "$feature/prerequisite".to_string(),
+                        key: "prerequisite".to_string(),
                         value: json!(true),
-                        operator: "exact".to_string(),
-                        property_type: None,
+                        operator: "flag_evaluates_to".to_string(),
+                        property_type: Some("flag".to_string()),
                     }],
                     rollout_percentage: Some(100.0),
                     variant: None,

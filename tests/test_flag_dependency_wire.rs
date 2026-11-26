@@ -1,0 +1,252 @@
+use posthog::{FlagCache, FlagValue, LocalEvaluationResponse, LocalEvaluator};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+
+fn evaluator(parent: Value, dependency: Value) -> LocalEvaluator {
+    let mut flags = vec![
+        json!({"key": "child", "active": true, "filters": {"groups": [
+            {"properties": [dependency], "rollout_percentage": 100}
+        ]}}),
+    ];
+    if !parent.is_null() {
+        flags.push(parent);
+    }
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(json!({"flags": flags})).unwrap();
+    let cache = FlagCache::new();
+    cache.update(response);
+    LocalEvaluator::new(cache)
+}
+
+fn wire(key: &str, value: Value, chain: Value) -> Value {
+    json!({"key": key, "type": "flag", "operator": "flag_evaluates_to", "value": value, "dependency_chain": chain})
+}
+
+fn plan_parent() -> Value {
+    json!({"key": "parent", "active": true, "filters": {"groups": [{"properties": [
+        {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+    ], "rollout_percentage": 100}]}})
+}
+
+fn variant_parent(variant: &str) -> Value {
+    json!({"key": "parent", "active": true, "filters": {
+        "groups": [{"properties": [], "rollout_percentage": 100, "variant": variant}],
+        "multivariate": {"variants": [
+            {"key": "test", "rollout_percentage": 50}, {"key": "control", "rollout_percentage": 50}
+        ]}
+    }})
+}
+
+fn child(evaluator: &LocalEvaluator, properties: Value) -> Result<Option<FlagValue>, String> {
+    let properties: HashMap<String, Value> = serde_json::from_value(properties).unwrap();
+    evaluator
+        .evaluate_flag(
+            "child",
+            "user",
+            &properties,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .map_err(|e| e.to_string())
+}
+
+const T: Option<FlagValue> = Some(FlagValue::Boolean(true));
+const F: Option<FlagValue> = Some(FlagValue::Boolean(false));
+
+// Spec: "Flag dependency filters compare evaluated values".
+#[test]
+fn server_shaped_dependency_compares_evaluated_values() {
+    let cases = [
+        ("test", json!(true), T),
+        ("test", json!("test"), T),
+        ("test", json!("Test"), F),
+        ("control", json!("test"), F),
+    ];
+    for (variant, expected, result) in cases {
+        let e = evaluator(
+            variant_parent(variant),
+            wire("parent", expected.clone(), json!(["parent"])),
+        );
+        assert_eq!(child(&e, json!({})), Ok(result), "{variant} vs {expected}");
+    }
+    let parent = json!({"key": "parent", "active": true, "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}});
+    for (expected, result) in [(json!(true), T), (json!(false), F)] {
+        let e = evaluator(
+            parent.clone(),
+            wire("parent", expected.clone(), json!(["parent"])),
+        );
+        assert_eq!(child(&e, json!({})), Ok(result), "true vs {expected}");
+    }
+}
+
+// Spec: the dependency evaluates with the same person context.
+#[test]
+fn server_shaped_dependency_sees_person_properties() {
+    let e = evaluator(
+        plan_parent(),
+        wire("parent", json!(true), json!(["parent"])),
+    );
+    assert_eq!(child(&e, json!({"plan": "pro"})), Ok(T));
+    assert_eq!(child(&e, json!({"plan": "free"})), Ok(F));
+}
+
+// Spec: "An inactive dependency resolves as false".
+#[test]
+fn inactive_dependency_resolves_as_false() {
+    let parent = json!({"key": "parent", "active": false, "filters": {"groups": []}});
+    let e = evaluator(
+        parent.clone(),
+        wire("parent", json!(false), json!(["parent"])),
+    );
+    assert_eq!(child(&e, json!({})), Ok(T));
+    let e = evaluator(parent, wire("parent", json!(true), json!(["parent"])));
+    assert_eq!(child(&e, json!({})), Ok(F));
+}
+
+// Spec: a missing definition or a cycle is inconclusive.
+#[test]
+fn missing_or_cyclic_dependency_is_inconclusive() {
+    let e = evaluator(Value::Null, wire("parent", json!(true), json!([])));
+    assert!(child(&e, json!({})).is_err());
+
+    let cyclic = json!({"key": "parent", "active": true, "filters": {"groups": [{"properties": [
+        wire("child", json!(true), json!([]))
+    ], "rollout_percentage": 100}]}});
+    let e = evaluator(cyclic, wire("parent", json!(true), json!([])));
+    assert!(child(&e, json!({})).is_err());
+}
+
+// The flags service rejects any operator other than `flag_evaluates_to`.
+#[test]
+fn another_operator_never_matches() {
+    let parent = json!({"key": "parent", "active": true, "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}});
+    for operator in ["exact", "is_not"] {
+        let filter = json!({"key": "parent", "type": "flag", "operator": operator, "value": true, "dependency_chain": ["parent"]});
+        let e = evaluator(parent.clone(), filter);
+        assert_eq!(child(&e, json!({})), Ok(F), "{operator}");
+    }
+    let mut no_value = wire("parent", json!(true), json!(["parent"]));
+    no_value.as_object_mut().unwrap().remove("value");
+    assert_eq!(child(&evaluator(parent, no_value), json!({})), Ok(F));
+}
+
+// `/flags/definitions` never sends `$feature/<key>`: such a filter is an
+// ordinary person property, as on the server.
+#[test]
+fn feature_prefix_key_is_a_person_property() {
+    let filter = json!({"key": "$feature/parent", "value": true, "operator": "exact"});
+    let e = evaluator(plan_parent(), filter);
+    assert_eq!(child(&e, json!({"$feature/parent": true})), Ok(T));
+    assert_eq!(
+        child(&e, json!({"$feature/parent": false, "plan": "pro"})),
+        Ok(F)
+    );
+    assert!(child(&e, json!({"plan": "pro"})).is_err());
+}
+
+// The flags service doesn't resolve a dependency inside a cohort: a
+// `flag_evaluates_to` leaf never matches, and any other operator matches the
+// leaf's key against person properties.
+#[test]
+fn flag_leaf_in_a_cohort_follows_the_flags_service() {
+    let cases = [
+        (
+            wire("parent", json!(true), json!(["parent"])),
+            json!({"plan": "pro"}),
+            F,
+        ),
+        (
+            wire("parent", json!(false), json!(["parent"])),
+            json!({"plan": "free"}),
+            F,
+        ),
+        (
+            json!({"key": "parent", "type": "flag", "operator": "flag_evaluates_to", "value": true, "negation": true}),
+            json!({"plan": "pro"}),
+            T,
+        ),
+        (
+            json!({"key": "parent", "type": "flag", "operator": "exact", "value": true}),
+            json!({"parent": true}),
+            T,
+        ),
+        (
+            json!({"key": "parent", "type": "flag", "operator": "exact", "value": true}),
+            json!({"parent": false}),
+            F,
+        ),
+    ];
+    for (leaf, properties, expected) in cases {
+        let response: LocalEvaluationResponse = serde_json::from_value(json!({
+            "flags": [
+                plan_parent(),
+                {"key": "child", "active": true, "filters": {"groups": [{"properties": [
+                    {"key": "id", "type": "cohort", "value": 1}
+                ], "rollout_percentage": 100}]}}
+            ],
+            "cohorts": {"1": {"type": "OR", "values": [{"type": "AND", "values": [leaf.clone()]}]}}
+        }))
+        .unwrap();
+        let cache = FlagCache::new();
+        cache.update(response);
+        let e = LocalEvaluator::new(cache);
+        assert_eq!(child(&e, properties), Ok(expected), "{leaf}");
+    }
+    let response: LocalEvaluationResponse = serde_json::from_value(json!({
+        "flags": [{"key": "child", "active": true, "filters": {"groups": [{"properties": [
+            {"key": "id", "type": "cohort", "value": 1}
+        ], "rollout_percentage": 100}]}}],
+        "cohorts": {"1": {"type": "AND", "values": [
+            {"key": "parent", "type": "flag", "operator": "exact", "value": true}
+        ]}}
+    }))
+    .unwrap();
+    let cache = FlagCache::new();
+    cache.update(response);
+    assert!(child(&LocalEvaluator::new(cache), json!({})).is_err());
+}
+
+// Spec: "A dependency is evaluated with its own aggregation".
+#[test]
+fn dependency_uses_its_own_aggregation() {
+    let response: LocalEvaluationResponse = serde_json::from_value(json!({
+        "group_type_mapping": {"0": "organization"},
+        "flags": [
+            {"key": "org-parent", "active": true, "filters": {"aggregation_group_type_index": 0, "groups": [
+                {"properties": [{"key": "region", "type": "group", "group_type_index": 0, "operator": "exact", "value": "us"}], "rollout_percentage": 100}
+            ]}},
+            {"key": "child", "active": true, "filters": {"groups": [{"properties": [
+                wire("org-parent", json!(true), json!(["org-parent"]))
+            ], "rollout_percentage": 100}]}}
+        ]
+    }))
+    .unwrap();
+    let cache = FlagCache::new();
+    cache.update(response);
+    let e = LocalEvaluator::new(cache);
+    let groups = HashMap::from([("organization".to_string(), "acme".to_string())]);
+    for (person_region, group_region, expected) in [("us", "eu", F), ("eu", "us", T)] {
+        let person = HashMap::from([("region".to_string(), json!(person_region))]);
+        let group = HashMap::from([(
+            "organization".to_string(),
+            HashMap::from([("region".to_string(), json!(group_region))]),
+        )]);
+        assert_eq!(
+            e.evaluate_flag("child", "user", &person, &groups, &group)
+                .ok(),
+            Some(expected)
+        );
+    }
+    // Without the organization group, the parent's only condition is skipped.
+    assert_eq!(
+        e.evaluate_flag(
+            "child",
+            "user",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new()
+        )
+        .ok(),
+        Some(F)
+    );
+}
