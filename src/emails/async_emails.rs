@@ -33,12 +33,12 @@ impl<'a> Emails<'a> {
     }
 
     /// Queues one email, from a template made in PostHog or from content your
-    /// code rendered.
+    /// code rendered, or schedules it with `scheduled_at`.
     ///
-    /// `Ok` means PostHog queued the email, not that it was delivered. Network
-    /// errors, rate limits, a send with the same idempotency key still in
-    /// flight and an unavailable service are retried with the same idempotency
-    /// key.
+    /// `Ok` means PostHog queued or scheduled the email, not that it was
+    /// delivered. Network errors, rate limits, a send with the same
+    /// idempotency key still in flight and an unavailable service are retried
+    /// with the same idempotency key.
     ///
     /// A [`CodeEmail`](crate::CodeEmail) with attachments first asks PostHog
     /// which files it lacks, uploads those straight to PostHog's file store,
@@ -48,8 +48,14 @@ impl<'a> Emails<'a> {
     ///
     /// Returns an [`EmailError`] when an argument check fails, the client is
     /// disabled, shut down or has no `secret_key`, the file store refused an
-    /// upload (`attachment_upload_failed`), or PostHog did not queue the
-    /// email.
+    /// upload (`attachment_upload_failed`), or PostHog did not accept the
+    /// email. A send with `scheduled_at` also fails with
+    /// `scheduling_requires_cloud` before any request when the app host isn't
+    /// PostHog Cloud, and with `schedule_not_confirmed` when PostHog accepted
+    /// the email without confirming its time: the error's
+    /// [`message_id`](EmailError::message_id) names the email. When PostHog
+    /// refuses `scheduled_at`, the send fails: the client never sends the
+    /// email now instead.
     ///
     /// # Examples
     ///
@@ -96,6 +102,7 @@ impl<'a> Emails<'a> {
             .tracker
             .admit(self.options.is_disabled(), shared::SEND_NOT_DONE)?;
         let connection = shared::connect(self.options, shared::SEND_KEY_NEEDED)?;
+        shared::check_schedulable(&prepared, &connection)?;
         let max_retries = prepared.max_retries.unwrap_or(connection.max_retries);
         if !prepared.attachments.is_empty() {
             self.upload(&prepared.attachments, &connection, max_retries)
@@ -103,6 +110,7 @@ impl<'a> Emails<'a> {
         }
         let headers = connection.headers(Some(&prepared.idempotency_key))?;
         let url = format!("{}{}", connection.app_host, shared::SEND_PATH);
+        let schedule = shared::Schedule::of(prepared.scheduled_at);
         let reply = self
             .request(
                 Method::POST,
@@ -113,13 +121,13 @@ impl<'a> Emails<'a> {
                 max_retries,
             )
             .await?;
-        let result = shared::parse_send_reply(reply)?;
-        shared::log_warnings(&result);
+        let result = shared::parse_send_reply(reply, schedule)?;
+        shared::log_warnings(&result.warnings);
         Ok(result)
     }
 
-    /// Reads the status of an email that [`send`](Self::send) queued, for 30
-    /// days after the send. A key with only `transactional_email:read` can read
+    /// Reads the status of an email that [`send`](Self::send) queued or
+    /// scheduled, for 30 days after the send. A key with only `transactional_email:read` can read
     /// statuses but not send.
     ///
     /// # Errors
@@ -278,7 +286,9 @@ where
         let Some(delay) = shared::retry_delay(&error, attempts, max_retries) else {
             return Err(error);
         };
-        tokio::time::sleep(delay).await;
+        if !shared::clock::skip_wait(delay) {
+            tokio::time::sleep(delay).await;
+        }
         attempts += 1;
     }
 }

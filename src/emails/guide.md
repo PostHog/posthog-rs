@@ -18,8 +18,8 @@ status of each email it sent. Get it with
 3. To send a template made in PostHog, open it under Workflows, make it
    transactional and copy its ID.
 
-A result means PostHog queued the email. Delivery happens later: read it
-with [`Emails::get`].
+A result means PostHog queued or scheduled the email. Delivery happens
+later: read it with [`Emails::get`].
 
 # Copies and attachments
 
@@ -59,6 +59,44 @@ another host, trusts the system's root certificates, and takes its proxy
 from the environment, such as `HTTPS_PROXY`. None of your client's own
 settings apply to uploads: a root certificate, TLS option or proxy set in
 code doesn't reach them.
+
+# Scheduling
+
+Pass a time to `scheduled_at` on a [`TemplateEmail`](crate::TemplateEmail)
+or a [`CodeEmail`](crate::CodeEmail) to send the email up to 7 days later.
+Only PostHog Cloud schedules emails: with any other app host, such as a
+self-hosted PostHog, a reverse proxy or a custom domain, the send fails with
+`scheduling_requires_cloud` before any request.
+
+The client rounds the time up to the next millisecond, so a scheduled email
+never goes out before its time. A scheduled result carries the time PostHog confirmed in
+`scheduled_at`, and its [`status`](crate::SendEmailResult::status) is
+[`SendEmailStatus::Scheduled`](crate::SendEmailStatus::Scheduled).
+[`Emails::get`] reads [`EmailDeliveryStatus::Scheduled`](crate::EmailDeliveryStatus::Scheduled)
+until the email goes out. A time that has already passed sends the email
+now, and the result's status is `Queued`. So is a time that, rounded up to
+the millisecond, is at most a minute after the send's first attempt, by this
+machine's clock, when PostHog sends the email now: such an email can go out up to a minute early. When PostHog
+accepts the email without confirming its time, the send fails with
+`schedule_not_confirmed` and the error's
+[`message_id`](crate::EmailError::message_id): read the
+email's status before you send it again. That includes PostHog sending the
+email now while its time is more than a minute after the send's first
+attempt, by this machine's clock. The error can also come for an email
+that went out on time: when this machine's clock runs over a minute slow,
+or when retries reach PostHog after a time due just over a minute after the
+first attempt.
+
+Work out the time once and reuse it on your own retries: the idempotency key
+covers the time in UTC to the millisecond, and a new time never moves an
+email. The same key with a time in another millisecond fails with
+`idempotency_key_reused`, but when PostHog can't look the key up in time it
+can answer with the new time, while the email still goes out at the first
+send's time. Two times that round to the same millisecond replay the same
+send, as long as the rest of the email is the same and PostHog still holds
+the key. To stop scheduled
+emails before they go out, disable the email's workflow in PostHog until
+they have reached a final status. That refuses every new send of it meanwhile.
 
 # Timeouts and retries
 

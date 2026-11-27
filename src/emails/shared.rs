@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as TimeDelta, SecondsFormat, Utc};
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT,
 };
@@ -60,6 +60,8 @@ pub(crate) struct PreparedSend {
     pub(crate) attachments: Vec<EmailAttachment>,
     pub(crate) idempotency_key: String,
     pub(crate) max_retries: Option<u32>,
+    /// The time the body carries, rounded up to the millisecond.
+    pub(crate) scheduled_at: Option<DateTime<Utc>>,
 }
 
 /// Where and how the client reaches the email API.
@@ -133,6 +135,13 @@ pub(crate) fn prepare_send(email: SendEmail) -> Result<PreparedSend, EmailError>
         body.insert("distinct_id".into(), Value::String(distinct_id));
     }
     body.insert("to".into(), Value::String(to));
+    let scheduled_at = options.scheduled_at.map(ceil_to_millisecond).transpose()?;
+    if let Some(at) = scheduled_at {
+        body.insert(
+            "scheduled_at".into(),
+            Value::String(at.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        );
+    }
     let idempotency_key = match options.idempotency_key {
         Some(key) => key,
         None => Uuid::new_v4().to_string(),
@@ -149,7 +158,66 @@ pub(crate) fn prepare_send(email: SendEmail) -> Result<PreparedSend, EmailError>
         attachments,
         idempotency_key,
         max_retries: options.max_retries,
+        scheduled_at,
     })
+}
+
+/// PostHog keeps a scheduled time to the millisecond, so a finer time rounds
+/// up: rounding down would send the email early.
+fn ceil_to_millisecond(at: DateTime<Utc>) -> Result<DateTime<Utc>, EmailError> {
+    let nanos = at.timestamp_subsec_nanos();
+    let rounded = nanos.next_multiple_of(1_000_000);
+    at.checked_add_signed(TimeDelta::nanoseconds(i64::from(rounded - nanos)))
+        .ok_or_else(|| {
+            EmailError::invalid(
+                "invalid_scheduled_at",
+                "scheduled_at is out of range.",
+                "scheduled_at",
+            )
+        })
+}
+
+/// Only PostHog Cloud schedules emails. A self-hosted PostHog from before
+/// scheduling would drop `scheduled_at` and send the email at once, which no
+/// check of its answer can undo, so the client refuses before any request.
+pub(crate) fn check_schedulable(
+    prepared: &PreparedSend,
+    connection: &Connection,
+) -> Result<(), EmailError> {
+    if prepared.scheduled_at.is_none() {
+        return Ok(());
+    }
+    // Check the URL the send goes to: the app host alone can parse to the root
+    // and still put a path in front of the endpoint.
+    let url = reqwest::Url::parse(&format!("{}{SEND_PATH}", connection.app_host)).ok();
+    let is_cloud = url.as_ref().is_some_and(|url| {
+        url.scheme() == "https"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none()
+            && url.path() == SEND_PATH
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && matches!(url.host_str(), Some("us.posthog.com" | "eu.posthog.com"))
+    });
+    if is_cloud {
+        return Ok(());
+    }
+    // The app host can carry a password or a token, so the message names only its host.
+    let target = url.as_ref().and_then(reqwest::Url::host_str).map_or_else(
+        || "a host that isn't PostHog Cloud".to_string(),
+        str::to_string,
+    );
+    Err(EmailError::new(
+        "scheduling_requires_cloud",
+        format!("Scheduled sends work only on PostHog Cloud (https://us.posthog.com or https://eu.posthog.com), and this client sends to {target}, so no email was sent."),
+    )
+    .with_field(Some("scheduled_at".to_string()))
+    .with_details(
+        Some("A PostHog that doesn't schedule emails would send this one at once.".into()),
+        Some("Send without scheduled_at, or send through PostHog Cloud's app host. A reverse proxy or custom domain can't schedule emails yet.".into()),
+        None,
+    ))
 }
 
 fn check_recipient(to: &str, options: &SendOptions) -> Result<(), EmailError> {
@@ -740,7 +808,106 @@ pub(crate) fn accept(reply: Reply) -> Result<Accepted, EmailError> {
     })
 }
 
-pub(crate) fn parse_send_reply(reply: Accepted) -> Result<SendEmailResult, EmailError> {
+/// The time the email clients read and the waits between their retries. On
+/// a thread that a test put on virtual time, a wait passes at once and moves
+/// the time on instead.
+pub(crate) mod clock {
+    use std::time::{Duration, SystemTime};
+
+    use chrono::{DateTime, Utc};
+
+    /// `Utc::now` panics on a clock set before 1970, so the time is converted
+    /// from `SystemTime` instead.
+    pub(crate) fn now() -> DateTime<Utc> {
+        #[cfg(test)]
+        let now = virtual_time::now().unwrap_or_else(SystemTime::now);
+        #[cfg(not(test))]
+        let now = SystemTime::now();
+        DateTime::from(now)
+    }
+
+    /// Moves virtual time on by `delay` and returns `true`, or returns
+    /// `false` when the caller must wait for real.
+    pub(crate) fn skip_wait(delay: Duration) -> bool {
+        #[cfg(test)]
+        if virtual_time::advance(delay) {
+            return true;
+        }
+        let _ = delay;
+        false
+    }
+
+    #[cfg(test)]
+    pub(crate) mod virtual_time {
+        use std::cell::Cell;
+        use std::time::{Duration, SystemTime};
+
+        use chrono::{DateTime, Utc};
+
+        thread_local! {
+            static NOW: Cell<Option<SystemTime>> = const { Cell::new(None) };
+        }
+
+        /// Puts this thread's email clients on virtual time from `start`
+        /// until the guard drops.
+        #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+        pub(crate) fn start_at(start: DateTime<Utc>) -> Guard {
+            NOW.with(|now| now.set(Some(start.into())));
+            Guard
+        }
+
+        #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+        pub(crate) struct Guard;
+
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                NOW.with(|now| now.set(None));
+            }
+        }
+
+        pub(super) fn now() -> Option<SystemTime> {
+            NOW.with(Cell::get)
+        }
+
+        pub(super) fn advance(delay: Duration) -> bool {
+            NOW.with(|now| match now.get() {
+                Some(time) => {
+                    now.set(Some(time + delay));
+                    true
+                }
+                None => false,
+            })
+        }
+    }
+}
+
+/// How far ahead of the client's clock a time may be and still read as
+/// passed when PostHog sends the email now, for clocks that drift apart.
+const CLOCK_SKEW_SECONDS: i64 = 60;
+
+/// A scheduled send's time, and when the client first sent it.
+pub(crate) struct Schedule {
+    pub(crate) at: DateTime<Utc>,
+    pub(crate) first_attempt_at: DateTime<Utc>,
+}
+
+impl Schedule {
+    /// Reads the clock only for a send that has a time.
+    pub(crate) fn of(scheduled_at: Option<DateTime<Utc>>) -> Option<Self> {
+        scheduled_at.map(|at| Self {
+            at,
+            first_attempt_at: clock::now(),
+        })
+    }
+}
+
+/// The send's result. For a send with `scheduled_at`, PostHog must confirm
+/// the time it waits for, or answer `queued` with `null` when the time had
+/// passed: any other acceptance may send the email at another time.
+pub(crate) fn parse_send_reply(
+    reply: Accepted,
+    schedule: Option<Schedule>,
+) -> Result<SendEmailResult, EmailError> {
     let Accepted { status, fields } = reply;
     let id = text(&fields, "message_id").ok_or_else(|| {
         EmailError::from_response(
@@ -764,17 +931,61 @@ pub(crate) fn parse_send_reply(reply: Accepted) -> Result<SendEmailResult, Email
             .collect(),
         _ => Vec::new(),
     };
+    let confirmed = match schedule {
+        None => None,
+        Some(Schedule {
+            at: requested,
+            first_attempt_at,
+        }) => match (fields.get("status"), fields.get("scheduled_at")) {
+            (Some(Value::String(answered)), Some(Value::Null))
+                if answered == "queued"
+                    && requested <= first_attempt_at + TimeDelta::seconds(CLOCK_SKEW_SECONDS) =>
+            {
+                None
+            }
+            (Some(Value::String(answered)), Some(Value::String(time)))
+                if answered == "scheduled" && instant(time) == Some(requested) =>
+            {
+                Some(requested)
+            }
+            _ => {
+                log_warnings(&warnings);
+                return Err(schedule_not_confirmed(id, status));
+            }
+        },
+    };
     Ok(SendEmailResult {
         id,
         replayed: fields.get("replayed") == Some(&Value::Bool(true)),
         warnings,
+        scheduled_at: confirmed,
     })
 }
 
-fn timestamp(fields: &Map<String, Value>, name: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(&text(fields, name)?)
+fn instant(time: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(time)
         .ok()
         .map(|time| time.with_timezone(&Utc))
+}
+
+fn schedule_not_confirmed(id: String, status: u16) -> EmailError {
+    EmailError::from_response(
+        status,
+        Some("schedule_not_confirmed".into()),
+        Some(format!("PostHog accepted email {id} without confirming its scheduled_at, so it may go out at another time.")),
+        None,
+    )
+    .with_field(Some("scheduled_at".into()))
+    .with_details(
+        None,
+        Some(format!("Read the email's status with emails().get(\"{id}\") before you send it again: a send with another idempotency key makes a second email.")),
+        None,
+    )
+    .with_message_id(id)
+}
+
+fn timestamp(fields: &Map<String, Value>, name: &str) -> Option<DateTime<Utc>> {
+    instant(&text(fields, name)?)
 }
 
 pub(crate) fn parse_status_reply(reply: Accepted) -> Result<EmailStatus, EmailError> {
@@ -801,8 +1012,8 @@ pub(crate) fn parse_status_reply(reply: Accepted) -> Result<EmailStatus, EmailEr
     }
 }
 
-pub(crate) fn log_warnings(result: &SendEmailResult) {
-    for warning in &result.warnings {
+pub(crate) fn log_warnings(warnings: &[EmailWarning]) {
+    for warning in warnings {
         warn!(
             "PostHog email warning {}: {}",
             warning.code, warning.message
@@ -975,7 +1186,7 @@ mod tests {
     }
 
     fn send_reply(reply: Reply) -> Result<SendEmailResult, EmailError> {
-        accept(reply).and_then(parse_send_reply)
+        accept(reply).and_then(|reply| parse_send_reply(reply, None))
     }
 
     fn status_reply(reply: Reply) -> Result<EmailStatus, EmailError> {

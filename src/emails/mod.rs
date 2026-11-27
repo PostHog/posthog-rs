@@ -9,6 +9,8 @@ mod types;
 mod async_emails;
 #[cfg(not(feature = "async-client"))]
 mod blocking_emails;
+#[cfg(all(test, feature = "tls"))]
+mod scheduling_tests;
 
 #[cfg(feature = "async-client")]
 pub use async_emails::Emails;
@@ -19,5 +21,5 @@ pub use error::{EmailError, EmailErrorKind};
 pub(crate) use shared::EmailTracker;
 pub use types::{
     CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailStatus, EmailTracking,
-    EmailTrackingOptions, EmailWarning, SendEmail, SendEmailResult, TemplateEmail,
+    EmailTrackingOptions, EmailWarning, SendEmail, SendEmailResult, SendEmailStatus, TemplateEmail,
 };

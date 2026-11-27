@@ -92,8 +92,9 @@ impl fmt::Display for EmailErrorKind {
     }
 }
 
-/// PostHog did not queue the email or read its status, or the client could not
-/// tell whether it did.
+/// PostHog did not accept the email or read its status, or the client could
+/// not tell whether it did. An error with a [`message_id`](Self::message_id)
+/// is the exception: PostHog accepted that email.
 ///
 /// Branch on [`code`](Self::code), PostHog's stable error code such as
 /// `quota_limited`, or on [`kind`](Self::kind), a coarse category. The message
@@ -112,6 +113,7 @@ struct Details {
     docs_url: Option<String>,
     field: Option<String>,
     retry_after: Option<Duration>,
+    message_id: Option<String>,
     source: Option<Source>,
 }
 
@@ -144,6 +146,7 @@ impl EmailError {
             docs_url: None,
             field: None,
             retry_after: None,
+            message_id: None,
             source: None,
         }))
     }
@@ -172,6 +175,7 @@ impl EmailError {
             docs_url: None,
             field: None,
             retry_after,
+            message_id: None,
             source: None,
         }))
     }
@@ -190,6 +194,11 @@ impl EmailError {
         self.0.why = why;
         self.0.fix = fix;
         self.0.docs_url = docs_url;
+        self
+    }
+
+    pub(crate) fn with_message_id(mut self, message_id: String) -> Self {
+        self.0.message_id = Some(message_id);
         self
     }
 
@@ -245,6 +254,14 @@ impl EmailError {
     /// the `Retry-After` header of a `429` or `503`.
     pub fn retry_after(&self) -> Option<Duration> {
         self.0.retry_after
+    }
+
+    /// The message ID of an email PostHog accepted although the send failed,
+    /// such as one whose schedule PostHog didn't confirm
+    /// (`schedule_not_confirmed`). Read what happened to it with
+    /// [`Emails::get`](crate::Emails::get).
+    pub fn message_id(&self) -> Option<&str> {
+        self.0.message_id.as_deref()
     }
 
     pub(crate) fn is_network_error(&self) -> bool {

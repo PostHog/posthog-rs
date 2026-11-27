@@ -12,7 +12,9 @@ use email_support::{
     accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, ScriptedServer,
     MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
-use posthog::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
+use posthog::{
+    CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, SendEmailStatus, TemplateEmail,
+};
 use serde_json::json;
 
 fn client_for(server: &ScriptedServer) -> posthog::Client {
@@ -428,4 +430,165 @@ fn reading_stops_at_the_cap_on_an_endless_reply() {
     assert_eq!(error.code(), "network_error");
     assert!(error.message().contains("larger than"), "{}", error);
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+fn utc(time: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(time)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+#[cfg(feature = "tls")]
+fn cloud_client(cloud: &email_support::CloudFront) -> posthog::Client {
+    let mut builder = posthog::ClientOptionsBuilder::default();
+    builder
+        .api_key("phc_test".to_string())
+        .host("https://us.i.posthog.com")
+        .secret_key("phs_test")
+        .blocking_http_client(cloud.blocking_http());
+    posthog::client(builder.build().unwrap())
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn a_scheduled_send_on_posthog_cloud_returns_the_confirmed_time() {
+    let server = ScriptedServer::start(vec![Answer::json(
+        202,
+        json!({
+            "message_id": MESSAGE_ID,
+            "status": "scheduled",
+            "scheduled_at": "2026-12-01T09:00:00.001Z",
+        }),
+    )]);
+    let cloud = email_support::CloudFront::start_blocking(&server.url);
+    let client = cloud_client(&cloud);
+
+    let result = client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "reminder", "Your reminder")
+                .text("It's time.")
+                .scheduled_at(utc("2026-12-01T09:00:00.000001Z")),
+        )
+        .unwrap();
+
+    assert_eq!(result.status(), SendEmailStatus::Scheduled);
+    assert_eq!(result.scheduled_at, Some(utc("2026-12-01T09:00:00.001Z")));
+    let requests = server.requests();
+    assert_eq!(
+        requests[0].json()["scheduled_at"],
+        "2026-12-01T09:00:00.001Z"
+    );
+    assert_eq!(requests[0].header("host"), Some("us.posthog.com"));
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn an_acceptance_that_doesnt_confirm_the_schedule_fails_with_the_message_id() {
+    let server = ScriptedServer::start(vec![Answer::json(
+        202,
+        json!({
+            "message_id": MESSAGE_ID,
+            "status": "scheduled",
+            "scheduled_at": "2026-12-01T10:00:00Z",
+        }),
+    )]);
+    let cloud = email_support::CloudFront::start_blocking(&server.url);
+    let client = cloud_client(&cloud);
+
+    let error = client
+        .emails()
+        .send(
+            TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                .scheduled_at(utc("2026-12-01T09:00:00Z")),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "schedule_not_confirmed");
+    assert_eq!(error.message_id(), Some(MESSAGE_ID));
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn a_refused_scheduled_at_is_reported_and_never_sent_now() {
+    for (code, detail) in [
+        ("scheduled_too_far", "scheduled_at is more than 7 days ahead."),
+        // What PostHog answers while scheduled sends are off for the project.
+        ("invalid", "Scheduled sends are off for this project, so PostHog didn't send this request's email."),
+    ] {
+        let server = ScriptedServer::start(vec![
+            Answer::json(
+                400,
+                json!({
+                    "type": "validation_error",
+                    "code": code,
+                    "detail": detail,
+                    "attr": "scheduled_at",
+                }),
+            ),
+            accepted(),
+        ]);
+        let cloud = email_support::CloudFront::start_blocking(&server.url);
+        let client = cloud_client(&cloud);
+
+        let error = client
+            .emails()
+            .send(
+                TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                    .scheduled_at(utc("2027-12-01T09:00:00Z")),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), code);
+        assert_eq!(error.status(), Some(400));
+        assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+        assert_eq!(error.field(), Some("scheduled_at"));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "{}", code);
+        assert_eq!(
+            requests[0].json()["scheduled_at"],
+            "2027-12-01T09:00:00.000Z"
+        );
+    }
+}
+
+#[test]
+fn scheduling_off_posthog_cloud_makes_no_request() {
+    let server = ScriptedServer::start(vec![accepted()]);
+    let client = client_for(&server);
+
+    let error = client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "invoice", "Your invoice")
+                .text("Attached.")
+                .attachment(EmailAttachment::new("invoice.pdf", vec![1, 2, 3]))
+                .scheduled_at(utc("2026-12-01T09:00:00Z")),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "scheduling_requires_cloud");
+    assert_eq!(error.kind(), EmailErrorKind::ApplicationError);
+    assert_eq!(error.field(), Some("scheduled_at"));
+    assert!(server.requests().is_empty());
+}
+
+#[test]
+fn get_reads_a_scheduled_email() {
+    let server = ScriptedServer::start(vec![Answer::json(
+        200,
+        json!({
+            "id": MESSAGE_ID,
+            "status": "scheduled",
+            "created_at": "2026-11-23T09:00:00Z",
+            "status_at": "2026-11-23T09:00:00Z",
+        }),
+    )]);
+    let client = client_for(&server);
+
+    assert_eq!(
+        client.emails().get(MESSAGE_ID).unwrap().status,
+        EmailDeliveryStatus::Scheduled
+    );
 }

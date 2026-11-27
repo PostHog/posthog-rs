@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -189,6 +189,8 @@ struct FakeState {
     store_faults: VecDeque<Answer>,
     redirect_next_to: Option<String>,
     sent: Vec<serde_json::Value>,
+    send_answer: Option<Answer>,
+    upload_route_faults: VecDeque<Answer>,
 }
 
 /// What the upload route signs into each grant.
@@ -297,6 +299,23 @@ impl FakePostHog {
         self
     }
 
+    /// The send route answers every send it takes with `answer`, such as a
+    /// confirmation of a scheduled time.
+    pub fn answering_sends_with(self, answer: Answer) -> Self {
+        self.state.lock().unwrap().send_answer = Some(answer);
+        self
+    }
+
+    /// The upload route answers its next request with `answer`, such as a
+    /// `503` the SDK retries.
+    pub fn upload_route_answers_next(&self, answer: Answer) {
+        self.state
+            .lock()
+            .unwrap()
+            .upload_route_faults
+            .push_back(answer);
+    }
+
     /// Grants whose URL points at `store_url` instead of the store.
     pub fn with_store_at(self, store_url: &str) -> Self {
         self.state.lock().unwrap().store_url = store_url.to_string();
@@ -394,6 +413,9 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
         );
     };
     if path == UPLOADS_PATH {
+        if let Some(fault) = state.upload_route_faults.pop_front() {
+            return fault;
+        }
         if state.files_off {
             return django_error(
                 400,
@@ -447,7 +469,7 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
         }
     }
     state.sent.push(body);
-    accepted()
+    state.send_answer.clone().unwrap_or_else(accepted)
 }
 
 fn django_error(status: u16, kind: &str, code: &str, detail: &str, attr: Option<&str>) -> Answer {
@@ -725,6 +747,114 @@ pub async fn tls_front(plain_url: &str) -> String {
         }
     });
     url
+}
+
+/// PostHog Cloud for a test client: its [`http`](Self::http) and
+/// [`blocking_http`](Self::blocking_http) clients resolve `us.posthog.com` and
+/// `eu.posthog.com` to [`tls_front`] in front of the plain-http test server, so
+/// a send takes the client's real Cloud app host path.
+#[cfg(feature = "tls")]
+pub struct CloudFront {
+    front: std::net::SocketAddr,
+    _runtime: Option<tokio::runtime::Runtime>,
+}
+
+#[cfg(feature = "tls")]
+impl CloudFront {
+    pub async fn start(plain_url: &str) -> Self {
+        let front = tls_front(plain_url).await;
+        Self {
+            front: front.trim_start_matches("https://").parse().unwrap(),
+            _runtime: None,
+        }
+    }
+
+    /// For blocking tests: the TLS front runs on a runtime of its own.
+    pub fn start_blocking(plain_url: &str) -> Self {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut cloud = runtime.block_on(Self::start(plain_url));
+        cloud._runtime = Some(runtime);
+        cloud
+    }
+
+    #[cfg(feature = "async-client")]
+    pub fn http(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .resolve("us.posthog.com", self.front)
+            .resolve("eu.posthog.com", self.front)
+            .tls_certs_only([test_certificate_authority()])
+            .tls_danger_accept_invalid_hostnames(true)
+            .build()
+            .unwrap()
+    }
+
+    pub fn blocking_http(&self) -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .resolve("us.posthog.com", self.front)
+            .resolve("eu.posthog.com", self.front)
+            .tls_certs_only([test_certificate_authority()])
+            .tls_danger_accept_invalid_hostnames(true)
+            .build()
+            .unwrap()
+    }
+}
+
+/// A proxy that counts the connections it is offered and answers none, so a
+/// test can tell that a client reached no host at all.
+pub struct ConnectionCounter {
+    url: String,
+    address: std::net::SocketAddr,
+    connections: Arc<AtomicUsize>,
+    stopped: Arc<AtomicBool>,
+}
+
+impl ConnectionCounter {
+    pub fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (counted, stopping) = (Arc::clone(&connections), Arc::clone(&stopped));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stopping.load(Ordering::SeqCst) {
+                    break;
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        Self {
+            url: format!("http://{address}"),
+            address,
+            connections,
+            stopped,
+        }
+    }
+
+    /// A client whose every request, to any host, goes through this proxy.
+    #[cfg(feature = "async-client")]
+    pub fn http(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(&self.url).unwrap())
+            .build()
+            .unwrap()
+    }
+
+    pub fn connections(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ConnectionCounter {
+    /// Wakes the listener's thread with one last connection, so the thread
+    /// ends and closes the socket.
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(self.address);
+    }
 }
 
 /// A URL where nothing listens. A port freed by another test could be taken by
