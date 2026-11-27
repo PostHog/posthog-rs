@@ -305,6 +305,15 @@ pub posthog::StorageOperation::Open
 pub posthog::StorageOperation::Read
 pub posthog::StorageOperation::Remove
 pub posthog::StorageOperation::Write
+#[non_exhaustive] pub enum posthog::UnresolvedFlagReason
+pub posthog::UnresolvedFlagReason::ExperienceContinuity
+pub posthog::UnresolvedFlagReason::MissingContext
+pub posthog::UnresolvedFlagReason::UnresolvedDependency
+pub posthog::UnresolvedFlagReason::UnsupportedDefinition
+impl posthog::UnresolvedFlagReason
+pub fn posthog::UnresolvedFlagReason::as_str(&self) -> &'static str
+impl core::fmt::Display for posthog::UnresolvedFlagReason
+pub fn posthog::UnresolvedFlagReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct posthog::AsyncFlagPoller
 impl posthog::AsyncFlagPoller
 pub async fn posthog::AsyncFlagPoller::is_running(&self) -> bool
@@ -571,6 +580,7 @@ pub fn posthog::FeatureFlagEvaluations::is_enabled(&self, &str) -> bool
 pub fn posthog::FeatureFlagEvaluations::keys(&self) -> alloc::vec::Vec<alloc::string::String>
 pub fn posthog::FeatureFlagEvaluations::only(&self, &[&str]) -> Self
 pub fn posthog::FeatureFlagEvaluations::only_accessed(&self) -> Self
+pub fn posthog::FeatureFlagEvaluations::unresolved_flags(&self) -> &std::collections::hash::map::HashMap<alloc::string::String, posthog::UnresolvedFlagReason>
 impl core::fmt::Debug for posthog::FeatureFlagEvaluations
 pub fn posthog::FeatureFlagEvaluations::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct posthog::FeatureFlagFilters

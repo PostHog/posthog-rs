@@ -2,7 +2,7 @@ use crate::client::{apply_on_error_hooks, OnErrorHook, SdkIdentity};
 use crate::feature_flags::{
     match_feature_flag_with_version, match_flag_definition, metadata_result, CohortDefinition,
     DefinitionMetadata, DefinitionMetadataMap, EvaluationContext, FeatureFlag, FlagValue,
-    InconclusiveMatchError, WireFlag,
+    InconclusiveMatchError, MatchError, WireFlag,
 };
 use crate::{Error, LocalEvaluationFailure, PostHogError};
 use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH, USER_AGENT};
@@ -1007,7 +1007,7 @@ pub struct LocalEvaluator {
 }
 
 pub(crate) struct LocalFlagEvaluation {
-    pub(crate) result: Result<FlagValue, InconclusiveMatchError>,
+    pub(crate) result: Result<FlagValue, MatchError>,
     pub(crate) payload: Option<serde_json::Value>,
     pub(crate) has_experiment: Option<bool>,
 }
@@ -1079,7 +1079,7 @@ impl LocalEvaluator {
                 let result =
                     match_flag_definition(flag, person_properties, &ctx, &snapshot.flag_metadata);
                 trace!(key, ?result, "Local flag evaluation");
-                result.map(Some)
+                result.map(Some).map_err(Into::into)
             }
             None => {
                 trace!(key, "Flag not found in local cache");
@@ -1131,7 +1131,7 @@ impl LocalEvaluator {
                         )
                     });
                 trace!(key, ?result, "Local flag evaluation (simple)");
-                result.map(Some)
+                result.map(Some).map_err(Into::into)
             }
             None => {
                 trace!(key, "Flag not found in local cache");
@@ -1163,7 +1163,7 @@ impl LocalEvaluator {
             group_properties,
         )
         .into_iter()
-        .map(|(key, evaluation)| (key, evaluation.result))
+        .map(|(key, evaluation)| (key, evaluation.result.map_err(Into::into)))
         .collect()
     }
 

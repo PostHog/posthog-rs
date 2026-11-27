@@ -11,7 +11,9 @@ use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
     FlagCalledEventParams,
 };
-use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
+use crate::feature_flags::{
+    FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue, UnresolvedFlagReason,
+};
 use crate::local_evaluation::LocalEvaluator;
 use crate::Error;
 use crate::Event;
@@ -393,6 +395,7 @@ pub(super) struct EvaluationState {
     distinct_id: String,
     options: EvaluateFlagsOptions,
     records: HashMap<String, EvaluatedFlagRecord>,
+    unresolved: HashMap<String, UnresolvedFlagReason>,
     request_id: Option<String>,
     errors_while_computing: bool,
     quota_limited: bool,
@@ -411,6 +414,7 @@ impl EvaluationState {
             distinct_id,
             options,
             records: HashMap::new(),
+            unresolved: HashMap::new(),
             request_id: None,
             errors_while_computing: false,
             quota_limited: false,
@@ -449,16 +453,21 @@ impl EvaluationState {
             {
                 continue;
             }
-            if let Ok(value) = result.result {
-                self.records.insert(
-                    key,
-                    local_record(
-                        value,
-                        result.payload,
-                        result.has_experiment,
-                        minimal_flag_called_events,
-                    ),
-                );
+            match result.result {
+                Ok(value) => {
+                    self.records.insert(
+                        key,
+                        local_record(
+                            value,
+                            result.payload,
+                            result.has_experiment,
+                            minimal_flag_called_events,
+                        ),
+                    );
+                }
+                Err(error) => {
+                    self.unresolved.insert(key, error.reason);
+                }
             }
         }
     }
@@ -545,6 +554,7 @@ impl EvaluationState {
             self.errors_while_computing,
             self.quota_limited,
         )
+        .with_unresolved(self.unresolved)
     }
 }
 
