@@ -16,11 +16,7 @@ pub(crate) struct SendOptions {
 /// One email from an email template made transactional in PostHog, sent by
 /// the template's ID.
 ///
-/// The template sets its own sender, subject and content. A template made in
-/// PostHog sends transactional email only: PostHog checks whether the saved
-/// template is enabled for transactional sends first
-/// (`template_not_transactional`), and refuses an otherwise sendable template
-/// in a marketing category with `marketing_template`.
+/// The template sets its own sender, subject and content.
 ///
 /// ```
 /// use posthog::TemplateEmail;
@@ -84,14 +80,7 @@ impl TemplateEmail {
 ///
 /// It needs [`html`](Self::html), [`text`](Self::text) or both. Without
 /// `text`, PostHog derives it from the `html`. To send a React email, render
-/// it to HTML in your app and pass the HTML. When `template_key` names a
-/// saved email template (and any explicit [`MessageCategory`] isn't rejected
-/// first with `categories_not_enabled` while code-send categories are
-/// disabled), PostHog checks whether it is enabled for transactional sends
-/// (`template_not_transactional`) before category checks, and refuses an
-/// otherwise sendable saved email template in a marketing category with
-/// `marketing_template` (a saved push template sharing the same key returns
-/// `template_not_sendable` first).
+/// it to HTML in your app and pass the HTML.
 ///
 /// ```
 /// use posthog::CodeEmail;
@@ -117,7 +106,7 @@ pub struct CodeEmail {
     pub(crate) sensitive: Option<bool>,
     pub(crate) tracking: Option<EmailTracking>,
     pub(crate) capture_engagement: Option<bool>,
-    pub(crate) category: Option<Box<EmailCategory>>,
+    pub(crate) category: Option<String>,
     pub(crate) options: SendOptions,
 }
 
@@ -255,74 +244,31 @@ impl CodeEmail {
         self
     }
 
-    /// The email's message category: [`EmailCategory::Transactional`], or a
-    /// [`MessageCategory`] that the send defines. Django validates the category
-    /// object first (for example, a reserved key such as `$all` returns
-    /// `invalid_input` before feature-flag or template checks). For valid
-    /// category values: when code-send categories are enabled for the project,
-    /// leaving `category` out follows the transactional category of the
-    /// template that `template_key` names, or sends as transactional with no
-    /// category (and a sendable saved template in a marketing category returns
-    /// `marketing_template` for any valid `category` value before category
-    /// comparison). When code-send categories are disabled for the project, a
-    /// valid explicit [`MessageCategory`] returns HTTP 400
-    /// `categories_not_enabled` before template sendability and category
-    /// comparison (even if `template_key` names a marketing template); leaving
-    /// `category` out sends as transactional with no category (or returns
-    /// `marketing_template` for a sendable saved template in a marketing
-    /// category), explicit [`EmailCategory::Transactional`] returns HTTP 400
-    /// `marketing_template` for a sendable saved template in a marketing
-    /// category or `category_mismatch` for a saved template in a transactional
-    /// category, an older Django API rejects `category` with HTTP 400
-    /// (`invalid_input`), and with code-send categories enabled, updated Django
-    /// backed by an older CDP API returns `field_not_accepted` both for an
-    /// explicit [`MessageCategory`] and when `category` is omitted for a
-    /// `template_key` naming a saved template in a transactional category
-    /// (because Django inherits and forwards that category to CDP; explicit
-    /// [`EmailCategory::Transactional`] on a fresh `template_key` can succeed
-    /// because Django forwards no category).
+    /// The key of one of the project's message categories, such as
+    /// `"newsletter"`. A marketing category skips recipients who opted out of
+    /// it or of all marketing email, fills `{{ unsubscribe_url }}` with the
+    /// recipient's preferences link, and adds List-Unsubscribe headers. A
+    /// marketing email can't have `cc` or `bcc`.
     ///
-    /// [`EmailCategory::Transactional`] asks for transactional email with no
-    /// category. PostHog refuses the send with:
+    /// PostHog refuses the send with:
     ///
-    /// - `categories_not_enabled` when code-send categories aren't enabled for
-    ///   the project yet and the send passes an explicit [`MessageCategory`]
-    ///   (returned before template sendability and category comparison),
-    /// - `category_mismatch` when the key exists with another type, when
-    ///   `template_key` names a saved template in a transactional category
-    ///   with [`EmailCategory::Transactional`] or a mismatched
-    ///   [`MessageCategory`], or when code-send categories are enabled and
-    ///   `template_key` names an existing transactional-enabled saved email
-    ///   template with no category and the send passes an explicit
-    ///   [`MessageCategory`] (a saved email template never enabled for
-    ///   transactional sends returns `template_not_transactional` before
-    ///   PostHog compares categories; for marketing emails, use a different
-    ///   `template_key`; omit `category` or pass
-    ///   [`EmailCategory::Transactional`] only for transactional emails; with
-    ///   the flag off, PostHog returns `categories_not_enabled` first),
-    /// - `too_many_categories` when it would create a new category or restore
-    ///   an archived category past the project's active category limit,
-    /// - `unsubscribe_link_required` when a marketing email with non-empty
-    ///   `html` has no clickable `<a href="{{ unsubscribe_url }}">` link, or a
-    ///   plain-text marketing email with `html` unset or empty has no
-    ///   `{{ unsubscribe_url }}` in `text`,
-    /// - `copies_not_allowed` when a marketing email has `cc` or `bcc`
-    ///   recipients,
-    /// - `workflow_can_wait` (on a verified sender) or
-    ///   `sandbox_fields_unsupported` (on the PostHog test sender) when a
-    ///   marketing email carries attachments (because marketing sending limits
-    ///   can hold delivery). Both the async and blocking clients request upload
-    ///   grants and upload any missing attachments (skipping files PostHog
-    ///   already reports as `present`) before PostHog validates and refuses the
-    ///   send, so a marketing send with files can transfer missing files or
-    ///   fail during upload before reaching the send endpoint,
-    /// - `recipient_opted_out` when the recipient opted out of the category
-    ///   or of all marketing email. If the preference lookup exceeds CDP's
-    ///   async intake budget, the API can still return HTTP 202 and the
-    ///   delivery worker skips delivery later, so a `202` response from
-    ///   `send()` does not by itself prove the recipient passed opt-out.
-    pub fn category(mut self, category: impl Into<EmailCategory>) -> Self {
-        self.category = Some(Box::new(category.into()));
+    /// - `category_not_found` when the project has no category with this key,
+    /// - `marketing_copies_unsupported` when a marketing email has `cc` or
+    ///   `bcc`,
+    /// - `sandbox_fields_unsupported` when the project has no verified sending
+    ///   domain, so a marketing email would go out from the PostHog test
+    ///   sender,
+    /// - `workflow_can_wait` when a marketing email has attachments.
+    ///
+    /// ```
+    /// use posthog::CodeEmail;
+    ///
+    /// let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in review")
+    ///     .html(r#"<p>What's new.</p><p><a href="{{ unsubscribe_url }}">Unsubscribe</a></p>"#)
+    ///     .category("newsletter");
+    /// ```
+    pub fn category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
         self
     }
 
@@ -352,122 +298,6 @@ impl CodeEmail {
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.options.max_retries = Some(max_retries);
         self
-    }
-}
-
-/// The message category of a [`CodeEmail`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum EmailCategory {
-    /// Transactional email with no category. Unlike a send without a
-    /// category, it doesn't follow the category of the template that
-    /// `template_key` names: PostHog refuses it on a template in a category.
-    Transactional,
-    /// A category the send defines in code.
-    Defined(MessageCategory),
-}
-
-impl From<MessageCategory> for EmailCategory {
-    fn from(category: MessageCategory) -> Self {
-        EmailCategory::Defined(category)
-    }
-}
-
-/// A message category, defined in code by its key.
-///
-/// When code-send categories are enabled for the project and `template_key`
-/// doesn't match an existing saved template, PostHog creates the category with
-/// its name and description on the first send with its key. Later sends with
-/// that key keep the category's name and description, so change them in
-/// PostHog. Once code-send categories are enabled, a matching
-/// transactional-enabled saved email template keeps its own category,
-/// including when it has none: passing a `MessageCategory` for an
-/// uncategorized transactional-enabled saved email template returns
-/// `category_mismatch` (a saved email template never enabled for transactional
-/// sends returns `template_not_transactional` before PostHog compares
-/// categories; for marketing emails, use a different `template_key`, and omit
-/// `category` or pass [`EmailCategory::Transactional`] only for transactional
-/// emails). If code-send categories aren't enabled for the project yet, PostHog
-/// returns HTTP 400 `categories_not_enabled` before template sendability and
-/// category comparison (even if `template_key` names a marketing template). An
-/// older Django API rejects `category` with HTTP 400 (`invalid_input`), and
-/// with code-send categories enabled, updated Django backed by an older CDP
-/// API returns `field_not_accepted` both for an explicit `MessageCategory` and
-/// when `category` is omitted for a `template_key` naming a saved template in a
-/// transactional category (because Django inherits and forwards that category
-/// to CDP). A key that exists with another type refuses the
-/// send with `category_mismatch`.
-///
-/// A marketing send honors the recipient's opt-outs. When `html` is non-empty,
-/// it requires a clickable `<a href="{{ unsubscribe_url }}">` link; plain-text
-/// sends with `html` unset or empty need `{{ unsubscribe_url }}` in `text`. Marketing
-/// sends cannot have `cc` or `bcc` (`copies_not_allowed`) and cannot carry
-/// attachments (`workflow_can_wait` on a verified sender, or
-/// `sandbox_fields_unsupported` on the PostHog test sender, because marketing
-/// sending limits can hold delivery; both the async and blocking clients
-/// request upload grants and upload any missing attachments not already
-/// `present` on PostHog before PostHog validates and refuses the send).
-///
-/// ```
-/// use posthog::{CodeEmail, MessageCategory, MessageCategoryType};
-///
-/// let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in review")
-///     .html(r#"<p>What's new this month.</p><p><a href="{{ unsubscribe_url }}">Unsubscribe</a></p>"#)
-///     .category(
-///         MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
-///             .description("Monthly product news"),
-///     );
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessageCategory {
-    pub(crate) key: String,
-    pub(crate) category_type: MessageCategoryType,
-    pub(crate) name: String,
-    pub(crate) description: Option<String>,
-}
-
-impl MessageCategory {
-    /// A category with this key, type and name. The key is unique in the
-    /// project, such as `"newsletter"`, and the name is what recipients see
-    /// on their email preferences page.
-    pub fn new(
-        key: impl Into<String>,
-        category_type: MessageCategoryType,
-        name: impl Into<String>,
-    ) -> Self {
-        Self {
-            key: key.into(),
-            category_type,
-            name: name.into(),
-            description: None,
-        }
-    }
-
-    /// What the category's emails are about. PostHog uses it only when the
-    /// send creates the category.
-    pub fn description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-}
-
-/// The kind of email a [`MessageCategory`] holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum MessageCategoryType {
-    /// Email the recipient can opt out of, such as a newsletter.
-    Marketing,
-    /// Email the recipient needs, such as a receipt. It skips opt-outs.
-    Transactional,
-}
-
-impl MessageCategoryType {
-    /// The type as PostHog sends it, such as `"marketing"`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MessageCategoryType::Marketing => "marketing",
-            MessageCategoryType::Transactional => "transactional",
-        }
     }
 }
 
@@ -650,6 +480,7 @@ impl EmailTrackingOptions {
         Value::Object(object)
     }
 }
+
 /// An email for [`Emails::send`](crate::Emails::send): a template made in
 /// PostHog, or content your code rendered.
 #[derive(Debug, Clone)]
@@ -761,8 +592,8 @@ pub struct EmailStatus {
     pub created_at: DateTime<Utc>,
     /// When the email reached its current status.
     pub status_at: DateTime<Utc>,
-    /// Why a failed email was not sent, such as `provider_error`,
-    /// `recipient_suppressed` or `recipient_opted_out`, or the bounce type of
-    /// a bounced email: `hard`, `soft` or `unknown`. `None` otherwise.
+    /// Why a failed email was not sent, such as `provider_error` or
+    /// `recipient_suppressed`, or the bounce type of a bounced email: `hard`,
+    /// `soft` or `unknown`. `None` otherwise.
     pub reason: Option<String>,
 }

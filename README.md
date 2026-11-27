@@ -156,69 +156,13 @@ engagement events and keeps its content out of logs. Call
 PostHog counts its clicks too. `.tracking()` sets what PostHog tracks, whatever
 the email's sensitivity.
 
-When code-send categories are available and enabled for the project, a code
-send takes a `category` to send marketing email or to file the email under a
-message category. A `MessageCategory` defines the category in code: PostHog
-creates it with its name and description on the first send with its key. Later
-sends keep the category's name and description, so change them in PostHog. If code-send categories aren't enabled for the project yet, passing a
-`MessageCategory` returns HTTP 400 `categories_not_enabled`. An older Django
-API rejects `category` with HTTP 400 (`invalid_input`), while with code-send
-categories enabled, updated Django backed by an older CDP API returns
-`field_not_accepted` both for an explicit `MessageCategory` and when `category`
-is omitted for a `template_key` naming a saved template in a transactional
-category (because Django inherits and forwards that category to CDP; explicit
-`EmailCategory::Transactional` on a fresh `template_key` can succeed because
-Django forwards no category).
-
-```rust
-use posthog::{CodeEmail, MessageCategory, MessageCategoryType};
-
-let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in review")
-    .html(r#"<p>What's new this month.</p><p><a href="{{ unsubscribe_url }}">Unsubscribe</a></p>"#)
-    .category(
-        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
-            .description("Monthly product news"),
-    );
-```
-
-A marketing send honors the recipient's opt-outs, and PostHog fills
-`{{ unsubscribe_url }}` with the recipient's preferences link. When `html` is
-non-empty, it must include a clickable link whose `href` points to
-`{{ unsubscribe_url }}` (for example,
-`<a href="{{ unsubscribe_url }}">Unsubscribe</a>`); plain-text sends with
-`html` unset or empty need `{{ unsubscribe_url }}` in `text`. Marketing sends
-cannot include `cc` or `bcc` (`copies_not_allowed`) and cannot carry
-attachments (`workflow_can_wait` on a verified sender, or
-`sandbox_fields_unsupported` on the PostHog test sender, because marketing
-sending limits can hold delivery; both the async and blocking clients request
-upload grants and upload any missing attachments not already `present` on
-PostHog before PostHog validates and refuses the send).
-
-Leave `category` out for transactional email with no category, or, when
-code-send categories are enabled for the project, to follow the transactional
-category of the template that `template_key` names (otherwise an omitted
-`category` sends as transactional with no category).
-`EmailCategory::Transactional` asks for transactional email with no category,
-so PostHog refuses it with `category_mismatch` when `template_key` names a
-saved template in a transactional category (even when code-send categories are
-disabled for the project), or when a send passes a mismatched
-`MessageCategory` for that template. Once code-send categories are enabled for the project, passing an explicit
-`MessageCategory` when `template_key` names an existing transactional-enabled
-saved email template with no category also returns `category_mismatch` (a saved
-email template never enabled for transactional sends returns
-`template_not_transactional` before PostHog compares categories; for marketing
-emails, use a different `template_key`; omit `category` or pass
-`EmailCategory::Transactional` only for transactional emails). When code-send
-categories are disabled for the project, passing an explicit `MessageCategory`
-returns `categories_not_enabled` before template sendability and category
-comparison (even if `template_key` names a template in a marketing category). A
-template made in PostHog sends transactional email only: once a request passes
-that feature check, PostHog checks whether a saved template is enabled for
-transactional sends (`template_not_transactional`) before category checks, and
-returns `marketing_template` for an otherwise sendable saved template in a
-marketing category before comparing the requested `category` (when `category` is
-omitted or `EmailCategory::Transactional` while code-send categories are
-disabled, and for any `category` value once code-send categories are enabled).
+A code send takes `.category()`, the key of one of the project's message
+categories, such as `newsletter`. A marketing category skips recipients who
+opted out of it or of all marketing email, fills `{{ unsubscribe_url }}` with
+the recipient's preferences link, and adds List-Unsubscribe headers. A marketing
+email can't have `cc` or `bcc`. PostHog refuses a key with no category as
+`category_not_found`, and copies on a marketing email as
+`marketing_copies_unsupported`.
 
 ## Contributing
 

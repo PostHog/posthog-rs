@@ -12,10 +12,7 @@ use email_support::{
     accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, ScriptedServer,
     MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
-use posthog::{
-    CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, MessageCategory,
-    MessageCategoryType, TemplateEmail,
-};
+use posthog::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
 use serde_json::json;
 
 fn client_for(server: &ScriptedServer) -> posthog::Client {
@@ -68,7 +65,8 @@ fn code_send_posts_the_rendered_content() {
         .send(
             CodeEmail::new("user@example.com", "password-reset", "Reset your password")
                 .html("<p>Reset</p>")
-                .from("Acme <security@example.com>"),
+                .from("Acme <security@example.com>")
+                .category("account-security"),
         )
         .unwrap();
 
@@ -79,6 +77,7 @@ fn code_send_posts_the_rendered_content() {
             "subject": "Reset your password",
             "html": "<p>Reset</p>",
             "from": "Acme <security@example.com>",
+            "category": "account-security",
             "to": "user@example.com",
         })
     );
@@ -242,90 +241,6 @@ fn a_posthog_without_the_upload_route_sends_nothing_with_files() {
     assert_eq!(error.field(), Some("attachments"));
     assert_eq!(error.message(), "Not found.");
     assert!(posthog.sent().is_empty(), "no email is sent");
-}
-
-#[test]
-fn a_blocking_send_sends_its_category() {
-    let server = ScriptedServer::start(vec![accepted(), accepted(), accepted()]);
-    let client = client_for(&server);
-
-    let with_description = client
-        .emails()
-        .send(
-            CodeEmail::new("user@example.com", "monthly-digest", "Your month")
-                .html(r#"<p>News. <a href="{{ unsubscribe_url }}">Unsubscribe</a></p>"#)
-                .category(
-                    MessageCategory::new(
-                        "newsletter",
-                        MessageCategoryType::Marketing,
-                        "Newsletter",
-                    )
-                    .description("Monthly product news"),
-                ),
-        )
-        .unwrap();
-    let with_empty_description = client
-        .emails()
-        .send(
-            CodeEmail::new("user@example.com", "monthly-digest", "Your month")
-                .html(r#"<p>News. <a href="{{ unsubscribe_url }}">Unsubscribe</a></p>"#)
-                .category(
-                    MessageCategory::new(
-                        "newsletter",
-                        MessageCategoryType::Marketing,
-                        "Newsletter",
-                    )
-                    .description(""),
-                ),
-        )
-        .unwrap();
-    let without_description = client
-        .emails()
-        .send(
-            CodeEmail::new("user@example.com", "order-receipt", "Your receipt")
-                .text("Thanks.")
-                .category(MessageCategory::new(
-                    "receipts",
-                    MessageCategoryType::Transactional,
-                    "Receipts",
-                )),
-        )
-        .unwrap();
-
-    assert_eq!(with_description.id, MESSAGE_ID);
-    assert_eq!(with_empty_description.id, MESSAGE_ID);
-    assert_eq!(without_description.id, MESSAGE_ID);
-    let requests = server.requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].path, SEND_PATH);
-    assert_eq!(
-        requests[0].json()["category"],
-        json!({
-            "key": "newsletter",
-            "type": "marketing",
-            "name": "Newsletter",
-            "description": "Monthly product news",
-        })
-    );
-    assert_eq!(requests[1].path, SEND_PATH);
-    assert_eq!(
-        requests[1].json()["category"],
-        json!({
-            "key": "newsletter",
-            "type": "marketing",
-            "name": "Newsletter",
-            "description": "",
-        })
-    );
-    assert_eq!(requests[2].path, SEND_PATH);
-    assert_eq!(
-        requests[2].json()["category"],
-        json!({
-            "key": "receipts",
-            "type": "transactional",
-            "name": "Receipts",
-        })
-    );
 }
 
 #[test]

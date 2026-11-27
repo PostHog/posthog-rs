@@ -187,10 +187,7 @@ struct FakeState {
     grants: Grants,
     versions: HashMap<String, Vec<Vec<u8>>>,
     store_faults: VecDeque<Answer>,
-    send_faults: VecDeque<Answer>,
     redirect_next_to: Option<String>,
-    events: Vec<String>,
-    send_requests: Vec<serde_json::Value>,
     sent: Vec<serde_json::Value>,
 }
 
@@ -324,11 +321,6 @@ impl FakePostHog {
         self.state.lock().unwrap().store_faults.push_back(answer);
     }
 
-    /// The send route answers its next send request with `answer`.
-    pub fn send_answers_next(&self, answer: Answer) {
-        self.state.lock().unwrap().send_faults.push_back(answer);
-    }
-
     /// The store answers its next upload with a `307` to the same path and
     /// query on `other_store`, as a store that moved the file elsewhere would.
     pub fn store_redirects_next_to(&self, other_store: &str) {
@@ -350,17 +342,6 @@ impl FakePostHog {
     pub fn versions(&self, sha256: &str) -> Vec<Vec<u8>> {
         let state = self.state.lock().unwrap();
         state.versions.get(sha256).cloned().unwrap_or_default()
-    }
-
-    /// Ordered record of upload-grant, verified storage `PUT`, and send
-    /// requests PostHog received.
-    pub fn events(&self) -> Vec<String> {
-        self.state.lock().unwrap().events.clone()
-    }
-
-    /// Every send request body PostHog received on the send route.
-    pub fn send_requests(&self) -> Vec<serde_json::Value> {
-        self.state.lock().unwrap().send_requests.clone()
     }
 
     /// The emails PostHog accepted.
@@ -413,7 +394,6 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
         );
     };
     if path == UPLOADS_PATH {
-        state.events.push("uploads".to_string());
         if state.files_off {
             return django_error(
                 400,
@@ -430,11 +410,6 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
             .map(|file| upload_slot(&state, file))
             .collect();
         return Answer::json(200, serde_json::json!({"files": slots}));
-    }
-    state.events.push("send".to_string());
-    state.send_requests.push(body.clone());
-    if let Some(fault) = state.send_faults.pop_front() {
-        return fault;
     }
     if body["subject"].as_str().unwrap_or_default().is_empty() {
         return django_error(
@@ -589,7 +564,6 @@ fn store_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer {
             "The SHA256 you specified did not match the calculated checksum.",
         );
     }
-    state.events.push(format!("put:{sha256}"));
     state
         .versions
         .entry(sha256.to_string())

@@ -183,11 +183,6 @@ pub fn posthog::ClientOptionsBuilderError::from(derive_builder::error::Uninitial
 impl core::error::Error for posthog::ClientOptionsBuilderError
 impl core::fmt::Display for posthog::ClientOptionsBuilderError
 pub fn posthog::ClientOptionsBuilderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-#[non_exhaustive] pub enum posthog::EmailCategory
-pub posthog::EmailCategory::Defined(posthog::MessageCategory)
-pub posthog::EmailCategory::Transactional
-impl core::convert::From<posthog::MessageCategory> for posthog::EmailCategory
-pub fn posthog::EmailCategory::from(posthog::MessageCategory) -> Self
 #[non_exhaustive] pub enum posthog::EmailDeliveryStatus
 pub posthog::EmailDeliveryStatus::Bounced
 pub posthog::EmailDeliveryStatus::Complained
@@ -287,11 +282,6 @@ pub posthog::FlagValue::Boolean(bool)
 pub posthog::FlagValue::String(alloc::string::String)
 impl core::default::Default for posthog::FlagValue
 pub fn posthog::FlagValue::default() -> Self
-#[non_exhaustive] pub enum posthog::MessageCategoryType
-pub posthog::MessageCategoryType::Marketing
-pub posthog::MessageCategoryType::Transactional
-impl posthog::MessageCategoryType
-pub fn posthog::MessageCategoryType::as_str(self) -> &'static str
 #[non_exhaustive] pub enum posthog::PostHogError<'a>
 pub posthog::PostHogError::Capture(posthog::CaptureFailure<'a>)
 pub posthog::PostHogError::FeatureFlags(posthog::FlagsFailure<'a>)
@@ -423,7 +413,7 @@ impl posthog::CodeEmail
 pub fn posthog::CodeEmail::attachment(self, posthog::EmailAttachment) -> Self
 pub fn posthog::CodeEmail::bcc(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::capture_engagement(self, bool) -> Self
-pub fn posthog::CodeEmail::category(self, impl core::convert::Into<posthog::EmailCategory>) -> Self
+pub fn posthog::CodeEmail::category(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::cc(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::from(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -656,12 +646,6 @@ pub fn posthog::LocalEvaluator::evaluate_all_flags(&self, &str, &std::collection
 pub fn posthog::LocalEvaluator::evaluate_flag(&self, &str, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<core::option::Option<posthog::FlagValue>, posthog::InconclusiveMatchError>
 pub fn posthog::LocalEvaluator::evaluate_flag_simple(&self, &str, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<core::option::Option<posthog::FlagValue>, posthog::InconclusiveMatchError>
 pub fn posthog::LocalEvaluator::new(posthog::FlagCache) -> Self
-pub struct posthog::MessageCategory
-impl posthog::MessageCategory
-pub fn posthog::MessageCategory::description(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn posthog::MessageCategory::new(impl core::convert::Into<alloc::string::String>, posthog::MessageCategoryType, impl core::convert::Into<alloc::string::String>) -> Self
-impl core::convert::From<posthog::MessageCategory> for posthog::EmailCategory
-pub fn posthog::EmailCategory::from(posthog::MessageCategory) -> Self
 pub struct posthog::MultivariateFilter
 pub posthog::MultivariateFilter::variants: alloc::vec::Vec<posthog::MultivariateVariant>
 pub struct posthog::MultivariateVariant
