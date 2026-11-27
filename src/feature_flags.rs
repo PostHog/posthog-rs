@@ -2,6 +2,7 @@ use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
@@ -278,13 +279,48 @@ pub struct FeatureFlag {
 /// Definition fields local evaluation needs that are not on the public
 /// [`FeatureFlag`] and [`FeatureFlagFilters`]. Those structs can be built with a
 /// literal, so a new public field would break callers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DefinitionMetadata {
     /// Marks an early-access feature flag. The person property
     /// `$feature_enrollment/<flag key>` decides it before its release conditions.
     pub(crate) feature_enrollment: bool,
     /// The flag's value is persisted per person, so only the server knows it.
     pub(crate) ensure_experience_continuity: bool,
+    /// The flag's `filters.holdout`, as sent.
+    pub(crate) holdout: Option<serde_json::Value>,
+    /// Indexes of the conditions whose `aggregation_group_type_index` is an
+    /// explicit JSON `null`. Such a condition targets persons even on a group
+    /// flag, while a condition without the field uses the flag's aggregation.
+    pub(crate) person_conditions: Vec<usize>,
+    /// The `group_type_index` of each filter that has one, keyed by condition
+    /// index and then filter index. A group filter reads that group type.
+    pub(crate) filter_group_type_indexes: HashMap<(usize, usize), i32>,
+}
+
+impl DefinitionMetadata {
+    /// Whether the holdout excludes anyone. A missing or malformed holdout
+    /// excludes no one.
+    fn holdout_excludes(&self) -> bool {
+        self.holdout
+            .as_ref()
+            .and_then(|holdout| holdout.get("exclusion_percentage"))
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|percentage| percentage > 0.0)
+    }
+
+    /// The aggregation condition `index` uses: an explicit person condition
+    /// targets persons, any other falls back to the flag's aggregation.
+    fn condition_aggregation(
+        &self,
+        index: usize,
+        condition: &FeatureFlagCondition,
+        flag_aggregation: Option<i32>,
+    ) -> Option<i32> {
+        if self.person_conditions.contains(&index) {
+            return None;
+        }
+        condition.aggregation_group_type_index.or(flag_aggregation)
+    }
 }
 
 /// [`DefinitionMetadata`] by flag key. Flags without any are left out.
@@ -306,7 +342,7 @@ pub(crate) struct WireFlag {
 #[derive(Serialize, Deserialize, Default)]
 struct WireFilters {
     #[serde(default)]
-    groups: Vec<FeatureFlagCondition>,
+    groups: Vec<WireCondition>,
     #[serde(default)]
     multivariate: Option<MultivariateFilter>,
     #[serde(default)]
@@ -317,6 +353,42 @@ struct WireFilters {
     early_exit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     feature_enrollment: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holdout: Option<serde_json::Value>,
+}
+
+/// A [`FeatureFlagCondition`] as it is sent, telling an explicit `null`
+/// aggregation (`Some(None)`) apart from a missing one (`None`).
+#[derive(Serialize, Deserialize)]
+struct WireCondition {
+    #[serde(default)]
+    properties: Vec<WireProperty>,
+    rollout_percentage: Option<f64>,
+    variant: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    aggregation_group_type_index: Option<Option<i32>>,
+}
+
+/// A condition [`Property`] as it is sent, with its `group_type_index`.
+#[derive(Serialize, Deserialize)]
+struct WireProperty {
+    #[serde(flatten)]
+    property: Property,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group_type_index: Option<i32>,
+}
+
+/// Reads a field that is present, `null` included, as `Some`.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 impl WireFlag {
@@ -335,6 +407,35 @@ impl WireFlag {
                 },
             has_experiment,
         } = flag;
+        let groups = groups
+            .into_iter()
+            .enumerate()
+            .map(|(index, condition)| {
+                let aggregation = if metadata.person_conditions.contains(&index) {
+                    Some(None)
+                } else {
+                    condition.aggregation_group_type_index.map(Some)
+                };
+                let properties = condition
+                    .properties
+                    .into_iter()
+                    .enumerate()
+                    .map(|(filter_index, property)| WireProperty {
+                        property,
+                        group_type_index: metadata
+                            .filter_group_type_indexes
+                            .get(&(index, filter_index))
+                            .copied(),
+                    })
+                    .collect();
+                WireCondition {
+                    properties,
+                    rollout_percentage: condition.rollout_percentage,
+                    variant: condition.variant,
+                    aggregation_group_type_index: aggregation,
+                }
+            })
+            .collect();
         Self {
             key,
             active,
@@ -345,6 +446,7 @@ impl WireFlag {
                 aggregation_group_type_index,
                 early_exit,
                 feature_enrollment: metadata.feature_enrollment.then_some(true),
+                holdout: metadata.holdout,
             },
             has_experiment,
             ensure_experience_continuity: metadata.ensure_experience_continuity.then_some(true),
@@ -352,15 +454,54 @@ impl WireFlag {
     }
 
     pub(crate) fn into_parts(self) -> (FeatureFlag, DefinitionMetadata) {
+        let person_conditions = self
+            .filters
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, condition)| condition.aggregation_group_type_index == Some(None))
+            .map(|(index, _)| index)
+            .collect();
+        let filter_group_type_indexes = self
+            .filters
+            .groups
+            .iter()
+            .enumerate()
+            .flat_map(|(index, condition)| {
+                condition.properties.iter().enumerate().filter_map(
+                    move |(filter_index, property)| {
+                        Some(((index, filter_index), property.group_type_index?))
+                    },
+                )
+            })
+            .collect();
         let metadata = DefinitionMetadata {
             feature_enrollment: self.filters.feature_enrollment.unwrap_or(false),
             ensure_experience_continuity: self.ensure_experience_continuity.unwrap_or(false),
+            holdout: self.filters.holdout,
+            person_conditions,
+            filter_group_type_indexes,
         };
+        let groups = self
+            .filters
+            .groups
+            .into_iter()
+            .map(|condition| FeatureFlagCondition {
+                properties: condition
+                    .properties
+                    .into_iter()
+                    .map(|property| property.property)
+                    .collect(),
+                rollout_percentage: condition.rollout_percentage,
+                variant: condition.variant,
+                aggregation_group_type_index: condition.aggregation_group_type_index.flatten(),
+            })
+            .collect();
         let flag = FeatureFlag {
             key: self.key,
             active: self.active,
             filters: FeatureFlagFilters {
-                groups: self.filters.groups,
+                groups,
                 multivariate: self.filters.multivariate,
                 payloads: self.filters.payloads,
                 aggregation_group_type_index: self.filters.aggregation_group_type_index,
@@ -606,6 +747,139 @@ pub struct EvaluationContext<'a> {
     pub property_matching_version: i64,
 }
 
+/// The flags service keeps persons-table fields under this prefix, and a
+/// known-absent person key never hides them.
+const PERSON_METADATA_KEY_PREFIX: &str = "__posthog_person_metadata__";
+
+/// Property keys the caller knows are absent for one evaluation. A listed key
+/// is absent even when the supplied properties hold a value for it.
+#[derive(Debug, Default)]
+pub(crate) struct KnownAbsentProperties {
+    person: HashSet<String>,
+    groups: HashMap<String, HashSet<String>>,
+}
+
+impl KnownAbsentProperties {
+    pub(crate) fn new(
+        person: Option<&Vec<String>>,
+        groups: Option<&HashMap<String, Vec<String>>>,
+    ) -> Self {
+        Self {
+            person: person
+                .into_iter()
+                .flatten()
+                .filter(|key| !key.starts_with(PERSON_METADATA_KEY_PREFIX))
+                .cloned()
+                .collect(),
+            groups: groups
+                .into_iter()
+                .flatten()
+                .filter(|(_, keys)| !keys.is_empty())
+                .map(|(group_type, keys)| (group_type.clone(), keys.iter().cloned().collect()))
+                .collect(),
+        }
+    }
+}
+
+impl KnownAbsentProperties {
+    fn person_keys(&self) -> KnownAbsentKeys<'_> {
+        KnownAbsentKeys {
+            filter_type: "person",
+            keys: &self.person,
+        }
+    }
+}
+
+/// The known-absent keys that apply to one condition, with the filter type
+/// they resolve. Person keys resolve only `type: "person"` filters, and a
+/// group type's keys resolve only `type: "group"` filters that read that
+/// group type. Any other filter type, such as
+/// `person_metadata`, never resolves from a listing.
+#[derive(Clone, Copy)]
+struct KnownAbsentKeys<'a> {
+    filter_type: &'static str,
+    keys: &'a HashSet<String>,
+}
+
+impl KnownAbsentKeys<'_> {
+    fn contains(&self, property: &Property) -> bool {
+        // Flag dependency filters are resolved by evaluating the flag, never
+        // by property absence.
+        property.property_type.as_deref() == Some(self.filter_type)
+            && !property.key.starts_with("$feature/")
+            && self.keys.contains(&property.key)
+    }
+}
+
+/// [`EvaluationContext`] plus the caller's known-absent keys, kept separate so
+/// `EvaluationContext` stays constructible with a struct literal.
+#[derive(Clone, Copy)]
+struct PropertyMatchContext<'a> {
+    evaluation: &'a EvaluationContext<'a>,
+    /// The caller's person properties. A group condition matches group
+    /// properties, so flag dependencies read these instead.
+    person_properties: &'a HashMap<String, serde_json::Value>,
+    known_absent: &'a KnownAbsentProperties,
+    /// Known-absent keys for the properties being matched: the person list, or
+    /// the list for the condition's group type.
+    known_absent_keys: Option<KnownAbsentKeys<'a>>,
+    /// Metadata of the loaded definitions, so flag dependencies honor it too.
+    metadata: &'a DefinitionMetadataMap,
+    /// The flags being evaluated, from the innermost dependency outward.
+    dependency_path: Option<&'a DependencyPath<'a>>,
+    /// Flag dependency work for this top-level evaluation.
+    dependency_results: &'a RefCell<DependencyResults>,
+    /// How many flag dependencies and cohort levels enclose the property being
+    /// matched. The top-level flag's properties are at depth 0.
+    nesting_depth: usize,
+}
+
+/// Flag dependency work shared by one top-level flag evaluation.
+#[derive(Default)]
+struct DependencyResults {
+    /// Results keyed by flag key. Within one top-level evaluation a flag's
+    /// result depends only on the shared inputs, so a flag referenced many
+    /// times is evaluated once. Results that depend on where the flag was
+    /// reached aren't stored.
+    values: HashMap<String, CachedDependency>,
+    /// Dependencies evaluated so far. Results that depend on where the flag was
+    /// reached aren't reused, so this bounds the work they can repeat.
+    evaluations: usize,
+    /// The deepest dependency or cohort level reached by the flag being
+    /// evaluated.
+    deepest_dependency: usize,
+    /// Whether the flag being evaluated hit the depth limit, the evaluation
+    /// budget or a cycle, so its result depends on where it was reached.
+    is_path_dependent: bool,
+}
+
+/// A flag dependency result, the inconclusive message if it had none, and how
+/// much deeper than the flag its dependencies reach.
+struct CachedDependency {
+    result: Result<FlagValue, String>,
+    height: usize,
+}
+
+/// One flag on the chain of flag dependencies being evaluated, so a flag that
+/// depends on itself, directly or through others, is rejected as a cycle.
+struct DependencyPath<'a> {
+    flag_key: &'a str,
+    parent: Option<&'a DependencyPath<'a>>,
+}
+
+impl DependencyPath<'_> {
+    fn contains(&self, flag_key: &str) -> bool {
+        let mut node = Some(self);
+        while let Some(current) = node {
+            if current.flag_key == flag_key {
+                return true;
+            }
+            node = current.parent;
+        }
+        false
+    }
+}
+
 /// Configuration for multivariate (A/B/n) feature flags.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MultivariateFilter {
@@ -844,53 +1118,191 @@ enum ConditionTarget<'a> {
     Use {
         bucketing: String,
         properties: &'a HashMap<String, serde_json::Value>,
+        known_absent_keys: Option<KnownAbsentKeys<'a>>,
     },
-    /// Skip this condition (group type unknown or required group not passed in).
+    /// Skip this condition (group type unknown, or the required group key is
+    /// missing or empty).
     Skip,
     /// Required group properties not provided — try other conditions, surface
     /// inconclusive if nothing else matches.
     Inconclusive,
 }
 
+/// The group type and key for group type `index`, when the type is known and
+/// its key is usable. An empty group key counts as no key, matching the PostHog
+/// Rust backend's `is_usable_group_key`.
+fn usable_group_key<'a>(
+    index: i32,
+    groups: &'a HashMap<String, String>,
+    group_type_mapping: &'a HashMap<String, String>,
+) -> Option<(&'a String, &'a String)> {
+    let group_type = group_type_mapping.get(&index.to_string())?;
+    let group_key = groups.get(group_type).filter(|key| !key.is_empty())?;
+    Some((group_type, group_key))
+}
+
 /// Resolve effective bucketing id and properties for a single condition based on
-/// the (possibly per-condition) aggregation group type index. Pure-person flags
+/// its effective aggregation group type index. Pure-person flags
 /// fall through with `distinct_id` and `person_properties`. Group conditions
 /// (either flag-level or per-condition aggregation) require the corresponding
-/// group key and group properties to be present.
+/// group key, and group properties unless the group type has known-absent keys.
+#[allow(clippy::too_many_arguments)]
 fn resolve_condition_target<'a>(
-    condition: &FeatureFlagCondition,
-    flag_aggregation: Option<i32>,
+    effective_aggregation: Option<i32>,
     distinct_id: &str,
     person_properties: &'a HashMap<String, serde_json::Value>,
     groups: &HashMap<String, String>,
     group_properties: &'a HashMap<String, HashMap<String, serde_json::Value>>,
     group_type_mapping: &HashMap<String, String>,
+    known_absent: &'a KnownAbsentProperties,
 ) -> ConditionTarget<'a> {
-    // Per-condition aggregation falls back to the flag-level value when absent.
-    // The two together drive whether this condition is person- or group-targeted.
-    let effective_aggregation = condition.aggregation_group_type_index.or(flag_aggregation);
+    static NO_PROPERTIES: OnceLock<HashMap<String, serde_json::Value>> = OnceLock::new();
 
     match effective_aggregation {
         None => ConditionTarget::Use {
             bucketing: distinct_id.to_string(),
             properties: person_properties,
+            known_absent_keys: Some(known_absent.person_keys()),
         },
         Some(idx) => {
-            let key = idx.to_string();
-            let Some(group_type) = group_type_mapping.get(&key) else {
+            let Some((group_type, group_key)) = usable_group_key(idx, groups, group_type_mapping)
+            else {
                 return ConditionTarget::Skip;
             };
-            let Some(group_key) = groups.get(group_type) else {
-                return ConditionTarget::Skip;
-            };
-            let Some(props) = group_properties.get(group_type) else {
-                return ConditionTarget::Inconclusive;
+            let known_absent_keys =
+                known_absent
+                    .groups
+                    .get(group_type)
+                    .map(|keys| KnownAbsentKeys {
+                        filter_type: "group",
+                        keys,
+                    });
+            let props = match group_properties.get(group_type) {
+                Some(props) => props,
+                None if known_absent_keys.is_some() => NO_PROPERTIES.get_or_init(HashMap::new),
+                None => return ConditionTarget::Inconclusive,
             };
             ConditionTarget::Use {
                 bucketing: group_key.clone(),
                 properties: props,
+                known_absent_keys,
             }
         }
+    }
+}
+
+/// Where one condition filter reads its properties.
+enum FilterSource<'a> {
+    /// The condition's properties and known-absent keys.
+    Condition,
+    /// These properties and known-absent keys. With `missing_is_absent`, the
+    /// properties are complete, so a key missing from them is absent.
+    Properties {
+        properties: &'a HashMap<String, serde_json::Value>,
+        known_absent_keys: Option<KnownAbsentKeys<'a>>,
+        missing_is_absent: bool,
+    },
+    /// The filter doesn't match.
+    NoMatch,
+}
+
+/// The inputs a condition filter can read besides the condition's own
+/// properties, as the flags service routes them in
+/// `PropertyContext::resolve_for_filter` and `filter_needs_partial_props`.
+struct FilterSources<'a> {
+    condition_aggregation: Option<i32>,
+    person_properties: &'a HashMap<String, serde_json::Value>,
+    groups: &'a HashMap<String, String>,
+    group_properties: &'a HashMap<String, HashMap<String, serde_json::Value>>,
+    group_type_mapping: &'a HashMap<String, String>,
+    known_absent: &'a KnownAbsentProperties,
+    definition: &'a DefinitionMetadata,
+}
+
+impl<'a> FilterSources<'a> {
+    fn source(
+        &self,
+        condition_index: usize,
+        filter_index: usize,
+        property: &Property,
+    ) -> FilterSource<'a> {
+        match property.property_type.as_deref() {
+            // A person filter reads person properties whatever the condition
+            // aggregates on.
+            Some("person") if self.condition_aggregation.is_some() => {
+                return FilterSource::Properties {
+                    properties: self.person_properties,
+                    known_absent_keys: Some(self.known_absent.person_keys()),
+                    missing_is_absent: false,
+                };
+            }
+            Some("group") => {}
+            _ => return FilterSource::Condition,
+        }
+        match self
+            .definition
+            .filter_group_type_indexes
+            .get(&(condition_index, filter_index))
+        {
+            Some(&index) if Some(index) != self.condition_aggregation => {
+                self.group_type_source(index)
+            }
+            _ => FilterSource::Condition,
+        }
+    }
+
+    /// The source of a group filter whose `group_type_index` names a group
+    /// type other than the condition's aggregation.
+    fn group_type_source(&self, index: i32) -> FilterSource<'a> {
+        static NO_PROPERTIES: OnceLock<HashMap<String, serde_json::Value>> = OnceLock::new();
+        let no_properties = NO_PROPERTIES.get_or_init(HashMap::new);
+
+        let Some(group_type) = self.group_type_mapping.get(&index.to_string()) else {
+            // The flags service can't tell which supplied group has this
+            // index, so with any group context the filter doesn't match.
+            // Without it, the filter reads no properties.
+            if self.has_group_context() {
+                return FilterSource::NoMatch;
+            }
+            return FilterSource::Properties {
+                properties: no_properties,
+                known_absent_keys: None,
+                missing_is_absent: true,
+            };
+        };
+        FilterSource::Properties {
+            properties: self
+                .group_properties
+                .get(group_type)
+                .unwrap_or(no_properties),
+            known_absent_keys: self.known_absent.groups.get(group_type).map(|keys| {
+                KnownAbsentKeys {
+                    filter_type: "group",
+                    keys,
+                }
+            }),
+            // Without a usable key there is no group to load properties for,
+            // so the supplied ones are complete.
+            missing_is_absent: usable_group_key(index, self.groups, self.group_type_mapping)
+                .is_none(),
+        }
+    }
+
+    /// A usable group key, or a group property other than an unusable
+    /// `$group_key`, as the flags service decides `request_has_group_context`.
+    fn has_group_context(&self) -> bool {
+        self.groups.values().any(|key| !key.is_empty())
+            || self
+                .group_properties
+                .values()
+                .flatten()
+                .any(|(key, value)| {
+                    key != "$group_key"
+                        || match value {
+                            serde_json::Value::String(key) => !key.is_empty(),
+                            value => value.is_number(),
+                        }
+                })
     }
 }
 
@@ -913,6 +1325,15 @@ fn resolve_condition_target<'a>(
 /// `Boolean(true)` for matched boolean flags, or `String(variant)` for matched
 /// multivariate flags.
 ///
+/// A hand-built [`FeatureFlag`] can't express a condition with an explicit
+/// person aggregation (JSON `null` under a group flag), a holdout or a group
+/// filter's own `group_type_index`, so a condition without its own aggregation
+/// uses the flag's, holdouts are ignored and group filters read the
+/// condition's group type. Definitions loaded by
+/// [`LocalEvaluator`](crate::LocalEvaluator) follow the flags service for
+/// explicit person conditions and group filter indexes, and are inconclusive
+/// when their holdout excludes anyone.
+///
 /// # Errors
 ///
 /// Returns [`InconclusiveMatchError`] when required properties are missing or an
@@ -934,7 +1355,11 @@ pub fn match_feature_flag(
         groups,
         group_properties,
         group_type_mapping,
-        |property, properties| match_property_with_version(property, properties, 1),
+        &KnownAbsentProperties::default(),
+        None,
+        |property, properties, known_absent_keys| {
+            match_property_with_version(property, properties, 1, known_absent_keys)
+        },
     )
 }
 
@@ -947,6 +1372,8 @@ pub(crate) fn match_feature_flag_with_version(
     group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     group_type_mapping: &HashMap<String, String>,
     property_matching_version: i64,
+    known_absent: &KnownAbsentProperties,
+    metadata: &DefinitionMetadataMap,
 ) -> Result<FlagValue, InconclusiveMatchError> {
     evaluate_feature_flag(
         flag,
@@ -955,8 +1382,15 @@ pub(crate) fn match_feature_flag_with_version(
         groups,
         group_properties,
         group_type_mapping,
-        |property, properties| {
-            match_property_with_version(property, properties, property_matching_version)
+        known_absent,
+        metadata.get(&flag.key),
+        |property, properties, known_absent_keys| {
+            match_property_with_version(
+                property,
+                properties,
+                property_matching_version,
+                known_absent_keys,
+            )
         },
     )
 }
@@ -977,23 +1411,47 @@ enum ConditionMatch {
     OutOfRolloutBound,
 }
 
-fn is_condition_match<F>(
+#[allow(clippy::too_many_arguments)]
+fn is_condition_match<'a, F>(
     flag: &FeatureFlag,
     bucketing_id: &str,
+    condition_index: usize,
     condition: &FeatureFlagCondition,
-    properties: &HashMap<String, serde_json::Value>,
+    properties: &'a HashMap<String, serde_json::Value>,
+    known_absent_keys: Option<KnownAbsentKeys<'a>>,
+    filter_sources: &FilterSources<'a>,
     property_matcher: &F,
 ) -> Result<ConditionMatch, InconclusiveMatchError>
 where
-    F: Fn(&Property, &HashMap<String, serde_json::Value>) -> Result<bool, InconclusiveMatchError>,
+    F: PropertyMatcher,
 {
     // Check properties first. The caller supplies either the basic matcher or
     // the context-aware matcher; rollout handling remains identical.
     // Filters in a condition have no defined order, so an inconclusive filter
     // doesn't stop the loop: a later filter can still rule the condition out.
     let mut inconclusive = None;
-    for prop in &condition.properties {
-        match property_matcher(prop, properties) {
+    for (filter_index, prop) in condition.properties.iter().enumerate() {
+        let result = match filter_sources.source(condition_index, filter_index, prop) {
+            FilterSource::Condition => property_matcher(prop, properties, known_absent_keys),
+            FilterSource::Properties {
+                properties,
+                known_absent_keys,
+                missing_is_absent,
+            } => {
+                // A flag dependency is resolved by evaluating the flag, never
+                // by property absence.
+                if missing_is_absent
+                    && !prop.key.starts_with("$feature/")
+                    && !properties.contains_key(&prop.key)
+                {
+                    match_known_absent_property(prop)
+                } else {
+                    property_matcher(prop, properties, known_absent_keys)
+                }
+            }
+            FilterSource::NoMatch => Ok(false),
+        };
+        match result {
             Ok(true) => {}
             Ok(false) => return Ok(ConditionMatch::NoMatch),
             Err(err) => {
@@ -1023,6 +1481,15 @@ where
 /// properties are looked up from `ctx.group_properties` when a condition (or
 /// the flag itself) targets a group via `aggregation_group_type_index`.
 ///
+/// A hand-built [`FeatureFlag`] can't express a condition with an explicit
+/// person aggregation (JSON `null` under a group flag), a holdout or a group
+/// filter's own `group_type_index`, so a condition without its own aggregation
+/// uses the flag's, holdouts are ignored and group filters read the
+/// condition's group type. Definitions loaded by
+/// [`LocalEvaluator`](crate::LocalEvaluator) follow the flags service for
+/// explicit person conditions and group filter indexes, and are inconclusive
+/// when their holdout excludes anyone.
+///
 /// # Errors
 ///
 /// Returns [`InconclusiveMatchError`] when local evaluation cannot determine a
@@ -1033,23 +1500,66 @@ pub fn match_feature_flag_with_context(
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    match_flag_definition(flag, person_properties, ctx, &HashMap::new())
+    match_flag_definition(
+        flag,
+        person_properties,
+        ctx,
+        &KnownAbsentProperties::default(),
+        &HashMap::new(),
+    )
 }
 
-/// [`match_feature_flag_with_context`] with the metadata of loaded definitions.
+#[cfg(test)]
+pub(crate) fn match_feature_flag_with_known_absent(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+    known_absent: &KnownAbsentProperties,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    match_flag_definition(flag, person_properties, ctx, known_absent, &HashMap::new())
+}
+
+/// [`match_feature_flag_with_context`] with the caller's known-absent keys and
+/// the metadata of loaded definitions.
 pub(crate) fn match_flag_definition(
     flag: &FeatureFlag,
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
+    known_absent: &KnownAbsentProperties,
     metadata: &DefinitionMetadataMap,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    if let Some(result) = metadata_result(flag, person_properties, metadata) {
+    match_feature_flag_in_context(
+        flag,
+        person_properties,
+        ctx,
+        known_absent,
+        metadata,
+        None,
+        &RefCell::default(),
+        0,
+    )
+}
+
+/// Evaluates a top-level flag, or a flag dependency with the same top-level
+/// inputs. `dependency_path` holds the flags already being evaluated, and
+/// `nesting_depth` is the depth of the flag's properties.
+#[allow(clippy::too_many_arguments)]
+fn match_feature_flag_in_context(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+    known_absent: &KnownAbsentProperties,
+    metadata: &DefinitionMetadataMap,
+    dependency_path: Option<&DependencyPath>,
+    dependency_results: &RefCell<DependencyResults>,
+    nesting_depth: usize,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    if let Some(result) = metadata_result(flag, person_properties, known_absent, metadata) {
         return result;
     }
-    let scope = EvaluationScope {
-        ctx,
-        person_properties,
-        metadata,
+    let dependency_path = DependencyPath {
+        flag_key: &flag.key,
+        parent: dependency_path,
     };
     evaluate_feature_flag(
         flag,
@@ -1058,8 +1568,45 @@ pub(crate) fn match_flag_definition(
         ctx.groups,
         ctx.group_properties,
         ctx.group_type_mapping,
-        |property, properties| match_property_in_scope(property, properties, scope),
+        known_absent,
+        metadata.get(&flag.key),
+        |property, properties, known_absent_keys| {
+            match_property_in_context(
+                property,
+                properties,
+                &PropertyMatchContext {
+                    evaluation: ctx,
+                    person_properties,
+                    known_absent,
+                    known_absent_keys,
+                    metadata,
+                    dependency_path: Some(&dependency_path),
+                    dependency_results,
+                    nesting_depth,
+                },
+            )
+        },
     )
+}
+
+/// Matches one property filter against the condition's properties and the
+/// known-absent keys that apply to them.
+trait PropertyMatcher:
+    Fn(
+    &Property,
+    &HashMap<String, serde_json::Value>,
+    Option<KnownAbsentKeys>,
+) -> Result<bool, InconclusiveMatchError>
+{
+}
+
+impl<F> PropertyMatcher for F where
+    F: Fn(
+        &Property,
+        &HashMap<String, serde_json::Value>,
+        Option<KnownAbsentKeys>,
+    ) -> Result<bool, InconclusiveMatchError>
+{
 }
 
 /// The result of an active flag whose metadata decides it before its group
@@ -1067,6 +1614,7 @@ pub(crate) fn match_flag_definition(
 pub(crate) fn metadata_result(
     flag: &FeatureFlag,
     person_properties: &HashMap<String, serde_json::Value>,
+    known_absent: &KnownAbsentProperties,
     metadata: &DefinitionMetadataMap,
 ) -> Option<Result<FlagValue, InconclusiveMatchError>> {
     let metadata = metadata.get(&flag.key).filter(|_| flag.active)?;
@@ -1075,9 +1623,11 @@ pub(crate) fn metadata_result(
             "Flag has experience continuity enabled",
         )));
     }
-    metadata
-        .feature_enrollment
-        .then(|| match_feature_enrollment(flag, person_properties))
+    let enrollment_key = format!("$feature_enrollment/{}", flag.key);
+    // A listed enrollment key means the person isn't enrolled, even when a
+    // value was supplied, so the holdout and release conditions decide.
+    (metadata.feature_enrollment && !known_absent.person.contains(&enrollment_key))
+        .then(|| match_feature_enrollment(&enrollment_key, person_properties))
 }
 
 /// An early-access feature flag returns the person's enrollment at once:
@@ -1085,11 +1635,10 @@ pub(crate) fn metadata_result(
 /// `null` included, means opted out. Without the enrollment property the flag
 /// can't be resolved locally.
 fn match_feature_enrollment(
-    flag: &FeatureFlag,
+    enrollment_key: &str,
     person_properties: &HashMap<String, serde_json::Value>,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    let enrollment_key = format!("$feature_enrollment/{}", flag.key);
-    match person_properties.get(&enrollment_key) {
+    match person_properties.get(enrollment_key) {
         None => Err(InconclusiveMatchError::new(&format!(
             "Flag has feature enrollment and '{enrollment_key}' was not passed"
         ))),
@@ -1097,16 +1646,6 @@ fn match_feature_enrollment(
         Some(serde_json::Value::String(enrolled)) => Ok(FlagValue::Boolean(enrolled == "true")),
         Some(_) => Ok(FlagValue::Boolean(false)),
     }
-}
-
-/// What property filters are matched in, in addition to the properties of the
-/// condition's target.
-#[derive(Clone, Copy)]
-struct EvaluationScope<'a> {
-    ctx: &'a EvaluationContext<'a>,
-    /// The person's properties, also where the condition targets a group.
-    person_properties: &'a HashMap<String, serde_json::Value>,
-    metadata: &'a DefinitionMetadataMap,
 }
 
 /// Shared feature flag evaluation engine. Public entry points differ only in
@@ -1119,45 +1658,79 @@ fn evaluate_feature_flag<F>(
     groups: &HashMap<String, String>,
     group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     group_type_mapping: &HashMap<String, String>,
+    known_absent: &KnownAbsentProperties,
+    definition: Option<&DefinitionMetadata>,
     property_matcher: F,
 ) -> Result<FlagValue, InconclusiveMatchError>
 where
-    F: Fn(&Property, &HashMap<String, serde_json::Value>) -> Result<bool, InconclusiveMatchError>,
+    F: PropertyMatcher,
 {
     if !flag.active {
         return Ok(FlagValue::Boolean(false));
     }
 
+    let no_metadata = DefinitionMetadata::default();
+    let definition = definition.unwrap_or(&no_metadata);
     let flag_aggregation = flag.filters.aggregation_group_type_index;
+
+    // The flags service checks the holdout before the release conditions, and
+    // this SDK doesn't evaluate holdouts, so only the server can tell whether
+    // the holdout catches the flag. Without a usable group key the cause is the
+    // missing context, which the message names first.
+    if definition.holdout_excludes() {
+        let message = if flag_aggregation
+            .is_some_and(|index| usable_group_key(index, groups, group_type_mapping).is_none())
+        {
+            "Flag has a holdout and its group key is missing"
+        } else {
+            "Flag has a holdout, which local evaluation doesn't support"
+        };
+        return Err(InconclusiveMatchError::new(message));
+    }
 
     let mut is_inconclusive = false;
 
-    for condition in &flag.filters.groups {
-        let (effective_bucketing, effective_properties) = match resolve_condition_target(
-            condition,
-            flag_aggregation,
-            distinct_id,
+    for (index, condition) in flag.filters.groups.iter().enumerate() {
+        let aggregation = definition.condition_aggregation(index, condition, flag_aggregation);
+        let (effective_bucketing, effective_properties, known_absent_keys) =
+            match resolve_condition_target(
+                aggregation,
+                distinct_id,
+                person_properties,
+                groups,
+                group_properties,
+                group_type_mapping,
+                known_absent,
+            ) {
+                ConditionTarget::Use {
+                    bucketing,
+                    properties,
+                    known_absent_keys,
+                } => (bucketing, properties, known_absent_keys),
+                ConditionTarget::Skip => continue,
+                ConditionTarget::Inconclusive => {
+                    is_inconclusive = true;
+                    continue;
+                }
+            };
+
+        let filter_sources = FilterSources {
+            condition_aggregation: aggregation,
             person_properties,
             groups,
             group_properties,
             group_type_mapping,
-        ) {
-            ConditionTarget::Use {
-                bucketing,
-                properties,
-            } => (bucketing, properties),
-            ConditionTarget::Skip => continue,
-            ConditionTarget::Inconclusive => {
-                is_inconclusive = true;
-                continue;
-            }
+            known_absent,
+            definition,
         };
-
         match is_condition_match(
             flag,
             &effective_bucketing,
+            index,
             condition,
             effective_properties,
+            known_absent_keys,
+            &filter_sources,
             &property_matcher,
         ) {
             Ok(ConditionMatch::Match) => {
@@ -1209,6 +1782,8 @@ where
 /// cohort membership (`type = "cohort"`) or another feature flag via
 /// `$feature/<flag-key>`.
 ///
+/// A referenced flag is evaluated with `properties` as the person properties.
+///
 /// # Errors
 ///
 /// Returns [`InconclusiveMatchError`] when the property, cohort, or dependent
@@ -1218,46 +1793,80 @@ pub fn match_property_with_context(
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<bool, InconclusiveMatchError> {
-    let scope = EvaluationScope {
-        ctx,
-        // Not read without metadata.
-        person_properties: properties,
-        metadata: &HashMap::new(),
-    };
-    match_property_in_scope(property, properties, scope)
+    match_property_in_context(
+        property,
+        properties,
+        &PropertyMatchContext {
+            evaluation: ctx,
+            person_properties: properties,
+            known_absent: &KnownAbsentProperties::default(),
+            known_absent_keys: None,
+            metadata: &HashMap::new(),
+            dependency_path: None,
+            dependency_results: &RefCell::default(),
+            nesting_depth: 0,
+        },
+    )
 }
 
-fn match_property_in_scope(
+fn match_property_in_context(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
-    scope: EvaluationScope,
+    ctx: &PropertyMatchContext,
 ) -> Result<bool, InconclusiveMatchError> {
     // Check if this is a cohort membership check
     if property.property_type.as_deref() == Some("cohort") {
-        return match_cohort_property(property, properties, scope);
+        return match_cohort_property(property, properties, ctx);
     }
 
     // Check if this is a flag dependency check
     if property.key.starts_with("$feature/") {
-        return match_flag_dependency_property(property, scope);
+        return match_flag_dependency_property(property, ctx);
     }
 
     // Use the same snapshot version for direct and recursive cohort leaves.
-    match_property_with_version(property, properties, scope.ctx.property_matching_version)
+    match_property_with_version(
+        property,
+        properties,
+        ctx.evaluation.property_matching_version,
+        ctx.known_absent_keys,
+    )
 }
 
 /// Evaluate cohort membership referenced by a flag property (`type = "cohort"`).
 fn match_cohort_property(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
-    scope: EvaluationScope,
+    ctx: &PropertyMatchContext,
 ) -> Result<bool, InconclusiveMatchError> {
     let cohort_id = cohort_id_to_string(&property.value)
         .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string or number"))?;
 
+    // A cohort in a group condition gets no group known-absent keys. Its
+    // person leaves read the person keys on their own.
+    let cohort_ctx = PropertyMatchContext {
+        evaluation: ctx.evaluation,
+        person_properties: ctx.person_properties,
+        known_absent: ctx.known_absent,
+        known_absent_keys: ctx
+            .known_absent_keys
+            .filter(|keys| keys.filter_type == "person"),
+        metadata: ctx.metadata,
+        dependency_path: ctx.dependency_path,
+        dependency_results: ctx.dependency_results,
+        nesting_depth: ctx.nesting_depth,
+    };
+    // Cohort levels count on from the enclosing flag dependency depth, so
+    // flags and cohorts share one depth limit.
     let mut active_cohorts = HashSet::new();
-    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, scope, &mut active_cohorts, 0)
-        .map_err(CohortMatchError::into_inconclusive)?;
+    let is_in_cohort = match_cohort_by_id(
+        &cohort_id,
+        properties,
+        &cohort_ctx,
+        &mut active_cohorts,
+        ctx.nesting_depth,
+    )
+    .map_err(CohortMatchError::into_inconclusive)?;
 
     // Cohort references omit the operator in API payloads, so "exact" means membership.
     Ok(match property.operator.as_str() {
@@ -1305,13 +1914,24 @@ impl CohortMatchError {
 }
 
 /// How deeply local cohort evaluation will recurse through cohort references
-/// and nested property groups combined.
+/// and nested property groups combined, counting on from the flag dependency
+/// depth the cohort is reached at.
 ///
 /// A cycle check alone bounds repeats, not depth: a chain of distinct cohorts is
 /// acyclic and still recurses once per link. Counting only cohort references is
 /// also insufficient because each cohort can contain nested property groups.
-/// Real cohort nesting is a handful of levels at most.
-const MAX_COHORT_RESOLUTION_DEPTH: usize = 100;
+/// Real cohort nesting is a handful of levels at most. Cached flag dependency
+/// results are reused only where their cohort levels fit under the flag
+/// dependency limit, so the two limits are the same.
+const MAX_COHORT_RESOLUTION_DEPTH: usize = MAX_FLAG_DEPENDENCY_DEPTH;
+
+/// How many flags deep local evaluation follows flag dependencies. Cohort levels
+/// a dependency is reached through count too, so alternating cohorts and flags
+/// can't nest past either limit.
+const MAX_FLAG_DEPENDENCY_DEPTH: usize = 100;
+
+/// How many flag dependencies one top-level flag evaluation evaluates at most.
+const MAX_FLAG_DEPENDENCY_EVALUATIONS: usize = 1000;
 
 /// Look up a cohort by ID and evaluate its property group against `properties`.
 ///
@@ -1323,11 +1943,11 @@ const MAX_COHORT_RESOLUTION_DEPTH: usize = 100;
 fn match_cohort_by_id(
     cohort_id: &str,
     properties: &HashMap<String, serde_json::Value>,
-    scope: EvaluationScope,
+    ctx: &PropertyMatchContext,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
-    let cohort = scope.ctx.cohorts.get(cohort_id).ok_or_else(|| {
+    let cohort = ctx.evaluation.cohorts.get(cohort_id).ok_or_else(|| {
         CohortMatchError::MissingCohort(InconclusiveMatchError::new(&format!(
             "Cohort '{}' not found in local cache",
             cohort_id
@@ -1335,6 +1955,7 @@ fn match_cohort_by_id(
     })?;
 
     if resolution_depth >= MAX_COHORT_RESOLUTION_DEPTH {
+        ctx.dependency_results.borrow_mut().is_path_dependent = true;
         return Err(CohortMatchError::InvalidDefinition(
             InconclusiveMatchError::new(&format!(
                 "Cohort '{}' is nested deeper than the limit of {}",
@@ -1355,7 +1976,7 @@ fn match_cohort_by_id(
     let result = match_property_group(
         &cohort.properties,
         properties,
-        scope,
+        ctx,
         active_cohorts,
         resolution_depth,
     );
@@ -1376,11 +1997,12 @@ fn match_cohort_by_id(
 fn match_property_group(
     group: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
-    scope: EvaluationScope,
+    ctx: &PropertyMatchContext,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
     if resolution_depth >= MAX_COHORT_RESOLUTION_DEPTH {
+        ctx.dependency_results.borrow_mut().is_path_dependent = true;
         return Err(CohortMatchError::InvalidDefinition(
             InconclusiveMatchError::new(&format!(
                 "Cohort property groups are nested deeper than the limit of {}",
@@ -1388,13 +2010,17 @@ fn match_property_group(
             )),
         ));
     }
+    {
+        let mut results = ctx.dependency_results.borrow_mut();
+        results.deepest_dependency = results.deepest_dependency.max(resolution_depth);
+    }
 
     if let Some(arr) = group.as_array() {
         return match_property_group_values(
             "AND",
             arr,
             properties,
-            scope,
+            ctx,
             active_cohorts,
             resolution_depth,
         );
@@ -1423,7 +2049,7 @@ fn match_property_group(
         group_type,
         values,
         properties,
-        scope,
+        ctx,
         active_cohorts,
         resolution_depth,
     )
@@ -1440,7 +2066,7 @@ fn match_property_group_values(
     group_type: &str,
     values: &[serde_json::Value],
     properties: &HashMap<String, serde_json::Value>,
-    scope: EvaluationScope,
+    ctx: &PropertyMatchContext,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
@@ -1455,28 +2081,35 @@ fn match_property_group_values(
     for value in values {
         let result = if value.get("values").is_some() {
             // Nested property group.
-            match_property_group(
-                value,
-                properties,
-                scope,
-                active_cohorts,
-                resolution_depth + 1,
-            )
+            match_property_group(value, properties, ctx, active_cohorts, resolution_depth + 1)
         } else if value.get("type").and_then(|t| t.as_str()) == Some("cohort") {
             // A cohort filter nested inside another cohort.
-            match_nested_cohort(
-                value,
-                properties,
-                scope,
-                active_cohorts,
-                resolution_depth + 1,
-            )
+            match_nested_cohort(value, properties, ctx, active_cohorts, resolution_depth + 1)
         } else {
-            // Leaf property filter.
+            // Leaf property filter. A person leaf reads person properties
+            // whatever the condition aggregates on.
             match serde_json::from_value::<CohortProperty>(value.clone()) {
-                Ok(prop) => match_property_in_scope(&prop.property, properties, scope)
-                    .map(|matches| matches != prop.negation)
-                    .map_err(CohortMatchError::Inconclusive),
+                Ok(prop) => {
+                    let leaf_ctx = PropertyMatchContext {
+                        nesting_depth: resolution_depth + 1,
+                        ..*ctx
+                    };
+                    let (properties, leaf_ctx) =
+                        if prop.property.property_type.as_deref() == Some("person") {
+                            (
+                                ctx.person_properties,
+                                PropertyMatchContext {
+                                    known_absent_keys: Some(ctx.known_absent.person_keys()),
+                                    ..leaf_ctx
+                                },
+                            )
+                        } else {
+                            (properties, leaf_ctx)
+                        };
+                    match_property_in_context(&prop.property, properties, &leaf_ctx)
+                }
+                .map(|matches| matches != prop.negation)
+                .map_err(CohortMatchError::Inconclusive),
                 Err(e) => Err(CohortMatchError::InvalidDefinition(
                     InconclusiveMatchError::new(&format!("Unable to parse cohort property: {}", e)),
                 )),
@@ -1509,7 +2142,7 @@ fn match_property_group_values(
 fn match_nested_cohort(
     value: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
-    scope: EvaluationScope,
+    ctx: &PropertyMatchContext,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
@@ -1530,44 +2163,31 @@ fn match_nested_cohort(
     let is_member = match_cohort_by_id(
         &cohort_id,
         properties,
-        scope,
+        ctx,
         active_cohorts,
         resolution_depth,
     )?;
     Ok(is_member != negation)
 }
 
-/// Evaluate flag dependency
+/// Evaluate a flag dependency. The referenced flag is evaluated exactly as if
+/// it were evaluated directly with the same top-level inputs, so it uses its
+/// own aggregation, properties and bucketing identifier.
 fn match_flag_dependency_property(
     property: &Property,
-    scope: EvaluationScope,
+    ctx: &PropertyMatchContext,
 ) -> Result<bool, InconclusiveMatchError> {
-    let ctx = scope.ctx;
-
     // Extract flag key from "$feature/flag-key"
     let flag_key = property
         .key
         .strip_prefix("$feature/")
         .ok_or_else(|| InconclusiveMatchError::new("Invalid flag dependency format"))?;
 
-    let flag = ctx.flags.get(flag_key).ok_or_else(|| {
+    let flag = ctx.evaluation.flags.get(flag_key).ok_or_else(|| {
         InconclusiveMatchError::new(&format!("Flag '{}' not found in local cache", flag_key))
     })?;
 
-    // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
-    // Group context flows through from the outer ctx so dependent group/mixed flags can resolve.
-    let flag_value = match metadata_result(flag, scope.person_properties, scope.metadata) {
-        Some(result) => result?,
-        None => match_feature_flag_with_version(
-            flag,
-            ctx.distinct_id,
-            &HashMap::new(),
-            ctx.groups,
-            ctx.group_properties,
-            ctx.group_type_mapping,
-            ctx.property_matching_version,
-        )?,
-    };
+    let flag_value = evaluate_flag_dependency(flag, ctx)?;
 
     // Compare the flag value with the expected value
     let expected = &property.value;
@@ -1602,6 +2222,94 @@ fn match_flag_dependency_property(
             )));
         }
     })
+}
+
+/// Evaluate the flag a dependency filter references, or reuse its result from
+/// earlier in the same top-level evaluation.
+fn evaluate_flag_dependency(
+    flag: &FeatureFlag,
+    ctx: &PropertyMatchContext,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    let results = ctx.dependency_results;
+    let depth = ctx.nesting_depth + 1;
+
+    if ctx
+        .dependency_path
+        .is_some_and(|path| path.contains(&flag.key))
+    {
+        results.borrow_mut().is_path_dependent = true;
+        return Err(InconclusiveMatchError::new(&format!(
+            "Flag '{}' is part of a dependency cycle",
+            flag.key
+        )));
+    }
+
+    if depth >= MAX_FLAG_DEPENDENCY_DEPTH {
+        results.borrow_mut().is_path_dependent = true;
+        return Err(InconclusiveMatchError::new(&format!(
+            "Flag dependency chain is deeper than the limit of {}",
+            MAX_FLAG_DEPENDENCY_DEPTH
+        )));
+    }
+
+    // A cached result whose dependencies don't fit under the limit from here
+    // is evaluated again, so it hits the limit exactly where a fresh
+    // evaluation would.
+    let cached = results.borrow().values.get(&flag.key).and_then(|cached| {
+        (depth + cached.height < MAX_FLAG_DEPENDENCY_DEPTH)
+            .then(|| (cached.result.clone(), depth + cached.height))
+    });
+    if let Some((result, deepest)) = cached {
+        let mut results = results.borrow_mut();
+        results.deepest_dependency = results.deepest_dependency.max(deepest);
+        return result.map_err(|message| InconclusiveMatchError::new(&message));
+    }
+
+    let (outer_deepest, outer_is_path_dependent) = {
+        let mut results = results.borrow_mut();
+        if results.evaluations >= MAX_FLAG_DEPENDENCY_EVALUATIONS {
+            results.is_path_dependent = true;
+            return Err(InconclusiveMatchError::new(&format!(
+                "Too many flag dependency evaluations, over the limit of {}",
+                MAX_FLAG_DEPENDENCY_EVALUATIONS
+            )));
+        }
+        results.evaluations += 1;
+        let outer = (results.deepest_dependency, results.is_path_dependent);
+        results.deepest_dependency = depth;
+        results.is_path_dependent = false;
+        outer
+    };
+
+    let result = match_feature_flag_in_context(
+        flag,
+        ctx.person_properties,
+        ctx.evaluation,
+        ctx.known_absent,
+        ctx.metadata,
+        ctx.dependency_path,
+        results,
+        depth,
+    );
+
+    let mut results = results.borrow_mut();
+    let inner_deepest = results.deepest_dependency;
+    let inner_is_path_dependent = results.is_path_dependent;
+    if !inner_is_path_dependent {
+        results.values.insert(
+            flag.key.clone(),
+            CachedDependency {
+                result: result
+                    .as_ref()
+                    .map(FlagValue::clone)
+                    .map_err(|error| error.message.clone()),
+                height: inner_deepest - depth,
+            },
+        );
+    }
+    results.deepest_dependency = outer_deepest.max(inner_deepest);
+    results.is_path_dependent = outer_is_path_dependent || inner_is_path_dependent;
+    result
 }
 
 /// Parse a relative date string like "-7d", "7d", "-24h", "-2w", "-3m" or "-1y".
@@ -1840,7 +2548,7 @@ fn match_property(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
 ) -> Result<bool, InconclusiveMatchError> {
-    match_property_with_version(property, properties, 1)
+    match_property_with_version(property, properties, 1, None)
 }
 
 /// Filter types matched against the person or group properties the caller
@@ -1862,8 +2570,13 @@ fn match_property_with_version(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
     property_matching_version: i64,
+    known_absent_keys: Option<KnownAbsentKeys>,
 ) -> Result<bool, InconclusiveMatchError> {
     check_property_filter_type(property)?;
+    if known_absent_keys.is_some_and(|keys| keys.contains(property)) {
+        return match_known_absent_property(property);
+    }
+
     let value = match properties.get(&property.key) {
         Some(v) => v,
         None => {
@@ -2010,6 +2723,36 @@ fn match_property_with_version(
             )));
         }
     })
+}
+
+/// Result for a property whose key the caller listed as known absent. Like the
+/// flags service, this never parses, compiles or validates the condition
+/// value. Unknown operators and a JSON null condition value stay inconclusive,
+/// so they still fall back to remote evaluation.
+fn match_known_absent_property(property: &Property) -> Result<bool, InconclusiveMatchError> {
+    let is_absent_match = match property.operator.as_str() {
+        "is_not_set" | "is_not" | "not_icontains" | "not_starts_with" | "not_ends_with"
+        | "not_regex" => true,
+        "is_set" | "exact" | "icontains" | "starts_with" | "ends_with" | "regex" | "gt" | "gte"
+        | "lt" | "lte" | "is_date_before" | "is_date_after" | "semver_eq" | "semver_neq"
+        | "semver_gt" | "semver_gte" | "semver_lt" | "semver_lte" | "semver_tilde"
+        | "semver_caret" | "semver_wildcard" => false,
+        unknown => {
+            return Err(InconclusiveMatchError::new(&format!(
+                "Unknown operator: {}",
+                unknown
+            )));
+        }
+    };
+    // The flags service reads a JSON null condition value as omitted, and an
+    // omitted value leaves every operator but the presence ones inconclusive.
+    if property.value.is_null() && !matches!(property.operator.as_str(), "is_set" | "is_not_set") {
+        return Err(InconclusiveMatchError::new(&format!(
+            "Property '{}' has no condition value for operator '{}'",
+            property.key, property.operator
+        )));
+    }
+    Ok(is_absent_match)
 }
 
 fn compute_exact_match(
@@ -5735,5 +6478,1551 @@ mod tests {
         let properties = HashMap::from([("region".to_string(), json!("US"))]);
         let result = evaluate_both_ways(&flag, "user-0", &properties);
         assert!(result.is_err(), "expected inconclusive, got {:?}", result);
+    }
+}
+
+#[cfg(test)]
+mod known_absent_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn person_keys(keys: &[&str]) -> KnownAbsentProperties {
+        let keys: Vec<String> = keys.iter().map(|key| key.to_string()).collect();
+        KnownAbsentProperties::new(Some(&keys), None)
+    }
+
+    fn group_keys(group_type: &str, keys: &[&str]) -> KnownAbsentProperties {
+        let groups = HashMap::from([(
+            group_type.to_string(),
+            keys.iter().map(|key| key.to_string()).collect(),
+        )]);
+        KnownAbsentProperties::new(None, Some(&groups))
+    }
+
+    fn person_flag(key: &str, properties: serde_json::Value) -> FeatureFlag {
+        serde_json::from_value(json!({
+            "key": key,
+            "active": true,
+            "filters": {"groups": [{"properties": properties, "rollout_percentage": 100}]}
+        }))
+        .unwrap()
+    }
+
+    fn evaluate(
+        flag: &FeatureFlag,
+        person_properties: &HashMap<String, serde_json::Value>,
+        known_absent: &KnownAbsentProperties,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        evaluate_with(
+            flag,
+            person_properties,
+            known_absent,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+    }
+
+    fn evaluate_with(
+        flag: &FeatureFlag,
+        person_properties: &HashMap<String, serde_json::Value>,
+        known_absent: &KnownAbsentProperties,
+        cohorts: &HashMap<String, CohortDefinition>,
+        flags: &HashMap<String, FeatureFlag>,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        let groups = HashMap::from([("organization".to_string(), "org-1".to_string())]);
+        let group_type_mapping = HashMap::from([
+            ("0".to_string(), "organization".to_string()),
+            ("1".to_string(), "project".to_string()),
+        ]);
+        let ctx = EvaluationContext {
+            cohorts,
+            flags,
+            distinct_id: "user-1",
+            groups: &groups,
+            group_properties: &HashMap::new(),
+            group_type_mapping: &group_type_mapping,
+            property_matching_version: 1,
+        };
+        match_feature_flag_with_known_absent(flag, person_properties, &ctx, known_absent)
+    }
+
+    #[test]
+    fn listed_key_resolves_every_supported_operator_without_a_value() {
+        for (operator, value, expected) in [
+            ("is_not_set", json!(null), true),
+            ("is_not", json!("pro"), true),
+            ("not_icontains", json!("pro"), true),
+            ("not_starts_with", json!("pro"), true),
+            ("not_ends_with", json!("pro"), true),
+            ("not_regex", json!("^pro"), true),
+            ("is_set", json!(null), false),
+            ("exact", json!("pro"), false),
+            ("icontains", json!("pro"), false),
+            ("starts_with", json!("pro"), false),
+            ("ends_with", json!("pro"), false),
+            ("regex", json!("^pro"), false),
+            ("gt", json!("10"), false),
+            ("gte", json!("10"), false),
+            ("lt", json!("10"), false),
+            ("lte", json!("10"), false),
+            ("semver_eq", json!("1.2.3"), false),
+            ("semver_neq", json!("1.2.3"), false),
+            ("semver_gt", json!("1.2.3"), false),
+            ("semver_gte", json!("1.2.3"), false),
+            ("semver_lt", json!("1.2.3"), false),
+            ("semver_lte", json!("1.2.3"), false),
+            ("semver_tilde", json!("1.2.3"), false),
+            ("semver_caret", json!("1.2.3"), false),
+            ("semver_wildcard", json!("1.2.*"), false),
+            ("is_date_before", json!("2025-01-01T10:00:00Z"), false),
+            ("is_date_after", json!("2025-01-01T10:00:00Z"), false),
+        ] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "value": value, "operator": operator, "type": "person"}]),
+            );
+            let result = evaluate(&flag, &HashMap::new(), &person_keys(&["plan"]));
+            assert_eq!(
+                result.unwrap_or_else(|err| panic!("{} was inconclusive: {}", operator, err)),
+                FlagValue::Boolean(expected),
+                "{operator}"
+            );
+        }
+    }
+
+    #[test]
+    fn null_condition_value_on_a_listed_key_stays_inconclusive() {
+        for operator in ["is_not", "exact", "gt"] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "value": null, "operator": operator, "type": "person"}]),
+            );
+            assert!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).is_err(),
+                "{} with a null value should stay inconclusive",
+                operator
+            );
+        }
+
+        for (operator, expected) in [("is_not_set", true), ("is_set", false)] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "value": null, "operator": operator, "type": "person"}]),
+            );
+            assert_eq!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).unwrap(),
+                FlagValue::Boolean(expected),
+                "{operator}"
+            );
+        }
+    }
+
+    #[test]
+    fn listed_key_resolves_without_reading_the_condition_value() {
+        for (operator, value, expected) in [
+            ("not_regex", json!("["), true),
+            ("regex", json!("["), false),
+            ("not_regex", json!("a\\Kb"), true),
+            ("regex", json!("a\\Kb"), false),
+            ("not_regex", json!("\\p{L}"), true),
+            ("regex", json!("\\p{L}"), false),
+            ("not_regex", json!("(?<=a)b"), true),
+            ("gt", json!("not-a-number"), false),
+            ("gte", json!("not-a-number"), false),
+            ("lt", json!("not-a-number"), false),
+            ("lte", json!("not-a-number"), false),
+            ("semver_eq", json!("not-a-version"), false),
+            ("semver_tilde", json!("not-a-version"), false),
+            ("semver_caret", json!("not-a-version"), false),
+            ("semver_neq", json!("not-a-version"), false),
+            ("semver_wildcard", json!("not-a-version"), false),
+            ("semver_wildcard", json!("1.2.3"), false),
+            ("is_date_before", json!("not-a-date"), false),
+            ("is_date_after", json!("not-a-date"), false),
+        ] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "value": value, "operator": operator, "type": "person"}]),
+            );
+            let result = evaluate(&flag, &HashMap::new(), &person_keys(&["plan"]));
+            assert_eq!(
+                result.unwrap_or_else(|err| panic!(
+                    "{} {} was inconclusive: {}",
+                    operator, value, err
+                )),
+                FlagValue::Boolean(expected),
+                "{operator} {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn listed_key_overrides_a_supplied_value() {
+        let flag = person_flag(
+            "profile-incomplete",
+            json!([{"key": "plan", "operator": "is_not_set", "type": "person"}]),
+        );
+        let properties = HashMap::from([("plan".to_string(), json!("pro"))]);
+
+        assert_eq!(
+            evaluate(&flag, &properties, &KnownAbsentProperties::default()).unwrap(),
+            FlagValue::Boolean(false)
+        );
+        assert_eq!(
+            evaluate(&flag, &properties, &person_keys(&["plan"])).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn listed_key_overrides_the_injected_distinct_id() {
+        let flag = person_flag(
+            "flag",
+            json!([{"key": "distinct_id", "operator": "is_set", "type": "person"}]),
+        );
+        let properties = HashMap::from([("distinct_id".to_string(), json!("user-1"))]);
+
+        assert_eq!(
+            evaluate(&flag, &properties, &person_keys(&["distinct_id"])).unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn omitted_key_that_is_not_listed_stays_inconclusive() {
+        let flag = person_flag(
+            "profile-incomplete",
+            json!([{"key": "plan", "operator": "is_not_set", "type": "person"}]),
+        );
+
+        assert!(evaluate(&flag, &HashMap::new(), &person_keys(&["region"])).is_err());
+    }
+
+    #[test]
+    fn person_metadata_keys_are_ignored() {
+        let key = "__posthog_person_metadata__created_at";
+        let flag = person_flag(
+            "flag",
+            json!([{"key": key, "operator": "is_set", "type": "person"}]),
+        );
+        let properties = HashMap::from([(key.to_string(), json!("2025-01-01"))]);
+
+        assert_eq!(
+            evaluate(&flag, &properties, &person_keys(&[key])).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn group_keys_apply_only_to_their_group_type() {
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "org-incomplete",
+            "active": true,
+            "filters": {
+                "aggregation_group_type_index": 0,
+                "groups": [{
+                    "properties": [{"key": "tier", "operator": "is_not_set", "type": "group", "group_type_index": 0}],
+                    "rollout_percentage": 100
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert!(evaluate(&flag, &HashMap::new(), &group_keys("project", &["tier"])).is_err());
+        assert!(evaluate(&flag, &HashMap::new(), &person_keys(&["tier"])).is_err());
+        assert_eq!(
+            evaluate(
+                &flag,
+                &HashMap::new(),
+                &group_keys("organization", &["tier"])
+            )
+            .unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn unsupported_operator_on_a_listed_key_stays_inconclusive() {
+        for (operator, value) in [
+            ("not_icontains_multi", json!(["pro"])),
+            ("icontains_multi", json!(["pro"])),
+            ("not_between", json!([1, 2])),
+            ("between", json!([1, 2])),
+            ("future_operator", json!("pro")),
+        ] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "value": value, "operator": operator, "type": "person"}]),
+            );
+            assert!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).is_err(),
+                "{} should stay inconclusive",
+                operator
+            );
+        }
+    }
+
+    #[test]
+    fn listed_key_does_not_resolve_a_cohort_filter_in_a_flag_dependency() {
+        let dependency = person_flag(
+            "in-cohort",
+            json!([{"key": "id", "value": 1, "operator": "exact", "type": "cohort"}]),
+        );
+        let flags = HashMap::from([(dependency.key.clone(), dependency)]);
+        let flag = person_flag(
+            "dependent",
+            json!([{"key": "$feature/in-cohort", "value": false, "operator": "exact", "type": "flag"}]),
+        );
+
+        assert!(evaluate_with(
+            &flag,
+            &HashMap::new(),
+            &person_keys(&["id"]),
+            &HashMap::new(),
+            &flags
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cohort_leaf_applies_negation_after_the_known_absent_result() {
+        let cohorts = HashMap::from([(
+            "1".to_string(),
+            CohortDefinition {
+                id: "1".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [{
+                        "key": "plan",
+                        "operator": "is_set",
+                        "type": "person",
+                        "negation": true
+                    }]
+                }),
+            },
+        )]);
+        let flag = person_flag(
+            "flag",
+            json!([{"key": "id", "value": 1, "operator": "in", "type": "cohort"}]),
+        );
+
+        assert!(evaluate_with(
+            &flag,
+            &HashMap::new(),
+            &KnownAbsentProperties::default(),
+            &cohorts,
+            &HashMap::new()
+        )
+        .is_err());
+        assert_eq!(
+            evaluate_with(
+                &flag,
+                &HashMap::new(),
+                &person_keys(&["plan"]),
+                &cohorts,
+                &HashMap::new()
+            )
+            .unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn unsupported_operator_in_a_cohort_leaf_on_a_listed_key_stays_inconclusive() {
+        for negation in [false, true] {
+            let cohorts = HashMap::from([(
+                "1".to_string(),
+                CohortDefinition {
+                    id: "1".to_string(),
+                    properties: json!({
+                        "type": "AND",
+                        "values": [{
+                            "key": "plan",
+                            "value": [1, 2],
+                            "operator": "not_between",
+                            "type": "person",
+                            "negation": negation
+                        }]
+                    }),
+                },
+            )]);
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "id", "value": 1, "operator": "in", "type": "cohort"}]),
+            );
+
+            assert!(
+                evaluate_with(
+                    &flag,
+                    &HashMap::new(),
+                    &person_keys(&["plan"]),
+                    &cohorts,
+                    &HashMap::new()
+                )
+                .is_err(),
+                "not_between with negation {} should stay inconclusive",
+                negation
+            );
+        }
+    }
+
+    #[test]
+    fn flag_dependency_evaluates_with_the_same_known_absent_keys() {
+        let dependency = person_flag(
+            "profile-incomplete",
+            json!([{"key": "plan", "operator": "is_not_set", "type": "person"}]),
+        );
+        let flags = HashMap::from([(dependency.key.clone(), dependency)]);
+        let flag = person_flag(
+            "dependent",
+            json!([{"key": "$feature/profile-incomplete", "value": true, "operator": "exact", "type": "flag"}]),
+        );
+
+        assert!(evaluate_with(
+            &flag,
+            &HashMap::new(),
+            &KnownAbsentProperties::default(),
+            &HashMap::new(),
+            &flags
+        )
+        .is_err());
+        assert_eq!(
+            evaluate_with(
+                &flag,
+                &HashMap::new(),
+                &person_keys(&["plan"]),
+                &HashMap::new(),
+                &flags
+            )
+            .unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    fn group_flag(key: &str, properties: serde_json::Value) -> FeatureFlag {
+        serde_json::from_value(json!({
+            "key": key,
+            "active": true,
+            "filters": {
+                "aggregation_group_type_index": 0,
+                "groups": [{"properties": properties, "rollout_percentage": 100}]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn cohort(values: serde_json::Value) -> HashMap<String, CohortDefinition> {
+        HashMap::from([(
+            "1".to_string(),
+            CohortDefinition {
+                id: "1".to_string(),
+                properties: json!({"type": "AND", "values": values}),
+            },
+        )])
+    }
+
+    const PERSON_METADATA_FILTERS: [(&str, &str); 2] =
+        [("is_not_set", "null"), ("is_date_after", "\"2025-01-01\"")];
+
+    #[test]
+    fn listed_key_does_not_resolve_a_person_metadata_filter() {
+        for (operator, value) in PERSON_METADATA_FILTERS {
+            let value: serde_json::Value = serde_json::from_str(value).unwrap();
+            let filter = json!({"key": "created_at", "value": value, "operator": operator, "type": "person_metadata"});
+            let flag = person_flag("new-signups", json!([filter]));
+            assert!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["created_at"])).is_err(),
+                "{} should stay inconclusive",
+                operator
+            );
+
+            let cohorts = cohort(json!([filter]));
+            let flag = person_flag(
+                "new-signups",
+                json!([{"key": "id", "value": 1, "operator": "in", "type": "cohort"}]),
+            );
+            assert!(
+                evaluate_with(
+                    &flag,
+                    &HashMap::new(),
+                    &person_keys(&["created_at"]),
+                    &cohorts,
+                    &HashMap::new()
+                )
+                .is_err(),
+                "{} in a cohort leaf should stay inconclusive",
+                operator
+            );
+        }
+    }
+
+    #[test]
+    fn listed_key_leaves_a_person_metadata_filter_inconclusive_with_a_supplied_value() {
+        // `/flags` reads `person_metadata` from the persons table, so neither the
+        // listing nor a supplied person property decides it locally.
+        let flag = person_flag(
+            "new-signups",
+            json!([{"key": "created_at", "value": "2025-01-01", "operator": "is_date_after", "type": "person_metadata"}]),
+        );
+        let properties = HashMap::from([("created_at".to_string(), json!("2025-06-01"))]);
+
+        assert!(evaluate(&flag, &properties, &person_keys(&["created_at"])).is_err());
+    }
+
+    #[test]
+    fn listed_person_key_resolves_only_person_filters() {
+        for property_type in [None, Some("group"), Some("person_metadata"), Some("event")] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "operator": "is_not_set", "type": property_type}]),
+            );
+            assert!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).is_err(),
+                "{:?} should stay inconclusive",
+                property_type
+            );
+        }
+    }
+
+    #[test]
+    fn listed_group_key_resolves_only_group_filters() {
+        for property_type in [None, Some("person"), Some("person_metadata")] {
+            let flag = group_flag(
+                "org-flag",
+                json!([{"key": "tier", "operator": "is_not_set", "type": property_type}]),
+            );
+            assert!(
+                evaluate(
+                    &flag,
+                    &HashMap::new(),
+                    &group_keys("organization", &["tier"])
+                )
+                .is_err(),
+                "{:?} should stay inconclusive",
+                property_type
+            );
+        }
+    }
+
+    #[test]
+    fn listed_group_key_does_not_resolve_a_cohort_leaf() {
+        for leaf_type in ["person", "group"] {
+            let cohorts =
+                cohort(json!([{"key": "tier", "operator": "is_not_set", "type": leaf_type}]));
+            let flag = group_flag(
+                "org-flag",
+                json!([{"key": "id", "value": 1, "operator": "in", "type": "cohort"}]),
+            );
+            assert!(
+                evaluate_with(
+                    &flag,
+                    &HashMap::new(),
+                    &group_keys("organization", &["tier"]),
+                    &cohorts,
+                    &HashMap::new()
+                )
+                .is_err(),
+                "{} cohort leaf should stay inconclusive",
+                leaf_type
+            );
+        }
+    }
+
+    #[test]
+    fn flag_dependency_uses_only_the_keys_for_its_own_aggregation() {
+        let group_dependency = group_flag(
+            "org-incomplete",
+            json!([{"key": "tier", "operator": "is_not_set", "type": "group"}]),
+        );
+        let person_dependency = person_flag(
+            "profile-incomplete",
+            json!([{"key": "plan", "operator": "is_not_set", "type": "person"}]),
+        );
+        let flags = HashMap::from([
+            (group_dependency.key.clone(), group_dependency),
+            (person_dependency.key.clone(), person_dependency),
+        ]);
+        let person_parent = person_flag(
+            "person-parent",
+            json!([{"key": "$feature/org-incomplete", "value": true, "operator": "exact", "type": "flag"}]),
+        );
+        let group_parent = group_flag(
+            "group-parent",
+            json!([{"key": "$feature/profile-incomplete", "value": true, "operator": "exact", "type": "flag"}]),
+        );
+
+        assert!(evaluate_with(
+            &person_parent,
+            &HashMap::new(),
+            &person_keys(&["tier"]),
+            &HashMap::new(),
+            &flags
+        )
+        .is_err());
+        assert!(evaluate_with(
+            &group_parent,
+            &HashMap::new(),
+            &group_keys("organization", &["plan"]),
+            &HashMap::new(),
+            &flags
+        )
+        .is_err());
+        assert_eq!(
+            evaluate_with(
+                &person_parent,
+                &HashMap::new(),
+                &group_keys("organization", &["tier"]),
+                &HashMap::new(),
+                &flags
+            )
+            .unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn listed_flag_dependency_key_does_not_resolve_a_nested_dependency() {
+        let leaf = person_flag(
+            "leaf",
+            json!([{"key": "plan", "operator": "is_set", "type": "person"}]),
+        );
+        let middle = person_flag(
+            "middle",
+            json!([{"key": "$feature/leaf", "value": true, "operator": "exact", "type": "flag"}]),
+        );
+        let flags = HashMap::from([(leaf.key.clone(), leaf), (middle.key.clone(), middle)]);
+        let flag = person_flag(
+            "outer",
+            json!([{"key": "$feature/middle", "value": true, "operator": "exact", "type": "flag"}]),
+        );
+
+        assert!(evaluate_with(
+            &flag,
+            &HashMap::new(),
+            &person_keys(&["$feature/leaf"]),
+            &HashMap::new(),
+            &flags
+        )
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod flag_dependency_context_tests {
+    use super::*;
+    use serde_json::json;
+
+    const DISTINCT_ID: &str = "user-1";
+
+    fn flag(key: &str, aggregation: Option<i32>, condition: serde_json::Value) -> FeatureFlag {
+        serde_json::from_value(json!({
+            "key": key,
+            "active": true,
+            "filters": {"aggregation_group_type_index": aggregation, "groups": [condition]}
+        }))
+        .unwrap()
+    }
+
+    fn depends_on(key: &str, aggregation: Option<i32>, parent: &str) -> FeatureFlag {
+        flag(
+            key,
+            aggregation,
+            json!({
+                "properties": [{"key": format!("$feature/{parent}"), "value": true, "operator": "exact", "type": "flag"}],
+                "rollout_percentage": 100
+            }),
+        )
+    }
+
+    struct Inputs {
+        distinct_id: String,
+        person_properties: HashMap<String, serde_json::Value>,
+        groups: HashMap<String, String>,
+        group_properties: HashMap<String, HashMap<String, serde_json::Value>>,
+        known_absent: KnownAbsentProperties,
+        cohorts: HashMap<String, CohortDefinition>,
+    }
+
+    impl Default for Inputs {
+        fn default() -> Self {
+            Self {
+                distinct_id: DISTINCT_ID.to_string(),
+                person_properties: HashMap::new(),
+                groups: HashMap::from([("organization".to_string(), "org-1".to_string())]),
+                group_properties: HashMap::new(),
+                known_absent: KnownAbsentProperties::default(),
+                cohorts: HashMap::new(),
+            }
+        }
+    }
+
+    fn evaluate(
+        flag: &FeatureFlag,
+        flags: &[&FeatureFlag],
+        inputs: &Inputs,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        let flags: HashMap<String, FeatureFlag> = flags
+            .iter()
+            .map(|flag| (flag.key.clone(), (*flag).clone()))
+            .collect();
+        let group_type_mapping = HashMap::from([("0".to_string(), "organization".to_string())]);
+        let ctx = EvaluationContext {
+            cohorts: &inputs.cohorts,
+            flags: &flags,
+            distinct_id: &inputs.distinct_id,
+            groups: &inputs.groups,
+            group_properties: &inputs.group_properties,
+            group_type_mapping: &group_type_mapping,
+            property_matching_version: 1,
+        };
+        match_feature_flag_with_known_absent(
+            flag,
+            &inputs.person_properties,
+            &ctx,
+            &inputs.known_absent,
+        )
+    }
+
+    fn props(entries: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    fn in_rollout(flag_key: &str, bucketing_id: &str, percentage: f64) -> bool {
+        hash_key(flag_key, bucketing_id, ROLLOUT_HASH_SALT) <= percentage / 100.0
+    }
+
+    #[test]
+    fn dependency_reads_the_callers_person_properties() {
+        let parent = flag(
+            "pro-plan",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "pro-plan");
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("pro"))]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&parent, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn group_child_evaluates_a_person_parent_with_person_properties_and_distinct_id() {
+        let parent = flag(
+            "person-parent",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 50}),
+        );
+        let child = depends_on("org-child", Some(0), "person-parent");
+        let distinct_id = (0..1000)
+            .map(|i| format!("user-{i}"))
+            .find(|id| in_rollout("person-parent", id, 50.0))
+            .unwrap();
+        let group_key = (0..1000)
+            .map(|i| format!("org-{i}"))
+            .find(|key| !in_rollout("person-parent", key, 50.0))
+            .unwrap();
+        let inputs = Inputs {
+            distinct_id,
+            person_properties: props(&[("plan", json!("pro"))]),
+            groups: HashMap::from([("organization".to_string(), group_key)]),
+            group_properties: HashMap::from([(
+                "organization".to_string(),
+                props(&[("plan", json!("free"))]),
+            )]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn dependency_sees_person_properties_alongside_known_absent_keys() {
+        // The first group matches `tier` but is out of rollout, and `early_exit`
+        // stops there, so the parent is false and so is the child.
+        let parent: FeatureFlag = serde_json::from_value(json!({
+            "key": "parent",
+            "active": true,
+            "filters": {
+                "early_exit": true,
+                "groups": [
+                    {"properties": [{"key": "tier", "value": "vip", "operator": "exact", "type": "person"}], "rollout_percentage": 0},
+                    {"properties": [{"key": "plan", "operator": "is_not_set", "type": "person"}], "rollout_percentage": 100}
+                ]
+            }
+        }))
+        .unwrap();
+        let child = depends_on("child", None, "parent");
+        let plan = vec!["plan".to_string()];
+        let inputs = Inputs {
+            person_properties: props(&[("tier", json!("vip"))]),
+            known_absent: KnownAbsentProperties::new(Some(&plan), None),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&parent, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn dependency_resolves_its_own_cohort_filter() {
+        let parent = flag(
+            "in-cohort",
+            None,
+            json!({"properties": [{"key": "id", "value": 1, "operator": "in", "type": "cohort"}], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "in-cohort");
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("pro"))]),
+            cohorts: HashMap::from([(
+                "1".to_string(),
+                CohortDefinition {
+                    id: "1".to_string(),
+                    properties: json!({"type": "AND", "values": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}]}),
+                },
+            )]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn dependency_resolves_its_own_flag_dependency() {
+        let leaf = flag(
+            "leaf",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}),
+        );
+        let middle = depends_on("middle", None, "leaf");
+        let child = depends_on("child", None, "middle");
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("pro"))]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&child, &[&leaf, &middle], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn dependency_cycle_is_inconclusive() {
+        let first = depends_on("first", None, "second");
+        let second = depends_on("second", None, "first");
+        let own = depends_on("own", None, "own");
+
+        assert!(evaluate(&first, &[&first, &second], &Inputs::default()).is_err());
+        assert!(evaluate(&own, &[&own], &Inputs::default()).is_err());
+    }
+
+    fn chain(length: usize) -> Vec<FeatureFlag> {
+        let mut flags = vec![flag(
+            "flag-0",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        )];
+        for i in 1..length {
+            flags.push(depends_on(
+                &format!("flag-{i}"),
+                None,
+                &format!("flag-{}", i - 1),
+            ));
+        }
+        flags
+    }
+
+    #[test]
+    fn dependency_chain_under_the_depth_limit_resolves() {
+        let flags = chain(MAX_FLAG_DEPENDENCY_DEPTH);
+        let refs: Vec<&FeatureFlag> = flags.iter().collect();
+
+        assert_eq!(
+            evaluate(flags.last().unwrap(), &refs, &Inputs::default()).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn dependency_chain_over_the_depth_limit_is_inconclusive() {
+        // Deep enough to overflow the stack without a limit.
+        let is_inconclusive = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let flags = chain(5_000);
+                let refs: Vec<&FeatureFlag> = flags.iter().collect();
+                evaluate(flags.last().unwrap(), &refs, &Inputs::default()).is_err()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(is_inconclusive);
+    }
+
+    /// Each flag requires the previous two, so without reusing results the
+    /// work doubles with every flag.
+    fn branching_graph(length: usize) -> Vec<FeatureFlag> {
+        let mut flags = vec![
+            flag(
+                "flag-0",
+                None,
+                json!({"properties": [], "rollout_percentage": 100}),
+            ),
+            flag(
+                "flag-1",
+                None,
+                json!({"properties": [], "rollout_percentage": 100}),
+            ),
+        ];
+        for i in 2..length {
+            flags.push(flag(
+                &format!("flag-{i}"),
+                None,
+                json!({
+                    "properties": [
+                        {"key": format!("$feature/flag-{}", i - 1), "value": true, "operator": "exact", "type": "flag"},
+                        {"key": format!("$feature/flag-{}", i - 2), "value": true, "operator": "exact", "type": "flag"}
+                    ],
+                    "rollout_percentage": 100
+                }),
+            ));
+        }
+        flags
+    }
+
+    #[test]
+    fn shared_dependencies_are_evaluated_once_per_evaluation() {
+        let flags = branching_graph(40);
+        let refs: Vec<&FeatureFlag> = flags.iter().collect();
+        let started = std::time::Instant::now();
+
+        assert_eq!(
+            evaluate(flags.last().unwrap(), &refs, &Inputs::default()).unwrap(),
+            FlagValue::Boolean(true)
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn inconclusive_shared_dependencies_stay_bounded() {
+        // No result below the top is conclusive, so none can be reused: the
+        // base flags either form a cycle or need a property that isn't given.
+        let missing_plan = json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100});
+        for base in [
+            [
+                depends_on("flag-0", None, "flag-1"),
+                depends_on("flag-1", None, "flag-0"),
+            ],
+            [
+                flag("flag-0", None, missing_plan.clone()),
+                flag("flag-1", None, missing_plan.clone()),
+            ],
+        ] {
+            let mut flags = branching_graph(40);
+            flags.splice(0..2, base);
+            let refs: Vec<&FeatureFlag> = flags.iter().collect();
+            let started = std::time::Instant::now();
+
+            assert!(evaluate(flags.last().unwrap(), &refs, &Inputs::default()).is_err());
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "took {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_budget_applies_to_each_top_level_flag() {
+        let mut flags = branching_graph(40);
+        flags.push(flag(
+            "independent",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        ));
+        flags[0] = flag(
+            "flag-0",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}),
+        );
+        let flags_by_key: HashMap<String, FeatureFlag> = flags
+            .iter()
+            .map(|flag| (flag.key.clone(), flag.clone()))
+            .collect();
+        let ctx = EvaluationContext {
+            cohorts: &HashMap::new(),
+            flags: &flags_by_key,
+            distinct_id: DISTINCT_ID,
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
+            property_matching_version: 1,
+        };
+        let known_absent = KnownAbsentProperties::default();
+        let heavy = match_feature_flag_with_known_absent(
+            &flags_by_key["flag-39"],
+            &HashMap::new(),
+            &ctx,
+            &known_absent,
+        );
+        let light = match_feature_flag_with_known_absent(
+            &depends_on("light", None, "independent"),
+            &HashMap::new(),
+            &ctx,
+            &known_absent,
+        );
+
+        assert!(heavy.is_err());
+        assert_eq!(light.unwrap(), FlagValue::Boolean(true));
+    }
+
+    #[test]
+    fn cached_dependency_respects_the_depth_limit_in_either_filter_order() {
+        // `leaf` is reached directly and as the end of a chain that puts it one
+        // flag past the depth limit. The filter order mustn't change the result.
+        let leaf = flag(
+            "leaf",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        let mut chain = vec![depends_on("chain-1", None, "leaf")];
+        let length = MAX_FLAG_DEPENDENCY_DEPTH - 1;
+        for i in 2..=length {
+            chain.push(depends_on(
+                &format!("chain-{i}"),
+                None,
+                &format!("chain-{}", i - 1),
+            ));
+        }
+        let leaf_filter =
+            json!({"key": "$feature/leaf", "value": true, "operator": "exact", "type": "flag"});
+        let chain_filter = json!({"key": format!("$feature/chain-{length}"), "value": true, "operator": "exact", "type": "flag"});
+        let mut refs: Vec<&FeatureFlag> = chain.iter().collect();
+        refs.push(&leaf);
+
+        for filters in [
+            json!([leaf_filter, chain_filter]),
+            json!([chain_filter, leaf_filter]),
+        ] {
+            let top = flag(
+                "top",
+                None,
+                json!({"properties": filters, "rollout_percentage": 100}),
+            );
+            assert!(
+                evaluate(&top, &refs, &Inputs::default()).is_err(),
+                "{}",
+                filters
+            );
+        }
+    }
+
+    #[test]
+    fn cached_dependency_too_deep_to_reuse_is_evaluated_again() {
+        // `checked` is false at any depth: its `plan` filter rules out its only
+        // condition, whatever its dependency gives. It's cached at the top, then
+        // reached again one flag short of the limit, where reusing its cached
+        // depth would exceed the limit but evaluating it again doesn't need to.
+        let deep = flag(
+            "deep",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        let checked = flag(
+            "checked",
+            None,
+            json!({"properties": [
+                {"key": "$feature/deep", "value": true, "operator": "exact", "type": "flag"},
+                {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+            ], "rollout_percentage": 100}),
+        );
+        let not_checked =
+            json!({"key": "$feature/checked", "value": false, "operator": "exact", "type": "flag"});
+        let length = MAX_FLAG_DEPENDENCY_DEPTH - 2;
+        let mut chain = vec![flag(
+            "chain-1",
+            None,
+            json!({"properties": [not_checked], "rollout_percentage": 100}),
+        )];
+        for i in 2..=length {
+            chain.push(depends_on(
+                &format!("chain-{i}"),
+                None,
+                &format!("chain-{}", i - 1),
+            ));
+        }
+        let top = flag(
+            "top",
+            None,
+            json!({"properties": [
+                not_checked,
+                {"key": format!("$feature/chain-{length}"), "value": true, "operator": "exact", "type": "flag"}
+            ], "rollout_percentage": 100}),
+        );
+        let mut refs: Vec<&FeatureFlag> = chain.iter().collect();
+        refs.extend([&deep, &checked]);
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("free"))]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&top, &refs, &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn inconclusive_dependency_is_evaluated_once() {
+        // Every condition but the last references the same inconclusive
+        // dependency and is then ruled out, more times than the evaluation
+        // budget. The last condition's dependency still resolves.
+        let unknown = flag(
+            "unknown",
+            None,
+            json!({"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}),
+        );
+        let known = flag(
+            "known",
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        let mut conditions: Vec<serde_json::Value> = (0..MAX_FLAG_DEPENDENCY_EVALUATIONS + 10)
+            .map(|_| {
+                json!({"properties": [
+                    {"key": "$feature/unknown", "value": true, "operator": "exact", "type": "flag"},
+                    {"key": "region", "value": "us", "operator": "exact", "type": "person"}
+                ], "rollout_percentage": 100})
+            })
+            .collect();
+        conditions.push(json!({"properties": [
+            {"key": "$feature/known", "value": true, "operator": "exact", "type": "flag"}
+        ], "rollout_percentage": 100}));
+        let top: FeatureFlag = serde_json::from_value(json!({
+            "key": "top",
+            "active": true,
+            "filters": {"groups": conditions}
+        }))
+        .unwrap();
+        let inputs = Inputs {
+            person_properties: props(&[("region", json!("eu"))]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&top, &[&unknown, &known], &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    /// A flag whose only filter is a cohort nested `depth` groups deep, with a
+    /// leaf that depends on `next`.
+    fn flag_through_nested_cohort(
+        index: usize,
+        depth: usize,
+        next: &str,
+    ) -> (FeatureFlag, CohortDefinition) {
+        let mut group = json!({"type": "AND", "values": [
+            {"key": format!("$feature/{next}"), "value": true, "operator": "exact", "type": "flag"}
+        ]});
+        for _ in 0..depth {
+            group = json!({"type": "AND", "values": [group]});
+        }
+        (
+            flag(
+                &format!("flag-{index}"),
+                None,
+                json!({"properties": [{"key": "id", "value": index, "operator": "in", "type": "cohort"}], "rollout_percentage": 100}),
+            ),
+            CohortDefinition {
+                id: index.to_string(),
+                properties: group,
+            },
+        )
+    }
+
+    fn alternating_chain(
+        length: usize,
+        cohort_depth: usize,
+    ) -> (Vec<FeatureFlag>, HashMap<String, CohortDefinition>) {
+        let mut flags = vec![flag(
+            &format!("flag-{length}"),
+            None,
+            json!({"properties": [], "rollout_percentage": 100}),
+        )];
+        let mut cohorts = HashMap::new();
+        for i in 0..length {
+            let (flag, cohort) =
+                flag_through_nested_cohort(i, cohort_depth, &format!("flag-{}", i + 1));
+            flags.push(flag);
+            cohorts.insert(i.to_string(), cohort);
+        }
+        (flags, cohorts)
+    }
+
+    #[test]
+    fn alternating_cohort_and_flag_chain_is_inconclusive() {
+        // Each flag goes through a cohort nested just under the cohort limit,
+        // so neither limit alone stops the chain.
+        let is_inconclusive = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let (flags, cohorts) = alternating_chain(
+                    MAX_FLAG_DEPENDENCY_DEPTH - 1,
+                    MAX_COHORT_RESOLUTION_DEPTH - 5,
+                );
+                let refs: Vec<&FeatureFlag> = flags.iter().collect();
+                let inputs = Inputs {
+                    cohorts,
+                    ..Inputs::default()
+                };
+                evaluate(&flags[1], &refs, &inputs).is_err()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(is_inconclusive);
+    }
+
+    #[test]
+    fn short_alternating_cohort_and_flag_chain_resolves() {
+        let (flags, cohorts) = alternating_chain(3, 5);
+        let refs: Vec<&FeatureFlag> = flags.iter().collect();
+        let inputs = Inputs {
+            cohorts,
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&flags[1], &refs, &inputs).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    /// A chain of flags whose deepest flag, at the depth limit's last level,
+    /// matches a cohort nested `cohort_depth` groups deep.
+    fn chain_ending_in_a_nested_cohort(
+        cohort_depth: usize,
+    ) -> (Vec<FeatureFlag>, HashMap<String, CohortDefinition>) {
+        let mut group = json!({"type": "AND", "values": [
+            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+        ]});
+        for _ in 0..cohort_depth {
+            group = json!({"type": "AND", "values": [group]});
+        }
+        let mut flags = chain(MAX_FLAG_DEPENDENCY_DEPTH);
+        flags[0] = flag(
+            "flag-0",
+            None,
+            json!({"properties": [{"key": "id", "value": 0, "operator": "in", "type": "cohort"}], "rollout_percentage": 100}),
+        );
+        let cohorts = HashMap::from([(
+            "0".to_string(),
+            CohortDefinition {
+                id: "0".to_string(),
+                properties: group,
+            },
+        )]);
+        (flags, cohorts)
+    }
+
+    #[test]
+    fn cohort_nesting_counts_from_the_enclosing_dependency_depth() {
+        for (cohort_depth, is_resolved) in [(0, true), (50, false)] {
+            let (flags, cohorts) = chain_ending_in_a_nested_cohort(cohort_depth);
+            let refs: Vec<&FeatureFlag> = flags.iter().collect();
+            let inputs = Inputs {
+                person_properties: props(&[("plan", json!("pro"))]),
+                cohorts,
+                ..Inputs::default()
+            };
+
+            let result = evaluate(flags.last().unwrap(), &refs, &inputs);
+            assert_eq!(result.is_ok(), is_resolved, "{cohort_depth}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn cached_dependency_respects_cohort_nesting_in_either_filter_order() {
+        // `nested` matches a cohort 50 groups deep. It's reached directly and
+        // at the end of a chain that puts it at the last flag dependency level,
+        // where its cohort is past the depth limit. The filter order mustn't
+        // change the result.
+        let (flags, cohorts) = chain_ending_in_a_nested_cohort(50);
+        let mut nested = flags[0].clone();
+        nested.key = "nested".to_string();
+        let mut chain = vec![depends_on("chain-1", None, "nested")];
+        let length = MAX_FLAG_DEPENDENCY_DEPTH - 2;
+        for i in 2..=length {
+            chain.push(depends_on(
+                &format!("chain-{i}"),
+                None,
+                &format!("chain-{}", i - 1),
+            ));
+        }
+        let nested_filter =
+            json!({"key": "$feature/nested", "value": true, "operator": "exact", "type": "flag"});
+        let chain_filter = json!({"key": format!("$feature/chain-{length}"), "value": true, "operator": "exact", "type": "flag"});
+        let mut refs: Vec<&FeatureFlag> = chain.iter().collect();
+        refs.push(&nested);
+        let inputs = Inputs {
+            person_properties: props(&[("plan", json!("pro"))]),
+            cohorts,
+            ..Inputs::default()
+        };
+
+        for filters in [
+            json!([nested_filter, chain_filter]),
+            json!([chain_filter, nested_filter]),
+        ] {
+            let top = flag(
+                "top",
+                None,
+                json!({"properties": filters, "rollout_percentage": 100}),
+            );
+            assert!(evaluate(&top, &refs, &inputs).is_err(), "{}", filters);
+        }
+    }
+
+    #[test]
+    fn person_child_reads_group_properties_for_an_org_parent() {
+        // D1: the parent reads the org's region, not the person's.
+        let parent = flag(
+            "org-in-us",
+            Some(0),
+            json!({"properties": [{"key": "region", "value": "us", "operator": "exact", "type": "group"}], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "org-in-us");
+        let inputs = Inputs {
+            person_properties: props(&[("region", json!("us"))]),
+            group_properties: HashMap::from([(
+                "organization".to_string(),
+                props(&[("region", json!("eu"))]),
+            )]),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&parent, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn org_parent_without_its_group_is_false() {
+        // D2: no organization group, even with organization known-absent keys.
+        let parent = flag(
+            "org-incomplete",
+            Some(0),
+            json!({"properties": [{"key": "tier", "operator": "is_not_set", "type": "group"}], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "org-incomplete");
+        let groups = HashMap::from([("organization".to_string(), vec!["tier".to_string()])]);
+        let inputs = Inputs {
+            groups: HashMap::new(),
+            known_absent: KnownAbsentProperties::new(None, Some(&groups)),
+            ..Inputs::default()
+        };
+
+        assert_eq!(
+            evaluate(&parent, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+        assert_eq!(
+            evaluate(&child, &[&parent], &inputs).unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn org_parent_rollout_follows_the_group_key() {
+        let parent = flag(
+            "org-rollout",
+            Some(0),
+            json!({"properties": [], "rollout_percentage": 50}),
+        );
+        let child = depends_on("child", None, "org-rollout");
+        let in_ids = (0..1000)
+            .map(|i| format!("id-{i}"))
+            .filter(|id| in_rollout("org-rollout", id, 50.0));
+        let out_ids = (0..1000)
+            .map(|i| format!("id-{i}"))
+            .filter(|id| !in_rollout("org-rollout", id, 50.0));
+        let (included, excluded) = (
+            in_ids.take(1).next().unwrap(),
+            out_ids.take(1).next().unwrap(),
+        );
+
+        for (distinct_id, group_key, expected) in [
+            (included.clone(), excluded.clone(), false),
+            (excluded, included, true),
+        ] {
+            let inputs = Inputs {
+                distinct_id,
+                groups: HashMap::from([("organization".to_string(), group_key)]),
+                group_properties: HashMap::from([("organization".to_string(), HashMap::new())]),
+                ..Inputs::default()
+            };
+            assert_eq!(
+                evaluate(&child, &[&parent], &inputs).unwrap(),
+                FlagValue::Boolean(expected)
+            );
+        }
+    }
+
+    /// The empty string is the only unusable group key the `String`-typed
+    /// `groups` map can carry, and it counts as no key.
+    fn empty_group_key_inputs(group_properties: bool) -> Inputs {
+        Inputs {
+            groups: HashMap::from([("organization".to_string(), String::new())]),
+            group_properties: if group_properties {
+                HashMap::from([(
+                    "organization".to_string(),
+                    props(&[("tier", json!("enterprise"))]),
+                )])
+            } else {
+                HashMap::new()
+            },
+            ..Inputs::default()
+        }
+    }
+
+    #[test]
+    fn empty_group_key_skips_group_conditions() {
+        let org_flag = flag(
+            "org-flag",
+            Some(0),
+            json!({"properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group"}], "rollout_percentage": 100}),
+        );
+        let org_rollout = flag(
+            "org-rollout",
+            Some(0),
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        for with_properties in [false, true] {
+            let inputs = empty_group_key_inputs(with_properties);
+            for flag in [&org_flag, &org_rollout] {
+                assert_eq!(
+                    evaluate(flag, &[], &inputs).unwrap(),
+                    FlagValue::Boolean(false),
+                    "{} with group properties: {with_properties}",
+                    flag.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_group_key_leaves_the_person_condition_to_decide() {
+        let mixed: FeatureFlag = serde_json::from_value(json!({
+            "key": "mixed",
+            "active": true,
+            "filters": {"groups": [
+                {"properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group", "group_type_index": 0}], "rollout_percentage": 100, "aggregation_group_type_index": 0},
+                {"properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}], "rollout_percentage": 100}
+            ]}
+        }))
+        .unwrap();
+        for (plan, expected) in [("pro", true), ("free", false)] {
+            for with_properties in [false, true] {
+                let inputs = Inputs {
+                    person_properties: props(&[("plan", json!(plan))]),
+                    ..empty_group_key_inputs(with_properties)
+                };
+                assert_eq!(
+                    evaluate(&mixed, &[], &inputs).unwrap(),
+                    FlagValue::Boolean(expected),
+                    "plan {plan}, group properties: {with_properties}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn group_dependency_with_an_empty_group_key_is_false() {
+        let parent = flag(
+            "org-parent",
+            Some(0),
+            json!({"properties": [], "rollout_percentage": 100}),
+        );
+        let child = depends_on("child", None, "org-parent");
+        for with_properties in [false, true] {
+            assert_eq!(
+                evaluate(&child, &[&parent], &empty_group_key_inputs(with_properties)).unwrap(),
+                FlagValue::Boolean(false),
+                "group properties: {with_properties}"
+            );
+        }
+    }
+
+    #[test]
+    fn usable_group_key_without_group_properties_stays_inconclusive() {
+        let org_flag = flag(
+            "org-flag",
+            Some(0),
+            json!({"properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group"}], "rollout_percentage": 100}),
+        );
+        assert!(evaluate(&org_flag, &[], &Inputs::default()).is_err());
+    }
+
+    #[test]
+    fn group_filter_without_an_index_reads_the_conditions_group_type() {
+        // G1: a listed key wins over the supplied value for the condition's group.
+        for (operator, value, expected) in [
+            ("exact", json!("enterprise"), false),
+            ("is_not_set", json!(null), true),
+        ] {
+            let org_flag = flag(
+                "org-flag",
+                Some(0),
+                json!({"properties": [{"key": "tier", "value": value, "operator": operator, "type": "group"}], "rollout_percentage": 100}),
+            );
+            let groups = HashMap::from([("organization".to_string(), vec!["tier".to_string()])]);
+            let inputs = Inputs {
+                group_properties: HashMap::from([(
+                    "organization".to_string(),
+                    props(&[("tier", json!("enterprise"))]),
+                )]),
+                known_absent: KnownAbsentProperties::new(None, Some(&groups)),
+                ..Inputs::default()
+            };
+            assert_eq!(
+                evaluate(&org_flag, &[], &inputs).unwrap(),
+                FlagValue::Boolean(expected),
+                "{operator}"
+            );
+        }
     }
 }

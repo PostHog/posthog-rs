@@ -3,6 +3,7 @@ mod common;
 use common::default_user_agent;
 use httpmock::prelude::*;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener};
 use std::sync::{
@@ -155,6 +156,410 @@ fn local_definitions_fixture() -> Value {
         "group_type_mapping": {},
         "cohorts": {}
     })
+}
+
+/// Local definitions with one flag that needs `plan` to be absent and one that
+/// stays inconclusive locally because `region` is never supplied.
+fn known_absent_definitions_fixture() -> Value {
+    json!({
+        "flags": [
+            {
+                "key": "profile-incomplete",
+                "active": true,
+                "filters": {
+                    "groups": [{
+                        "properties": [{"key": "plan", "operator": "is_not_set", "type": "person"}],
+                        "rollout_percentage": 100
+                    }]
+                }
+            },
+            {
+                "key": "regional",
+                "active": true,
+                "filters": {
+                    "groups": [{
+                        "properties": [{"key": "region", "value": "US", "operator": "exact", "type": "person"}],
+                        "rollout_percentage": 100
+                    }]
+                }
+            }
+        ],
+        "group_type_mapping": {"0": "organization"},
+        "cohorts": {}
+    })
+}
+
+fn known_absent_options(flag_keys: &[&str]) -> posthog::EvaluateFlagsOptions {
+    let mut options = posthog::EvaluateFlagsOptions::default();
+    options.flag_keys = Some(flag_keys.iter().map(|key| key.to_string()).collect());
+    options.person_properties = Some(
+        vec![("plan".to_string(), json!("pro"))]
+            .into_iter()
+            .collect(),
+    );
+    options.person_property_keys_known_absent = Some(vec!["plan".to_string()]);
+    options.group_property_keys_known_absent = Some(
+        vec![("organization".to_string(), vec!["tier".to_string()])]
+            .into_iter()
+            .collect(),
+    );
+    options
+}
+
+/// Local definitions for an `organization` group flag, a mixed flag whose
+/// person condition matches `plan = pro`, and a person flag that depends on
+/// the group flag.
+fn empty_group_key_definitions_fixture() -> Value {
+    json!({
+        "flags": [
+            {
+                "key": "org-flag",
+                "active": true,
+                "filters": {
+                    "aggregation_group_type_index": 0,
+                    "groups": [{
+                        "properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group", "group_type_index": 0}],
+                        "rollout_percentage": 100
+                    }]
+                }
+            },
+            {
+                "key": "mixed",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [{"key": "tier", "value": "enterprise", "operator": "exact", "type": "group", "group_type_index": 0}],
+                            "rollout_percentage": 100,
+                            "aggregation_group_type_index": 0
+                        },
+                        {
+                            "properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}],
+                            "rollout_percentage": 100
+                        }
+                    ]
+                }
+            },
+            {
+                "key": "org-child",
+                "active": true,
+                "filters": {
+                    "groups": [{
+                        "properties": [{"key": "$feature/org-flag", "value": true, "operator": "exact", "type": "flag"}],
+                        "rollout_percentage": 100
+                    }]
+                }
+            }
+        ],
+        "group_type_mapping": {"0": "organization"},
+        "cohorts": {}
+    })
+}
+
+const EMPTY_GROUP_KEY_FLAG_KEYS: [&str; 3] = ["org-flag", "mixed", "org-child"];
+
+fn mock_empty_group_key_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200)
+            .json_body(empty_group_key_definitions_fixture());
+    })
+}
+
+/// An empty `organization` key, the only unusable group key the
+/// `String`-typed `groups` option can carry, with matching group properties.
+fn empty_group_key_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOptions {
+    let mut options = posthog::EvaluateFlagsOptions::default();
+    options.flag_keys = Some(
+        EMPTY_GROUP_KEY_FLAG_KEYS
+            .iter()
+            .map(|key| key.to_string())
+            .collect(),
+    );
+    options.groups = Some(
+        vec![("organization".to_string(), String::new())]
+            .into_iter()
+            .collect(),
+    );
+    options.person_properties = Some(
+        vec![("plan".to_string(), json!("pro"))]
+            .into_iter()
+            .collect(),
+    );
+    options.group_properties = Some(
+        vec![(
+            "organization".to_string(),
+            vec![("tier".to_string(), json!("enterprise"))]
+                .into_iter()
+                .collect(),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    options.only_evaluate_locally = only_evaluate_locally;
+    options
+}
+
+fn assert_empty_group_key_results(snapshot: &posthog::FeatureFlagEvaluations) {
+    use posthog::FlagValue;
+    assert_eq!(
+        snapshot.get_flag("org-flag"),
+        Some(FlagValue::Boolean(false))
+    );
+    assert_eq!(snapshot.get_flag("mixed"), Some(FlagValue::Boolean(true)));
+    assert_eq!(
+        snapshot.get_flag("org-child"),
+        Some(FlagValue::Boolean(false))
+    );
+}
+
+fn local_evaluation_client_options(base_url: String) -> posthog::ClientOptions {
+    posthog::ClientOptionsBuilder::default()
+        .api_key("test_api_key".to_string())
+        .host(base_url)
+        .secret_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(3600)
+        .build()
+        .unwrap()
+}
+
+fn mock_known_absent_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200)
+            .json_body(known_absent_definitions_fixture());
+    })
+}
+
+/// `/flags` mock that only matches a body carrying exactly the known-absent
+/// fields in `expected`, or neither field when `expected` is `None`.
+fn mock_flags_with_known_absent(
+    server: &MockServer,
+    expected: Option<(Value, Value)>,
+) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(POST).path("/flags/").is_true(move |request| {
+            let Ok(body) = serde_json::from_slice::<Value>(request.body_ref()) else {
+                return false;
+            };
+            let person = body.get("person_property_keys_known_absent").cloned();
+            let groups = body.get("group_property_keys_known_absent").cloned();
+            match &expected {
+                Some((expected_person, expected_groups)) => {
+                    person.as_ref() == Some(expected_person)
+                        && groups.as_ref() == Some(expected_groups)
+                }
+                None => person.is_none() && groups.is_none(),
+            }
+        });
+        then.status(200).json_body(flags_response_fixture());
+    })
+}
+
+/// `is_not` filters on the listed key `plan` whose condition value is omitted
+/// or JSON null, neither of which the known-absent table may resolve.
+fn mock_known_absent_valueless_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    let flag = |key: &str, property: Value| {
+        json!({
+            "key": key,
+            "active": true,
+            "filters": {"groups": [{"properties": [property], "rollout_percentage": 100}]}
+        })
+    };
+    let definitions = json!({
+        "flags": [
+            flag("plan-is-not-omitted", json!({"key": "plan", "operator": "is_not", "type": "person"})),
+            flag("plan-is-not-null", json!({"key": "plan", "value": null, "operator": "is_not", "type": "person"})),
+            flag("profile-incomplete", json!({"key": "plan", "value": null, "operator": "is_not_set", "type": "person"}))
+        ],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(definitions);
+    })
+}
+
+const VALUELESS_FLAG_KEYS: [&str; 2] = ["plan-is-not-omitted", "plan-is-not-null"];
+
+/// Lists `plan` as known absent; `only_evaluate_locally` also requests
+/// `profile-incomplete`, which the table still resolves.
+fn valueless_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOptions {
+    let mut keys = VALUELESS_FLAG_KEYS.to_vec();
+    if only_evaluate_locally {
+        keys.push("profile-incomplete");
+    }
+    let mut options = known_absent_options(&keys);
+    options.only_evaluate_locally = only_evaluate_locally;
+    options
+}
+
+/// Filters on the listed key `plan` with condition values the SDK can't parse,
+/// compile or port, which the known-absent table resolves without reading, and
+/// operators the SDK doesn't implement locally, which stay inconclusive.
+fn mock_known_absent_unread_value_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    let flag = |key: &str, operator: &str, value: Value| {
+        json!({
+            "key": key,
+            "active": true,
+            "filters": {"groups": [{
+                "properties": [{"key": "plan", "value": value, "operator": operator, "type": "person"}],
+                "rollout_percentage": 100
+            }]}
+        })
+    };
+    let definitions = json!({
+        "flags": [
+            flag("not-regex-invalid", "not_regex", json!("[")),
+            flag("regex-invalid", "regex", json!("[")),
+            flag("not-regex-non-portable", "not_regex", json!("\\p{L}")),
+            flag("gt-not-a-number", "gt", json!("not-a-number")),
+            flag("semver-not-a-version", "semver_gt", json!("not-a-version")),
+            flag("date-not-a-date", "is_date_after", json!("not-a-date")),
+            flag("icontains-multi", "icontains_multi", json!(["pro"])),
+            flag("between", "between", json!([1, 10]))
+        ],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(definitions);
+    })
+}
+
+const UNREAD_VALUE_FLAGS: [(&str, bool); 6] = [
+    ("not-regex-invalid", true),
+    ("regex-invalid", false),
+    ("not-regex-non-portable", true),
+    ("gt-not-a-number", false),
+    ("semver-not-a-version", false),
+    ("date-not-a-date", false),
+];
+
+const UNSUPPORTED_OPERATOR_FLAG_KEYS: [&str; 2] = ["icontains-multi", "between"];
+
+fn unread_value_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOptions {
+    let mut keys: Vec<&str> = UNREAD_VALUE_FLAGS.iter().map(|(key, _)| *key).collect();
+    if only_evaluate_locally {
+        keys.extend(UNSUPPORTED_OPERATOR_FLAG_KEYS);
+    }
+    let mut options = known_absent_options(&keys);
+    options.only_evaluate_locally = only_evaluate_locally;
+    options
+}
+
+/// A flag-level `person_metadata` filter and one in a cohort leaf, both on
+/// `created_at`, which a person listing never resolves.
+fn mock_person_metadata_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    let created_at = json!({"key": "created_at", "value": "2025-01-01", "operator": "is_date_after", "type": "person_metadata"});
+    let definitions = json!({
+        "flags": [
+            {
+                "key": "new-signups",
+                "active": true,
+                "filters": {"groups": [{"properties": [created_at], "rollout_percentage": 100}]}
+            },
+            {
+                "key": "new-signups-cohort",
+                "active": true,
+                "filters": {"groups": [{
+                    "properties": [{"key": "id", "value": 1, "operator": "in", "type": "cohort"}],
+                    "rollout_percentage": 100
+                }]}
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {"1": {"type": "AND", "values": [created_at]}}
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(definitions);
+    })
+}
+
+const PERSON_METADATA_FLAG_KEYS: [&str; 2] = ["new-signups", "new-signups-cohort"];
+
+fn person_metadata_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOptions {
+    let mut options = posthog::EvaluateFlagsOptions::default();
+    options.flag_keys = Some(
+        PERSON_METADATA_FLAG_KEYS
+            .iter()
+            .map(|key| key.to_string())
+            .collect(),
+    );
+    options.person_property_keys_known_absent = Some(vec!["created_at".to_string()]);
+    options.only_evaluate_locally = only_evaluate_locally;
+    options
+}
+
+/// Early-access flags at 0% and 100% rollout, so a result shows whether the
+/// enrollment shortcut or the release conditions decided it.
+fn mock_enrollment_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    let flag = |key: &str, rollout: f64| {
+        json!({
+            "key": key,
+            "active": true,
+            "filters": {
+                "feature_enrollment": true,
+                "groups": [{"properties": [], "rollout_percentage": rollout}]
+            }
+        })
+    };
+    let definitions = json!({
+        "flags": [flag("beta-none", 0.0), flag("beta-all", 100.0)],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(definitions);
+    })
+}
+
+/// `(flag key, enrollment supplied as true, enrollment key listed, local
+/// result)`. A listed enrollment key means not enrolled, so the release
+/// conditions decide; `None` is inconclusive and falls back to `/flags`.
+const ENROLLMENT_CASES: [(&str, bool, bool, Option<bool>); 4] = [
+    ("beta-none", true, true, Some(false)),
+    ("beta-all", false, true, Some(true)),
+    ("beta-none", true, false, Some(true)),
+    ("beta-all", false, false, None),
+];
+
+fn enrollment_options(
+    flag_key: &str,
+    supplied: bool,
+    listed: bool,
+) -> posthog::EvaluateFlagsOptions {
+    let enrollment_key = format!("$feature_enrollment/{flag_key}");
+    let mut options = posthog::EvaluateFlagsOptions::default();
+    options.flag_keys = Some(vec![flag_key.to_string()]);
+    if supplied {
+        options.person_properties = Some(HashMap::from([(enrollment_key.clone(), json!(true))]));
+    }
+    if listed {
+        options.person_property_keys_known_absent = Some(vec![enrollment_key]);
+    }
+    options
+}
+
+fn over_limit_known_absent_options() -> Vec<posthog::EvaluateFlagsOptions> {
+    let too_many: Vec<String> = (0..1001).map(|_| "plan".to_string()).collect();
+    let mut person = posthog::EvaluateFlagsOptions::default();
+    person.person_property_keys_known_absent = Some(too_many.clone());
+    let mut groups = posthog::EvaluateFlagsOptions::default();
+    groups.group_property_keys_known_absent = Some(
+        vec![
+            ("organization".to_string(), vec!["tier".to_string()]),
+            ("project".to_string(), too_many),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    vec![person, groups]
 }
 
 struct FlakyFlagsServer {
@@ -1092,9 +1497,236 @@ mod blocking {
         client.flush();
         capture_mock.assert_calls(1);
     }
-}
 
-// ---------- async ----------
+    #[test]
+    fn known_absent_keys_resolve_locally_without_a_request() {
+        let server = MockServer::start();
+        mock_known_absent_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        let snapshot = client
+            .evaluate_flags("user-1", known_absent_options(&["profile-incomplete"]))
+            .unwrap();
+
+        assert_eq!(
+            snapshot.get_flag("profile-incomplete"),
+            Some(FlagValue::Boolean(true))
+        );
+        flags_mock.assert_calls(0);
+    }
+
+    #[test]
+    fn empty_group_key_resolves_locally_without_a_request() {
+        let server = MockServer::start();
+        mock_empty_group_key_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_path_mock(&server);
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        for only_evaluate_locally in [false, true] {
+            let snapshot = client
+                .evaluate_flags("user-1", empty_group_key_options(only_evaluate_locally))
+                .unwrap();
+            assert_empty_group_key_results(&snapshot);
+
+            let mut event = Event::new("checkout-started", "user-1");
+            event.with_flags(&snapshot);
+            client.capture(event);
+        }
+        client.flush();
+
+        flags_mock.assert_calls(0);
+        assert!(capture_mock.calls() > 0);
+    }
+
+    #[test]
+    fn remote_fallback_sends_known_absent_keys() {
+        let server = MockServer::start();
+        mock_known_absent_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        client
+            .evaluate_flags(
+                "user-1",
+                known_absent_options(&["profile-incomplete", "regional"]),
+            )
+            .unwrap();
+
+        flags_mock.assert_calls(1);
+    }
+
+    #[test]
+    fn remote_request_omits_known_absent_keys_not_provided() {
+        let server = MockServer::start();
+        let flags_mock = mock_flags_with_known_absent(&server, None);
+        let client = create_test_client(server.base_url());
+
+        client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        let mut empty = EvaluateFlagsOptions::default();
+        empty.person_property_keys_known_absent = Some(Vec::new());
+        empty.group_property_keys_known_absent = Some(Default::default());
+        client.evaluate_flags("user-1", empty).unwrap();
+        let mut empty_group = EvaluateFlagsOptions::default();
+        empty_group.group_property_keys_known_absent = Some(std::collections::HashMap::from([(
+            "organization".to_string(),
+            Vec::new(),
+        )]));
+        client.evaluate_flags("user-1", empty_group).unwrap();
+
+        flags_mock.assert_calls(3);
+    }
+
+    #[test]
+    fn over_limit_known_absent_keys_fail_without_a_request() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = create_test_client(server.base_url());
+
+        for options in over_limit_known_absent_options() {
+            for distinct_id in ["user-1", ""] {
+                let error = client.evaluate_flags(distinct_id, options.clone()).err();
+                assert!(
+                    matches!(error, Some(posthog::Error::InvalidArgument(_))),
+                    "{:?}",
+                    error
+                );
+            }
+        }
+        let mut at_limit = EvaluateFlagsOptions::default();
+        at_limit.person_property_keys_known_absent = Some(vec!["plan".to_string(); 1000]);
+        client.evaluate_flags("user-1", at_limit).unwrap();
+
+        flags_mock.assert_calls(1);
+    }
+
+    #[test]
+    fn omitted_or_null_condition_value_on_a_listed_key_stays_inconclusive() {
+        let server = MockServer::start();
+        mock_known_absent_valueless_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        let snapshot = client
+            .evaluate_flags("user-1", valueless_options(true))
+            .unwrap();
+        for key in VALUELESS_FLAG_KEYS {
+            assert_eq!(snapshot.get_flag(key), None, "{key}");
+        }
+        assert_eq!(
+            snapshot.get_flag("profile-incomplete"),
+            Some(FlagValue::Boolean(true))
+        );
+        flags_mock.assert_calls(0);
+
+        client
+            .evaluate_flags("user-1", valueless_options(false))
+            .unwrap();
+        flags_mock.assert_calls(1);
+    }
+
+    #[test]
+    fn listed_key_resolves_without_reading_the_condition_value() {
+        let server = MockServer::start();
+        mock_known_absent_unread_value_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        for only_evaluate_locally in [true, false] {
+            let snapshot = client
+                .evaluate_flags("user-1", unread_value_options(only_evaluate_locally))
+                .unwrap();
+            for (key, expected) in UNREAD_VALUE_FLAGS {
+                assert_eq!(
+                    snapshot.get_flag(key),
+                    Some(FlagValue::Boolean(expected)),
+                    "{key}"
+                );
+            }
+            if only_evaluate_locally {
+                for key in UNSUPPORTED_OPERATOR_FLAG_KEYS {
+                    assert_eq!(snapshot.get_flag(key), None, "{key}");
+                }
+            }
+        }
+        flags_mock.assert_calls(0);
+
+        let mut options = known_absent_options(&UNSUPPORTED_OPERATOR_FLAG_KEYS);
+        options.only_evaluate_locally = false;
+        client.evaluate_flags("user-1", options).unwrap();
+        flags_mock.assert_calls(1);
+    }
+    #[test]
+    fn listed_key_does_not_resolve_a_person_metadata_filter() {
+        let server = MockServer::start();
+        mock_person_metadata_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(json!({"flags": {}}));
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        let snapshot = client
+            .evaluate_flags("user-1", person_metadata_options(true))
+            .unwrap();
+        for key in PERSON_METADATA_FLAG_KEYS {
+            assert_eq!(snapshot.get_flag(key), None, "{key}");
+        }
+        flags_mock.assert_calls(0);
+
+        client
+            .evaluate_flags("user-1", person_metadata_options(false))
+            .unwrap();
+        flags_mock.assert_calls(1);
+    }
+
+    #[test]
+    fn listed_enrollment_key_means_not_enrolled() {
+        let server = MockServer::start();
+        mock_enrollment_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(json!({"flags": {}}));
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        for (key, supplied, listed, expected) in ENROLLMENT_CASES {
+            let calls_before = flags_mock.calls();
+            let snapshot = client
+                .evaluate_flags("user-1", enrollment_options(key, supplied, listed))
+                .unwrap();
+            let case = format!("{key} supplied={supplied} listed={listed}");
+            assert_eq!(
+                snapshot.get_flag(key),
+                expected.map(FlagValue::Boolean),
+                "{case}"
+            );
+            let remote_calls = usize::from(expected.is_none());
+            assert_eq!(flags_mock.calls() - calls_before, remote_calls, "{case}");
+        }
+    }
+}
 
 #[cfg(feature = "async-client")]
 mod async_tests {
@@ -1576,6 +2208,275 @@ mod async_tests {
         client.flush().await;
         capture_mock.assert_calls(1);
     }
+
+    #[tokio::test]
+    async fn known_absent_keys_resolve_locally_without_a_request() {
+        let server = MockServer::start();
+        mock_known_absent_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        let snapshot = client
+            .evaluate_flags("user-1", known_absent_options(&["profile-incomplete"]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot.get_flag("profile-incomplete"),
+            Some(FlagValue::Boolean(true))
+        );
+        flags_mock.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn empty_group_key_resolves_locally_without_a_request() {
+        let server = MockServer::start();
+        mock_empty_group_key_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_path_mock(&server);
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        for only_evaluate_locally in [false, true] {
+            let snapshot = client
+                .evaluate_flags("user-1", empty_group_key_options(only_evaluate_locally))
+                .await
+                .unwrap();
+            assert_empty_group_key_results(&snapshot);
+
+            let mut event = Event::new("checkout-started", "user-1");
+            event.with_flags(&snapshot);
+            client.capture(event);
+        }
+        client.flush().await;
+
+        flags_mock.assert_calls(0);
+        assert!(capture_mock.calls() > 0);
+    }
+
+    #[tokio::test]
+    async fn remote_fallback_sends_known_absent_keys() {
+        let server = MockServer::start();
+        mock_known_absent_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        client
+            .evaluate_flags(
+                "user-1",
+                known_absent_options(&["profile-incomplete", "regional"]),
+            )
+            .await
+            .unwrap();
+
+        flags_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn remote_request_omits_known_absent_keys_not_provided() {
+        let server = MockServer::start();
+        let flags_mock = mock_flags_with_known_absent(&server, None);
+        let client = create_test_client(server.base_url()).await;
+
+        client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        let mut empty = EvaluateFlagsOptions::default();
+        empty.person_property_keys_known_absent = Some(Vec::new());
+        empty.group_property_keys_known_absent = Some(Default::default());
+        client.evaluate_flags("user-1", empty).await.unwrap();
+        let mut empty_group = EvaluateFlagsOptions::default();
+        empty_group.group_property_keys_known_absent = Some(std::collections::HashMap::from([(
+            "organization".to_string(),
+            Vec::new(),
+        )]));
+        client.evaluate_flags("user-1", empty_group).await.unwrap();
+
+        flags_mock.assert_calls(3);
+    }
+
+    #[tokio::test]
+    async fn over_limit_known_absent_keys_fail_without_a_request() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = create_test_client(server.base_url()).await;
+
+        for options in over_limit_known_absent_options() {
+            for distinct_id in ["user-1", ""] {
+                let error = client
+                    .evaluate_flags(distinct_id, options.clone())
+                    .await
+                    .err();
+                assert!(
+                    matches!(error, Some(posthog::Error::InvalidArgument(_))),
+                    "{:?}",
+                    error
+                );
+            }
+        }
+        let mut at_limit = EvaluateFlagsOptions::default();
+        at_limit.person_property_keys_known_absent = Some(vec!["plan".to_string(); 1000]);
+        client.evaluate_flags("user-1", at_limit).await.unwrap();
+
+        flags_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn omitted_or_null_condition_value_on_a_listed_key_stays_inconclusive() {
+        let server = MockServer::start();
+        mock_known_absent_valueless_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        let snapshot = client
+            .evaluate_flags("user-1", valueless_options(true))
+            .await
+            .unwrap();
+        for key in VALUELESS_FLAG_KEYS {
+            assert_eq!(snapshot.get_flag(key), None, "{key}");
+        }
+        assert_eq!(
+            snapshot.get_flag("profile-incomplete"),
+            Some(FlagValue::Boolean(true))
+        );
+        flags_mock.assert_calls(0);
+
+        client
+            .evaluate_flags("user-1", valueless_options(false))
+            .await
+            .unwrap();
+        flags_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn listed_key_resolves_without_reading_the_condition_value() {
+        let server = MockServer::start();
+        mock_known_absent_unread_value_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        for only_evaluate_locally in [true, false] {
+            let snapshot = client
+                .evaluate_flags("user-1", unread_value_options(only_evaluate_locally))
+                .await
+                .unwrap();
+            for (key, expected) in UNREAD_VALUE_FLAGS {
+                assert_eq!(
+                    snapshot.get_flag(key),
+                    Some(FlagValue::Boolean(expected)),
+                    "{key}"
+                );
+            }
+            if only_evaluate_locally {
+                for key in UNSUPPORTED_OPERATOR_FLAG_KEYS {
+                    assert_eq!(snapshot.get_flag(key), None, "{key}");
+                }
+            }
+        }
+        flags_mock.assert_calls(0);
+
+        let mut options = known_absent_options(&UNSUPPORTED_OPERATOR_FLAG_KEYS);
+        options.only_evaluate_locally = false;
+        client.evaluate_flags("user-1", options).await.unwrap();
+        flags_mock.assert_calls(1);
+    }
+    #[tokio::test]
+    async fn listed_key_does_not_resolve_a_person_metadata_filter() {
+        let server = MockServer::start();
+        mock_person_metadata_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(json!({"flags": {}}));
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        let snapshot = client
+            .evaluate_flags("user-1", person_metadata_options(true))
+            .await
+            .unwrap();
+        for key in PERSON_METADATA_FLAG_KEYS {
+            assert_eq!(snapshot.get_flag(key), None, "{key}");
+        }
+        flags_mock.assert_calls(0);
+
+        client
+            .evaluate_flags("user-1", person_metadata_options(false))
+            .await
+            .unwrap();
+        flags_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn listed_enrollment_key_means_not_enrolled() {
+        let server = MockServer::start();
+        mock_enrollment_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(json!({"flags": {}}));
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        for (key, supplied, listed, expected) in ENROLLMENT_CASES {
+            let calls_before = flags_mock.calls();
+            let snapshot = client
+                .evaluate_flags("user-1", enrollment_options(key, supplied, listed))
+                .await
+                .unwrap();
+            let case = format!("{key} supplied={supplied} listed={listed}");
+            assert_eq!(
+                snapshot.get_flag(key),
+                expected.map(FlagValue::Boolean),
+                "{case}"
+            );
+            let remote_calls = usize::from(expected.is_none());
+            assert_eq!(flags_mock.calls() - calls_before, remote_calls, "{case}");
+        }
+    }
+}
+
+#[cfg(not(feature = "async-client"))]
+#[test]
+fn evaluate_flags_with_request_error_returns_invalid_arguments_as_the_error() {
+    let server = MockServer::start();
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(flags_response_fixture());
+    });
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host(server.base_url())
+            .build()
+            .unwrap(),
+    );
+
+    for options in over_limit_known_absent_options() {
+        let result = client.evaluate_flags_with_request_error("user-1", options);
+        assert!(
+            matches!(result, Err(posthog::Error::InvalidArgument(_))),
+            "{:?}",
+            result.map(|(_, request_error)| request_error)
+        );
+    }
+    flags_mock.assert_calls(0);
 }
 
 #[cfg(not(feature = "async-client"))]
@@ -1596,7 +2497,8 @@ fn evaluate_flags_with_request_error_returns_a_snapshot_and_the_error() {
     );
 
     let (flags, error) = client
-        .evaluate_flags_with_request_error("user-1", posthog::EvaluateFlagsOptions::default());
+        .evaluate_flags_with_request_error("user-1", posthog::EvaluateFlagsOptions::default())
+        .unwrap();
     assert!(
         matches!(
             error,

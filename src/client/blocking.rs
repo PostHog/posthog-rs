@@ -27,8 +27,8 @@ use crate::{Error, Event};
 
 use super::capture::ImmediateLane;
 use super::common::{
-    extract_flag_details, http_client_or_disable, report_flags_error, DetailedFlagsResponse,
-    EvaluationState, FlagEventHost,
+    add_known_absent_keys, extract_flag_details, http_client_or_disable, report_flags_error,
+    validate_known_absent_keys, DetailedFlagsResponse, EvaluationState, FlagEventHost,
 };
 use super::remote_config_payload::{
     authorization_header, decode_remote_config_payload, reject_unsendable_key,
@@ -1007,6 +1007,8 @@ impl Client {
     /// Returns [`Error::Connection`] or [`Error::Serialization`] when remote
     /// evaluation is required and the `/flags` request fails before any local
     /// results are available.
+    /// Returns [`Error::InvalidArgument`] when a known-absent key list in
+    /// `options` has more than 1000 keys.
     ///
     /// [`Event::with_flags`]: crate::Event::with_flags
     pub fn evaluate_flags<S: Into<String>>(
@@ -1014,27 +1016,31 @@ impl Client {
         distinct_id: S,
         options: EvaluateFlagsOptions,
     ) -> Result<FeatureFlagEvaluations, Error> {
-        match self.evaluate_flags_with_request_error(distinct_id, options) {
+        match self.evaluate_flags_with_request_error(distinct_id, options)? {
             (flags, Some(error)) if flags.keys().is_empty() => Err(error),
             (flags, _) => Ok(flags),
         }
     }
 
-    /// Like [`Client::evaluate_flags`], but always returns a snapshot, with the
-    /// `/flags` request error alongside it when that request failed. The snapshot
+    /// Like [`Client::evaluate_flags`], but returns a snapshot even when the
+    /// `/flags` request failed, with the request error alongside it. The snapshot
     /// then holds only locally evaluated flags, and its `$feature_flag_called`
     /// events report the failure. For SDKs built on this one, such as the C
     /// bindings. Not part of the supported API.
+    ///
+    /// Returns [`Error::InvalidArgument`] without a snapshot when a known-absent
+    /// key list in `options` has more than 1000 keys.
     #[doc(hidden)]
     pub fn evaluate_flags_with_request_error<S: Into<String>>(
         &self,
         distinct_id: S,
         options: EvaluateFlagsOptions,
-    ) -> (FeatureFlagEvaluations, Option<Error>) {
+    ) -> Result<(FeatureFlagEvaluations, Option<Error>), Error> {
+        validate_known_absent_keys(&options)?;
         let distinct_id: String = distinct_id.into();
         let host = self.flag_event_host();
         if distinct_id.is_empty() || self.options.is_disabled() {
-            return (FeatureFlagEvaluations::empty(host), None);
+            return Ok((FeatureFlagEvaluations::empty(host), None));
         }
 
         if options.flag_keys.as_ref().is_some_and(Vec::is_empty) {
@@ -1049,7 +1055,7 @@ impl Client {
                 false,
                 false,
             );
-            return (flags, None);
+            return Ok((flags, None));
         }
 
         let mut state = EvaluationState::new(distinct_id, options, self.local_evaluator.as_ref());
@@ -1059,7 +1065,7 @@ impl Client {
             request_error = state.record_remote_result(response);
         }
 
-        (state.into_evaluations(host), request_error)
+        Ok((state.into_evaluations(host), request_error))
     }
 
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {
@@ -1163,6 +1169,7 @@ impl Client {
         if let Some(flag_keys) = &options.flag_keys {
             payload["flag_keys_to_evaluate"] = json!(flag_keys);
         }
+        add_known_absent_keys(&mut payload, options);
 
         let response = self.send_feature_flags_request(&flags_endpoint, &payload)?;
 
