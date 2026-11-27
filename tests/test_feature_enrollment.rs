@@ -44,7 +44,7 @@ fn dependent(aggregation: Option<i32>) -> Value {
         "filters": {
             "aggregation_group_type_index": aggregation,
             "groups": [{
-                "properties": [{"key": "$feature/beta-feature", "value": true, "operator": "exact"}],
+                "properties": [{"key": "beta-feature", "type": "flag", "value": true, "operator": "flag_evaluates_to", "dependency_chain": ["beta-feature"]}],
                 "rollout_percentage": 100.0
             }]
         }
@@ -283,19 +283,7 @@ fn a_group_flag_reads_the_persons_enrollment() {
 
 #[test]
 fn a_dependent_flag_reads_the_persons_enrollment() {
-    let in_cohort = json!({
-        "key": "dependent",
-        "active": true,
-        "filters": {"groups": [{
-            "properties": [{"key": "id", "value": 7, "type": "cohort"}],
-            "rollout_percentage": 100.0
-        }]}
-    });
-    let cohorts = json!({"7": {"type": "AND", "values": [
-        {"key": "$feature/beta-feature", "value": true, "operator": "exact"}
-    ]}});
-
-    for dependent in [dependent(None), dependent(Some(0)), in_cohort] {
+    for dependent in [dependent(None), dependent(Some(0))] {
         for (person, expected) in [
             (enrollment(json!(true)), Some(FlagValue::Boolean(true))),
             (enrollment(json!(false)), Some(FlagValue::Boolean(false))),
@@ -306,7 +294,7 @@ fn a_dependent_flag_reads_the_persons_enrollment() {
             assert_eq!(
                 evaluate_in(
                     vec![beta_feature(json!({}), json!({})), dependent.clone()],
-                    cohorts.clone(),
+                    json!({}),
                     "dependent",
                     &person,
                     Some(group),

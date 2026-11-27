@@ -148,7 +148,7 @@ fn property_matching_version_reaches_groups_recursive_cohorts_and_dependencies()
         }));
         response["flags"].as_array_mut().unwrap().push(json!({
             "key": "dependency", "active": true, "filters": {"groups": [{"properties": [
-                {"key": "$feature/group", "value": true, "operator": "exact"}
+                {"key": "group", "type": "flag", "value": true, "operator": "flag_evaluates_to", "dependency_chain": ["group"]}
             ]}]}
         }));
         response["group_type_mapping"] = json!({"0": "company"});
