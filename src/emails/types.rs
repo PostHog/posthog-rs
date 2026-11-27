@@ -106,6 +106,7 @@ pub struct CodeEmail {
     pub(crate) sensitive: Option<bool>,
     pub(crate) tracking: Option<EmailTracking>,
     pub(crate) capture_engagement: Option<bool>,
+    pub(crate) category: Option<String>,
     pub(crate) options: SendOptions,
 }
 
@@ -134,6 +135,7 @@ impl CodeEmail {
             sensitive: None,
             tracking: None,
             capture_engagement: None,
+            category: None,
             options: SendOptions::default(),
         }
     }
@@ -239,6 +241,34 @@ impl CodeEmail {
     #[deprecated(note = "use `tracking` with `EmailTrackingOptions::engagement` instead")]
     pub fn capture_engagement(mut self, capture: bool) -> Self {
         self.capture_engagement = Some(capture);
+        self
+    }
+
+    /// The key of one of the project's message categories, such as
+    /// `"newsletter"`. A marketing category skips recipients who opted out of
+    /// it or of all marketing email, fills `{{ unsubscribe_url }}` with the
+    /// recipient's preferences link, and adds List-Unsubscribe headers. A
+    /// marketing email can't have `cc` or `bcc`.
+    ///
+    /// PostHog refuses the send with:
+    ///
+    /// - `category_not_found` when the project has no category with this key,
+    /// - `marketing_copies_unsupported` when a marketing email has `cc` or
+    ///   `bcc`,
+    /// - `sandbox_fields_unsupported` when the project has no verified sending
+    ///   domain, so a marketing email would go out from the PostHog test
+    ///   sender,
+    /// - `workflow_can_wait` when a marketing email has attachments.
+    ///
+    /// ```
+    /// use posthog::CodeEmail;
+    ///
+    /// let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in review")
+    ///     .html(r#"<p>What's new.</p><p><a href="{{ unsubscribe_url }}">Unsubscribe</a></p>"#)
+    ///     .category("newsletter");
+    /// ```
+    pub fn category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
         self
     }
 

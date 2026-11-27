@@ -96,6 +96,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
                 .reply_to("help@example.com")
                 .reply_to("support@example.com")
                 .tracking(EmailTrackingOptions::new().clicks(true).engagement(false))
+                .category("account-security")
                 .distinct_id("user_123")
                 .idempotency_key("password-reset:user_123"),
         )
@@ -114,6 +115,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
             "from": "Acme <security@example.com>",
             "reply_to": ["help@example.com", "support@example.com"],
             "tracking": {"clicks": true, "engagement": false},
+            "category": "account-security",
             "distinct_id": "user_123",
             "to": "user@example.com",
         })

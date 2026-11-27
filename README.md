@@ -156,6 +156,14 @@ engagement events and keeps its content out of logs. Call
 PostHog counts its clicks too. `.tracking()` sets what PostHog tracks, whatever
 the email's sensitivity.
 
+A code send takes `.category()`, the key of one of the project's message
+categories, such as `newsletter`. A marketing category skips recipients who
+opted out of it or of all marketing email, fills `{{ unsubscribe_url }}` with
+the recipient's preferences link, and adds List-Unsubscribe headers. A marketing
+email can't have `cc` or `bcc`. PostHog refuses a key with no category as
+`category_not_found`, and copies on a marketing email as
+`marketing_copies_unsupported`.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and test instructions.

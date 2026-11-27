@@ -65,7 +65,8 @@ fn code_send_posts_the_rendered_content() {
         .send(
             CodeEmail::new("user@example.com", "password-reset", "Reset your password")
                 .html("<p>Reset</p>")
-                .from("Acme <security@example.com>"),
+                .from("Acme <security@example.com>")
+                .category("account-security"),
         )
         .unwrap();
 
@@ -76,6 +77,7 @@ fn code_send_posts_the_rendered_content() {
             "subject": "Reset your password",
             "html": "<p>Reset</p>",
             "from": "Acme <security@example.com>",
+            "category": "account-security",
             "to": "user@example.com",
         })
     );

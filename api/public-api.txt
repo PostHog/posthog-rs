@@ -425,6 +425,7 @@ impl posthog::CodeEmail
 pub fn posthog::CodeEmail::attachment(self, posthog::EmailAttachment) -> Self
 pub fn posthog::CodeEmail::bcc(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::capture_engagement(self, bool) -> Self
+pub fn posthog::CodeEmail::category(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::cc(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::from(self, impl core::convert::Into<alloc::string::String>) -> Self
